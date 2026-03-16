@@ -9,13 +9,14 @@ pub use upgrade::*;
 use std::{
     cell::UnsafeCell,
     io::IoSlice,
+    mem::MaybeUninit,
     pin::Pin,
     str::FromStr,
     task::{Context, Poll},
 };
 
 use async_channel::Receiver;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use futures_util::stream::Stream;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
 use http_body::Body;
@@ -90,9 +91,13 @@ where
         let mut remaining = content_length;
         while remaining > 0 {
             // Safety: u8 is a primitive type, so we can safely assume initialization
-            let mut buf: Box<[u8]> =
-                unsafe { Box::new_uninit_slice(remaining.min(16384) as usize).assume_init() };
-            let n = self.read_with_leftover(&mut buf).await?;
+            let mut buf = unsafe {
+                #[allow(invalid_value)]
+                #[allow(clippy::uninit_assumed_init)]
+                MaybeUninit::<[u8; 16384]>::uninit().assume_init()
+            };
+            let to_read_ln = remaining.min(16384) as usize;
+            let n = self.read_with_leftover(&mut buf[..to_read_ln]).await?;
             if n == 0 {
                 break;
             }
@@ -113,7 +118,11 @@ where
     ) -> Result<bytes::Bytes, std::io::Error> {
         let len = {
             // Safety: u8 is a primitive type, so we can safely assume initialization
-            let mut len_buf: Box<[u8]> = unsafe { Box::new_uninit_slice(48).assume_init() };
+            let mut len_buf = unsafe {
+                #[allow(invalid_value)]
+                #[allow(clippy::uninit_assumed_init)]
+                MaybeUninit::<[u8; 48]>::uninit().assume_init()
+            };
             let mut len_buf_pos = 0;
             loop {
                 if len_buf_pos >= len_buf.len() {
@@ -181,8 +190,7 @@ where
             unsafe { Box::new_uninit_slice(self.options.max_header_size).assume_init() };
         let mut bytes_read: usize = 0;
         loop {
-            let mut temp_buf = [0u8; 4096];
-            let n = self.read_with_leftover(&mut temp_buf).await?;
+            let n = self.read_with_leftover(&mut buf[bytes_read..]).await?;
             if n == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -190,8 +198,6 @@ where
                 ));
             }
             let begin_search = bytes_read.saturating_sub(3);
-            buf[bytes_read..(bytes_read + n).min(self.options.max_header_size)]
-                .copy_from_slice(&temp_buf[..n]);
             bytes_read = (bytes_read + n).min(self.options.max_header_size);
 
             if bytes_read > 2 && buf[0] == b'\r' && buf[1] == b'\n' {
@@ -287,14 +293,15 @@ where
         ),
         std::io::Error,
     > {
-        let (head_buf, to_parse_length) = self.get_head().await?;
+        let (mut head_buf, to_parse_length) = self.get_head().await?;
 
         // Parse HTTP request using httparse
         let mut headers =
             vec![httparse::EMPTY_HEADER; self.options.max_header_count].into_boxed_slice();
         let mut req = httparse::Request::new(&mut headers);
+        let leftover_to_add = head_buf.split_off(to_parse_length);
         let status = req
-            .parse(&head_buf[..to_parse_length])
+            .parse(&head_buf)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if status.is_partial() {
             return Err(std::io::Error::new(
@@ -302,12 +309,10 @@ where
                 "partial request head",
             ));
         }
-        let leftover_to_add = bytes::Bytes::from(head_buf[to_parse_length..].to_vec());
         if let Some(leftover) = self.leftover.take() {
-            let mut new_leftover = Vec::new();
-            new_leftover.extend(leftover_to_add);
+            let mut new_leftover = BytesMut::from(leftover_to_add);
             new_leftover.extend(leftover);
-            self.leftover = Some(bytes::Bytes::from(new_leftover));
+            self.leftover = Some(new_leftover.freeze());
         } else {
             self.leftover = Some(leftover_to_add);
         }
@@ -354,8 +359,7 @@ where
         let mut bytes_read: usize = 0;
         let mut whitespace_trimmed = None;
         loop {
-            let mut temp_buf = [0u8; 4096];
-            let n = self.read_with_leftover(&mut temp_buf).await?;
+            let n = self.read_with_leftover(&mut buf[bytes_read..]).await?;
             if n == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -363,8 +367,6 @@ where
                 ));
             }
             let begin_search = bytes_read.saturating_sub(3);
-            buf[bytes_read..(bytes_read + n).min(self.options.max_header_size)]
-                .copy_from_slice(&temp_buf[..n]);
             bytes_read = (bytes_read + n).min(self.options.max_header_size);
 
             if whitespace_trimmed.is_none() {
@@ -621,13 +623,13 @@ where
                                     .map_err(|e| std::io::Error::other(e.to_string()))?;
                                 head_written = true;
                             } else if chunked {
-                                let chunked_data = Vec::new();
-                                head.extend_from_slice(
+                                let mut chunked_data = Vec::new();
+                                chunked_data.extend_from_slice(
                                     format!("{:X}", data.len()).to_string().as_bytes(),
                                 );
-                                head.extend_from_slice(b"\r\n");
-                                head.extend(data);
-                                head.extend_from_slice(b"\r\n");
+                                chunked_data.extend_from_slice(b"\r\n");
+                                chunked_data.extend(data);
+                                chunked_data.extend_from_slice(b"\r\n");
                                 write_queue_tx
                                     .send(Bytes::from_owner(chunked_data))
                                     .await
@@ -780,7 +782,7 @@ where
     #[inline]
     fn handle_with_error_fn<F, Fut, ResB, ResBE, ResE, EF, EFut, EResB, EResBE, EResE>(
         mut self,
-        mut request_fn: F,
+        request_fn: F,
         error_fn: EF,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
