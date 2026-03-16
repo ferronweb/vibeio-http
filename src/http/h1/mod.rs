@@ -280,6 +280,11 @@ where
                 header::TRANSFER_ENCODING,
                 HeaderValue::from_static("chunked"),
             );
+            while response
+                .headers_mut()
+                .remove(header::CONTENT_LENGTH)
+                .is_some()
+            {}
         }
 
         let mut head = Vec::new();
@@ -352,7 +357,7 @@ where
             if chunked {
                 // Terminating chunk
                 write_queue_tx
-                    .send(Bytes::from_static(b"0\r\n\r\n"))
+                    .send(Bytes::from_static(b"0\r\n"))
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
             }
