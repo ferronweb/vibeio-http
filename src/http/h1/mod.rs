@@ -39,7 +39,7 @@ use std::{
 
 use async_channel::Receiver;
 use futures_util::stream::Stream;
-use http::{HeaderName, HeaderValue, Method, Request, Response, Uri};
+use http::{HeaderName, HeaderValue, Method, Request, Response, Uri, header};
 use http_body::Body;
 use http_body_util::BodyExt;
 use memchr::memchr2;
@@ -66,23 +66,20 @@ where
     async fn read_body_fn(
         &mut self,
         body_tx: &async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+        content_length: usize,
     ) -> Result<(), std::io::Error> {
-        loop {
-            let mut buf: Box<[u8]> = Box::new([0u8; 16384]);
+        let mut remaining = content_length;
+        while remaining > 0 {
+            let mut buf: Box<[u8]> = vec![0u8; remaining.min(16384)].into_boxed_slice();
             let n = self.io.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
             let mut chunk = bytes::Bytes::from_owner(buf);
             chunk.truncate(n);
+            remaining -= n;
 
-            if body_tx
-                .send(Ok(http_body::Frame::data(chunk)))
-                .await
-                .is_err()
-            {
-                break;
-            }
+            let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
         Ok(())
     }
@@ -205,28 +202,39 @@ where
             // TODO: 400 Bad Request fn
             let (request, body_tx) = self.read_request().await?;
 
-            // Get HTTP response
-            let read_body_fut = Box::pin(async {
-                self.read_body_fn(&body_tx).await?;
-                futures_util::future::pending::<Result<(), std::io::Error>>().await
-            });
-            let request_fut = Box::pin(async {
-                let res = request_fn(request).await;
-                Some(res)
-            });
-            let mut select_either = futures_util::future::select(request_fut, read_body_fut).await;
+            // Content-Length header
+            let content_length = request
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
 
-            let mut response = match select_either {
-                futures_util::future::Either::Left((ref mut response, _)) => response
-                    .take()
-                    .ok_or_else(|| std::io::Error::other("request failed"))?,
-                futures_util::future::Either::Right((result, _)) => {
-                    result?;
-                    return Err(std::io::Error::other("body read failed"));
+            // Get HTTP response
+            let mut response = {
+                let read_body_fut = Box::pin(self.read_body_fn(&body_tx, content_length));
+                let request_fut = Box::pin(request_fn(request));
+                let select_either = futures_util::future::select(request_fut, read_body_fut).await;
+
+                let (response, body_fut) = match select_either {
+                    futures_util::future::Either::Left((response, read_body_fut)) => {
+                        (response, Some(read_body_fut))
+                    }
+                    futures_util::future::Either::Right((result, request_fut)) => {
+                        if let Err(e) = result {
+                            return Err(e);
+                        }
+                        (request_fut.await, None)
+                    }
+                };
+
+                // Drain away remaining body
+                if let Some(body_fut) = body_fut {
+                    body_fut.await?;
                 }
-            }
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-            drop(select_either);
+
+                response.map_err(|e| std::io::Error::other(e.to_string()))?
+            };
 
             // Write response to IO
             let mut head = Vec::new();
