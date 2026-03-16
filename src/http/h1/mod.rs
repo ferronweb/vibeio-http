@@ -44,7 +44,7 @@ use futures_util::stream::Stream;
 use http::{HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
 use http_body::Body;
 use http_body_util::{BodyExt, Empty};
-use memchr::memchr2;
+use memchr::{memchr2, memchr3_iter};
 use smallvec::SmallVec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -150,8 +150,10 @@ where
 
     #[inline]
     async fn get_head(&mut self) -> Result<(bytes::Bytes, usize), std::io::Error> {
+        let mut request_line_read = false;
         let mut buf: Box<[u8]> = vec![0u8; self.options.max_header_size].into_boxed_slice();
         let mut bytes_read: usize = 0;
+        let mut whitespace_trimmed = None;
         loop {
             let mut temp_buf = [0u8; 4096];
             let n = self.io.read(&mut temp_buf).await?;
@@ -163,13 +165,58 @@ where
                 .copy_from_slice(&temp_buf[..n]);
             bytes_read = (bytes_read + n).min(self.options.max_header_size);
 
-            if let Some((separator_index, separator_len)) =
-                search_header_body_separator(&buf[begin_search..])
-            {
-                let to_parse_length = begin_search + separator_index + separator_len;
-                let mut buf_ro = bytes::Bytes::from_owner(buf);
-                buf_ro.truncate(bytes_read);
-                return Ok((buf_ro, to_parse_length));
+            if whitespace_trimmed.is_none() {
+                whitespace_trimmed = buf[..bytes_read]
+                    .iter()
+                    .position(|b| !b.is_ascii_whitespace());
+            }
+
+            if let Some(whitespace_trimmed) = whitespace_trimmed {
+                // Validate first line (request line) before checking for header/body separator
+                if !request_line_read {
+                    let memchr =
+                        memchr3_iter(b' ', b'\r', b'\n', &buf[whitespace_trimmed..bytes_read]);
+                    let mut spaces = 0;
+                    for separator_index in memchr {
+                        if buf[whitespace_trimmed + separator_index] == b' ' {
+                            if spaces >= 2 {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "bad request first line",
+                                ));
+                            }
+                            spaces += 1;
+                        } else if spaces == 2 {
+                            request_line_read = true;
+                            break;
+                        } else {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "bad request first line",
+                            ));
+                        }
+                    }
+                }
+
+                if request_line_read {
+                    let begin_search = begin_search.max(whitespace_trimmed);
+                    if let Some((separator_index, separator_len)) =
+                        search_header_body_separator(&buf[begin_search..bytes_read])
+                    {
+                        let to_parse_length =
+                            begin_search + separator_index + separator_len - whitespace_trimmed;
+                        let mut buf_ro = bytes::Bytes::from_owner(buf);
+                        buf_ro.truncate(bytes_read);
+                        return Ok((
+                            if whitespace_trimmed > 0 {
+                                buf_ro.split_off(whitespace_trimmed)
+                            } else {
+                                buf_ro
+                            },
+                            to_parse_length,
+                        ));
+                    }
+                }
             }
 
             if bytes_read >= self.options.max_header_size {
