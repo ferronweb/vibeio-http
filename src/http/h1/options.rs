@@ -4,6 +4,7 @@ pub struct Http1Options {
     pub(crate) max_header_count: usize,
     pub(crate) send_date_header: bool,
     pub(crate) header_read_timeout: Option<std::time::Duration>,
+    pub(crate) send_continue_response: bool,
 }
 
 impl Http1Options {
@@ -14,6 +15,7 @@ impl Http1Options {
             max_header_count: 128,
             send_date_header: true,
             header_read_timeout: Some(std::time::Duration::from_secs(30)),
+            send_continue_response: true,
         }
     }
 
@@ -34,6 +36,11 @@ impl Http1Options {
 
     pub fn header_read_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.header_read_timeout = timeout;
+        self
+    }
+
+    pub fn send_continue_response(mut self, send: bool) -> Self {
+        self.send_continue_response = send;
         self
     }
 }

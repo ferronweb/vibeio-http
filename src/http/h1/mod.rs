@@ -476,6 +476,19 @@ where
 
         Ok(())
     }
+
+    #[inline]
+    async fn write_100_continue(&mut self, version: Version) -> Result<(), std::io::Error> {
+        let mut head = Vec::new();
+        if version == Version::HTTP_10 {
+            head.extend_from_slice(b"HTTP/1.0 100 Continue\r\n\r\n");
+        } else {
+            head.extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
+        }
+        self.io.write_all(&head).await?;
+
+        Ok(())
+    }
 }
 
 impl<Io> HttpProtocol for Http1<Io>
@@ -554,6 +567,18 @@ where
                     && (is_connection_keep_alive || request.version() == http::Version::HTTP_11);
 
                 let version = request.version();
+
+                // 100 Continue
+                if self.options.send_continue_response {
+                    let is_100_continue = request
+                        .headers()
+                        .get(header::EXPECT)
+                        .and_then(|v| v.to_str().ok())
+                        .map_or(false, |v| v.eq_ignore_ascii_case("100-continue"));
+                    if is_100_continue {
+                        self.write_100_continue(version).await?;
+                    }
+                }
 
                 // Content-Length header
                 let content_length = request
