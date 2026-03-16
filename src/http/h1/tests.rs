@@ -232,3 +232,34 @@ async fn test_chunked_response() {
 
     server_task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn test_chunked_request() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+
+    let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
+    let server_task = tokio::spawn(server.handle(|req| async {
+        let body = req.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&*body, b"Hello, World!");
+        Ok::<_, http::Error>(http::Response::new(Full::new(bytes::Bytes::from_static(
+            b"",
+        ))))
+    }));
+
+    let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+
+    // Write a POST request
+    client_writer
+        .write_all(b"POST / HTTP/1.0\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nD\r\nHello, World!\r\n0\r\n\r\n")
+        .await
+        .unwrap();
+
+    // Read the response
+    let mut response_buf = Vec::new();
+    client_reader.read_to_end(&mut response_buf).await.unwrap();
+
+    // Assert the response
+    assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
+
+    server_task.await.unwrap().unwrap();
+}

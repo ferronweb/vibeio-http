@@ -16,7 +16,7 @@ use futures_util::stream::Stream;
 use http::{HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
 use http_body::Body;
 use http_body_util::{BodyExt, Empty};
-use memchr::{memchr2, memchr3_iter};
+use memchr::{memchr2, memchr3_iter, memmem};
 use smallvec::SmallVec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -46,7 +46,7 @@ where
         if let Some(leftover) = &mut self.leftover {
             let len = leftover.remaining().min(buf.len());
             if len != 0 {
-                leftover.copy_to_slice(buf);
+                leftover.copy_to_slice(&mut buf[..len]);
             }
             if !leftover.has_remaining() {
                 self.leftover = None;
@@ -74,6 +74,79 @@ where
             let mut chunk = bytes::Bytes::from_owner(buf);
             chunk.truncate(n);
             remaining -= n as u64;
+
+            let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
+        }
+        body_tx.close(); // Close the body_tx channel to signal EOF
+        Ok(())
+    }
+
+    #[inline]
+    async fn read_body_chunk(&mut self) -> Result<bytes::Bytes, std::io::Error> {
+        let len = {
+            let mut len_buf: Box<[u8]> = vec![0u8; 48].into_boxed_slice();
+            let mut len_buf_pos = 0;
+            loop {
+                if len_buf_pos >= len_buf.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "chunk length buffer overflow",
+                    ));
+                }
+                let n = self.read_with_leftover(&mut len_buf[len_buf_pos..]).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF",
+                    ));
+                }
+                len_buf_pos += n;
+                if let Some(pos) = memmem::find(&len_buf[..len_buf_pos], b"\r\n") {
+                    let numbers = std::str::from_utf8(&len_buf[..pos]).map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk length")
+                    })?;
+                    let len = usize::from_str_radix(numbers, 16).map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk length")
+                    })?;
+                    // Ignore the trailing CRLF
+                    if let Some(leftover) = self.leftover.take() {
+                        let mut new_leftover = Vec::new();
+                        new_leftover.extend_from_slice(&len_buf[pos + 2..]);
+                        new_leftover.extend(leftover);
+                        self.leftover = Some(bytes::Bytes::from(new_leftover));
+                    } else {
+                        let mut leftover = Bytes::from_owner(len_buf);
+                        leftover.advance(pos + 2);
+                        self.leftover = Some(leftover);
+                    }
+                    break len;
+                }
+                let mut chunk = bytes::Bytes::from_owner(len_buf);
+                chunk.truncate(n);
+                return Ok(chunk);
+            }
+        };
+        let mut chunk = vec![0u8; len + 2];
+        let mut read = 0;
+        // + 2, because we need to read the trailing CRLF
+        while read < len + 2 {
+            let n = self.read_with_leftover(&mut chunk[read..]).await?;
+            read += n;
+        }
+        chunk.truncate(len);
+        Ok(bytes::Bytes::from(chunk))
+    }
+
+    #[inline]
+    async fn read_chunked_body_fn(
+        &mut self,
+        body_tx: &async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+    ) -> Result<(), std::io::Error> {
+        loop {
+            let chunk = self.read_body_chunk().await?;
+            if chunk.is_empty() {
+                break;
+            }
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
@@ -357,7 +430,7 @@ where
             if chunked {
                 // Terminating chunk
                 write_queue_tx
-                    .send(Bytes::from_static(b"0\r\n"))
+                    .send(Bytes::from_static(b"0\r\n\r\n"))
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
             }
@@ -489,10 +562,24 @@ where
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(0);
+                let chunked = request
+                    .headers()
+                    .get(header::TRANSFER_ENCODING)
+                    .and_then(|v| v.to_str().ok())
+                    .map_or(false, |v| {
+                        v.split(',')
+                            .any(|v| v.trim().eq_ignore_ascii_case("chunked"))
+                    });
 
                 // Get HTTP response
                 let mut response = {
-                    let read_body_fut = Box::pin(self.read_body_fn(&body_tx, content_length));
+                    let read_body_fut = Box::pin(async {
+                        if chunked {
+                            self.read_chunked_body_fn(&body_tx).await
+                        } else {
+                            self.read_body_fn(&body_tx, content_length).await
+                        }
+                    });
                     let request_fut = Box::pin(request_fn(request));
                     let select_either =
                         futures_util::future::select(request_fut, read_body_fut).await;
