@@ -223,12 +223,23 @@ where
             head.extend_from_slice(b"\r\n");
         }
         head.extend_from_slice(b"\r\n");
-        self.io.write_all(&head).await?;
+        let mut head_written = false;
         while let Some(chunk) = response.body_mut().frame().await {
             let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
             if let Ok(data) = chunk.into_data() {
-                self.io.write_all(data.as_ref()).await?;
+                if !head_written {
+                    // Write head with first chunk at once
+                    let mut head = head.split_off(0);
+                    head.extend(data);
+                    self.io.write_all(&head).await?;
+                    head_written = true;
+                } else {
+                    self.io.write_all(data.as_ref()).await?;
+                }
             }
+        }
+        if !head_written {
+            self.io.write_all(&head).await?;
         }
 
         Ok(())
