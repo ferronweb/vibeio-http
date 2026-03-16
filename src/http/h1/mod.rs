@@ -179,6 +179,35 @@ where
             "request too large",
         ))
     }
+
+    #[inline]
+    async fn write_response(
+        &mut self,
+        mut response: Response<
+            impl Body<Data = bytes::Bytes, Error = impl std::error::Error> + Unpin,
+        >,
+    ) -> Result<(), std::io::Error> {
+        let mut head = Vec::new();
+        head.extend_from_slice(b"HTTP/1.1 ");
+        head.extend_from_slice(response.status().as_str().as_bytes());
+        head.extend_from_slice(b"\r\n");
+        for (name, value) in response.headers() {
+            head.extend_from_slice(name.as_str().as_bytes());
+            head.extend_from_slice(b": ");
+            head.extend_from_slice(value.as_bytes());
+            head.extend_from_slice(b"\r\n");
+        }
+        head.extend_from_slice(b"\r\n");
+        self.io.write_all(&head).await?;
+        while let Some(chunk) = response.body_mut().frame().await {
+            let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
+            if let Ok(data) = chunk.into_data() {
+                self.io.write_all(data.as_ref()).await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<Io> HttpProtocol for Http1<Io>
@@ -211,7 +240,7 @@ where
                 .unwrap_or(0);
 
             // Get HTTP response
-            let mut response = {
+            let response = {
                 let read_body_fut = Box::pin(self.read_body_fn(&body_tx, content_length));
                 let request_fut = Box::pin(request_fn(request));
                 let select_either = futures_util::future::select(request_fut, read_body_fut).await;
@@ -237,24 +266,7 @@ where
             };
 
             // Write response to IO
-            let mut head = Vec::new();
-            head.extend_from_slice(b"HTTP/1.1 ");
-            head.extend_from_slice(response.status().as_str().as_bytes());
-            head.extend_from_slice(b"\r\n");
-            for (name, value) in response.headers() {
-                head.extend_from_slice(name.as_str().as_bytes());
-                head.extend_from_slice(b": ");
-                head.extend_from_slice(value.as_bytes());
-                head.extend_from_slice(b"\r\n");
-            }
-            head.extend_from_slice(b"\r\n");
-            self.io.write_all(&head).await?;
-            while let Some(chunk) = response.body_mut().frame().await {
-                let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
-                if let Ok(data) = chunk.into_data() {
-                    self.io.write_all(data.as_ref()).await?;
-                }
-            }
+            self.write_response(response).await?;
 
             Ok(())
         }
