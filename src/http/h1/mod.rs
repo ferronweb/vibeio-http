@@ -208,6 +208,15 @@ where
         >,
         version: Version,
     ) -> Result<(), std::io::Error> {
+        // Date header
+        if self.options.send_date_header {
+            response.headers_mut().insert(
+                header::DATE,
+                HeaderValue::from_str(&httpdate::fmt_http_date(std::time::SystemTime::now()))
+                    .map_err(|e| std::io::Error::other(e.to_string()))?,
+            );
+        }
+
         // If the body has a size hint, set the Content-Length header if it's not already set
         if let Some(suggested_content_length) = response.body().size_hint().exact() {
             let headers = response.headers_mut();
@@ -358,16 +367,6 @@ where
                                     .headers_mut()
                                     .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-                                if self.options.send_date_header {
-                                    response.headers_mut().insert(
-                                        header::DATE,
-                                        HeaderValue::from_str(&httpdate::fmt_http_date(
-                                            std::time::SystemTime::now(),
-                                        ))
-                                        .map_err(|e| std::io::Error::other(e.to_string()))?,
-                                    );
-                                }
-
                                 let _ = self.write_response(response, Version::HTTP_11).await;
                             }
                             return Err(e);
@@ -378,16 +377,6 @@ where
                                 response
                                     .headers_mut()
                                     .insert(header::CONNECTION, HeaderValue::from_static("close"));
-
-                                if self.options.send_date_header {
-                                    response.headers_mut().insert(
-                                        header::DATE,
-                                        HeaderValue::from_str(&httpdate::fmt_http_date(
-                                            std::time::SystemTime::now(),
-                                        ))
-                                        .map_err(|e| std::io::Error::other(e.to_string()))?,
-                                    );
-                                }
 
                                 let _ = self.write_response(response, Version::HTTP_11).await;
                             }
@@ -457,16 +446,6 @@ where
                     response
                         .headers_mut()
                         .insert(header::CONNECTION, HeaderValue::from_static("close"));
-                }
-
-                if self.options.send_date_header {
-                    response.headers_mut().insert(
-                        header::DATE,
-                        HeaderValue::from_str(&httpdate::fmt_http_date(
-                            std::time::SystemTime::now(),
-                        ))
-                        .map_err(|e| std::io::Error::other(e.to_string()))?,
-                    );
                 }
 
                 // Write response to IO
