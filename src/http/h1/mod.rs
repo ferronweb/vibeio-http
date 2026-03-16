@@ -157,11 +157,9 @@ where
                 .copy_from_slice(&temp_buf[..n]);
             bytes_read = (bytes_read + n).min(self.options.max_header_size);
 
-            if bytes_read > 2 {
-                if buf[0] == b'\r' && buf[1] == b'\n' {
-                    // No trailers, return None
-                    return Ok(None);
-                }
+            if bytes_read > 2 && buf[0] == b'\r' && buf[1] == b'\n' {
+                // No trailers, return None
+                return Ok(None);
             }
 
             if let Some(separator_index) = memmem::find(&buf[begin_search..bytes_read], b"\r\n\r\n")
@@ -416,15 +414,7 @@ where
         if let Some(suggested_content_length) = response.body().size_hint().exact() {
             let headers = response.headers_mut();
             if !headers.contains_key(header::CONTENT_LENGTH) {
-                headers.insert(
-                    header::CONTENT_LENGTH,
-                    suggested_content_length.try_into().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "invalid content length",
-                        )
-                    })?,
-                );
+                headers.insert(header::CONTENT_LENGTH, suggested_content_length.into());
             }
         }
 
@@ -432,17 +422,17 @@ where
             .headers()
             .get(header::TRANSFER_ENCODING)
             .map(|v| {
-                v.to_str().ok().map_or(false, |s| {
+                v.to_str().ok().is_some_and(|s| {
                     s.split(',')
                         .any(|s| s.trim().eq_ignore_ascii_case("chunked"))
                 })
             })
             .unwrap_or_else(|| {
-                !response
+                response
                     .headers()
                     .get(header::CONTENT_LENGTH)
                     .and_then(|v| v.to_str().ok())
-                    .map_or(false, |s| s.parse::<u64>().is_ok())
+                    .is_none_or(|s| s.parse::<u64>().is_err())
             });
 
         if chunked {
@@ -706,7 +696,7 @@ where
                         .headers()
                         .get(header::EXPECT)
                         .and_then(|v| v.to_str().ok())
-                        .map_or(false, |v| v.eq_ignore_ascii_case("100-continue"));
+                        .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
                     if is_100_continue {
                         self.write_100_continue(version).await?;
                     }
@@ -723,14 +713,14 @@ where
                     .headers()
                     .get(header::TRANSFER_ENCODING)
                     .and_then(|v| v.to_str().ok())
-                    .map_or(false, |v| {
+                    .is_some_and(|v| {
                         v.split(',')
                             .any(|v| v.trim().eq_ignore_ascii_case("chunked"))
                     });
                 let has_trailers = request
                     .headers()
                     .get(header::TRAILER)
-                    .map(|v| v.to_str().ok().map_or(false, |s| !s.is_empty()))
+                    .map(|v| v.to_str().ok().is_some_and(|s| !s.is_empty()))
                     .unwrap_or(false);
                 let write_trailers = request
                     .headers()
@@ -760,9 +750,7 @@ where
                             (response, Some(read_body_fut))
                         }
                         futures_util::future::Either::Right((result, request_fut)) => {
-                            if let Err(e) = result {
-                                return Err(e);
-                            }
+                            result?;
                             (request_fut.await, None)
                         }
                     };
@@ -811,7 +799,7 @@ where
             } else {
                 response = response.status(http::StatusCode::BAD_REQUEST);
             }
-            Ok::<_, http::Error>(response.body(Empty::new())?)
+            response.body(Empty::new())
         })
     }
 }
