@@ -373,15 +373,59 @@ where
 
         async move {
             while keep_alive {
-                let (request, body_tx) = match self.read_request().await {
-                    Ok((request, body_tx)) => (request, body_tx),
-                    Err(e) => {
-                        if let Ok(response) = error_fn(false).await {
-                            let _ = self.write_response(response, Version::HTTP_11).await;
+                let (request, body_tx) =
+                    match if let Some(timeout) = self.options.header_read_timeout {
+                        vibeio::time::timeout(timeout, self.read_request()).await
+                    } else {
+                        Ok(self.read_request().await)
+                    } {
+                        Ok(Ok((request, body_tx))) => (request, body_tx),
+                        Ok(Err(e)) => {
+                            // Parse error
+                            if let Ok(mut response) = error_fn(false).await {
+                                response
+                                    .headers_mut()
+                                    .insert(header::CONNECTION, HeaderValue::from_static("close"));
+
+                                if self.options.send_date_header {
+                                    response.headers_mut().insert(
+                                        header::DATE,
+                                        HeaderValue::from_str(&httpdate::fmt_http_date(
+                                            std::time::SystemTime::now(),
+                                        ))
+                                        .map_err(|e| std::io::Error::other(e.to_string()))?,
+                                    );
+                                }
+
+                                let _ = self.write_response(response, Version::HTTP_11).await;
+                            }
+                            return Err(e);
                         }
-                        return Err(e);
-                    }
-                };
+                        Err(_) => {
+                            // Timeout error
+                            if let Ok(mut response) = error_fn(true).await {
+                                response
+                                    .headers_mut()
+                                    .insert(header::CONNECTION, HeaderValue::from_static("close"));
+
+                                if self.options.send_date_header {
+                                    response.headers_mut().insert(
+                                        header::DATE,
+                                        HeaderValue::from_str(&httpdate::fmt_http_date(
+                                            std::time::SystemTime::now(),
+                                        ))
+                                        .map_err(|e| std::io::Error::other(e.to_string()))?,
+                                    );
+                                }
+
+                                let _ = self.write_response(response, Version::HTTP_11).await;
+                            }
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "header read timeout",
+                            ));
+                        }
+                    };
 
                 // Connection header detection
                 let connection_header_split = request
