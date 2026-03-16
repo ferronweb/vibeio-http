@@ -29,6 +29,7 @@ Others:
 
 mod options;
 
+use bytes::Bytes;
 pub use options::Http1Options;
 
 use std::{
@@ -223,23 +224,74 @@ where
             head.extend_from_slice(b"\r\n");
         }
         head.extend_from_slice(b"\r\n");
-        let mut head_written = false;
-        while let Some(chunk) = response.body_mut().frame().await {
-            let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
-            if let Ok(data) = chunk.into_data() {
-                if !head_written {
-                    // Write head with first chunk at once
-                    let mut head = head.split_off(0);
-                    head.extend(data);
-                    self.io.write_all(&head).await?;
-                    head_written = true;
-                } else {
-                    self.io.write_all(data.as_ref()).await?;
+
+        let (write_queue_tx, write_queue_rx) = async_channel::bounded::<bytes::Bytes>(2);
+        let body_write_future = Box::pin(async {
+            let mut head_written = false;
+            while let Some(chunk) = response.body_mut().frame().await {
+                let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
+                if let Ok(data) = chunk.into_data() {
+                    if !head_written {
+                        // Write head with first chunk at once
+                        let mut head = head.split_off(0);
+                        head.extend(data);
+                        write_queue_tx
+                            .send(Bytes::from_owner(head))
+                            .await
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        head_written = true;
+                    } else {
+                        write_queue_tx
+                            .send(data)
+                            .await
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    }
                 }
             }
-        }
-        if !head_written {
-            self.io.write_all(&head).await?;
+            if !head_written {
+                write_queue_tx
+                    .send(Bytes::from_owner(head))
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            }
+            write_queue_tx.close();
+
+            futures_util::future::pending::<Result<(), std::io::Error>>().await
+        });
+        let write_future = Box::pin(async {
+            let mut write_buf = Vec::new();
+            loop {
+                let chunk = if write_buf.is_empty() {
+                    let Some(chunk) = write_queue_rx.recv().await.ok() else {
+                        // Channel closed, break out of loop
+                        break;
+                    };
+                    Some(chunk)
+                } else {
+                    let result = write_queue_rx.try_recv();
+                    if result.as_ref().is_err_and(|e| e.is_closed()) {
+                        break;
+                    }
+                    result.ok()
+                };
+                if let Some(chunk) = chunk {
+                    write_buf.extend(chunk);
+                }
+                let written = self.io.write(&write_buf).await?;
+                let to_write = write_buf.split_off(written);
+                write_buf = to_write;
+            }
+            self.io.write_all(&write_buf).await?;
+            Ok::<(), std::io::Error>(())
+        });
+
+        match futures_util::future::select(body_write_future, write_future).await {
+            futures_util::future::Either::Left((result, _)) => {
+                result?;
+            }
+            futures_util::future::Either::Right((result, _)) => {
+                result?;
+            }
         }
 
         Ok(())
