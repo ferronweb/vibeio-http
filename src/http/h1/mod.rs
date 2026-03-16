@@ -258,6 +258,23 @@ where
             }
         }
 
+        let chunked = response
+            .headers()
+            .get(header::TRANSFER_ENCODING)
+            .map(|v| {
+                v.to_str().ok().map_or(false, |s| {
+                    s.split(',')
+                        .any(|s| s.trim().eq_ignore_ascii_case("chunked"))
+                })
+            })
+            .unwrap_or_else(|| {
+                !response
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .map_or(false, |s| s.parse::<u64>().is_ok())
+            });
+
         let mut head = Vec::new();
         if version == Version::HTTP_10 {
             head.extend_from_slice(b"HTTP/1.0 ");
@@ -287,12 +304,30 @@ where
                     if !head_written {
                         // Write head with first chunk at once
                         let mut head = head.split_off(0);
+                        if chunked {
+                            // Chunked encoding
+                            head.extend_from_slice(format!("{:X}", data.len()).as_bytes());
+                            head.extend_from_slice(b"\r\n");
+                        }
                         head.extend(data);
+                        if chunked {
+                            head.extend_from_slice(b"\r\n");
+                        }
                         write_queue_tx
                             .send(Bytes::from_owner(head))
                             .await
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                         head_written = true;
+                    } else if chunked {
+                        let chunked_data = Vec::new();
+                        head.extend_from_slice(format!("{:X}", data.len()).to_string().as_bytes());
+                        head.extend_from_slice(b"\r\n");
+                        head.extend(data);
+                        head.extend_from_slice(b"\r\n");
+                        write_queue_tx
+                            .send(Bytes::from_owner(chunked_data))
+                            .await
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
                     } else {
                         write_queue_tx
                             .send(data)
@@ -304,6 +339,13 @@ where
             if !head_written {
                 write_queue_tx
                     .send(Bytes::from_owner(head))
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            }
+            if chunked {
+                // Terminating chunk
+                write_queue_tx
+                    .send(Bytes::from_static(b"0\r\n\r\n"))
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
             }
