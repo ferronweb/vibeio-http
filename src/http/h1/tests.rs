@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::{
     HttpProtocol,
-    h1::{Http1, Http1Options},
+    h1::{Http1, Http1Options, prepare_upgrade},
 };
 
 #[tokio::test]
@@ -348,6 +348,50 @@ async fn test_chunked_request_trailers() {
 
     // Assert the response
     assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
+
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_upgrade_request() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+
+    let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
+    let server_task = tokio::spawn(server.handle(|mut req| async move {
+        let upgrade = prepare_upgrade(&mut req);
+        tokio::spawn(async move {
+            let upgraded = upgrade.unwrap().await.unwrap();
+            let (mut reader, mut writer) = tokio::io::split(upgraded);
+            let _ = tokio::io::copy(&mut reader, &mut writer).await;
+        });
+        Ok::<_, http::Error>(
+            http::Response::builder()
+                .status(101)
+                .header("Upgrade", "echo")
+                .header("Connection", "upgrade")
+                .body(Empty::new())
+                .unwrap(),
+        )
+    }));
+
+    let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+
+    // Write a GET request
+    client_writer
+        .write_all(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade\r\nUpgrade: echo\r\n\r\nHello, World!",
+        )
+        .await
+        .unwrap();
+    let _ = client_writer.shutdown().await;
+
+    // Read the response
+    let mut response_buf = Vec::new();
+    client_reader.read_to_end(&mut response_buf).await.unwrap();
+
+    // Assert the response
+    assert!(response_buf.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    assert!(response_buf.ends_with(b"Hello, World!"));
 
     server_task.await.unwrap().unwrap();
 }

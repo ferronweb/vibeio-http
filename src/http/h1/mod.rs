@@ -1,8 +1,9 @@
 mod options;
 mod tests;
+mod upgrade;
 
-use bytes::{Buf, Bytes};
-pub use options::Http1Options;
+pub use options::*;
+pub use upgrade::*;
 
 use std::{
     pin::Pin,
@@ -11,6 +12,7 @@ use std::{
 };
 
 use async_channel::Receiver;
+use bytes::{Buf, Bytes};
 use futures_util::stream::Stream;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
 use http_body::Body;
@@ -639,7 +641,7 @@ where
 
         async move {
             while keep_alive {
-                let (request, body_tx) = match if let Some(timeout) =
+                let (mut request, body_tx) = match if let Some(timeout) =
                     self.options.header_read_timeout
                 {
                     vibeio::time::timeout(timeout, self.read_request()).await
@@ -732,6 +734,12 @@ where
                     })
                     .unwrap_or(false);
 
+                // Install HTTP upgrade
+                let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
+                let upgrade = Upgrade::new(upgrade_rx);
+                let upgraded = upgrade.upgraded.clone();
+                request.extensions_mut().insert(upgrade);
+
                 // Get HTTP response
                 let mut response = {
                     let read_body_fut = Box::pin(async {
@@ -763,7 +771,13 @@ where
                     response.map_err(|e| std::io::Error::other(e.to_string()))?
                 };
 
-                if keep_alive {
+                let mut was_upgraded = false;
+                if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
+                    was_upgraded = true;
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+                } else if keep_alive {
                     response
                         .headers_mut()
                         .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
@@ -776,6 +790,12 @@ where
                 // Write response to IO
                 self.write_response(response, version, write_trailers)
                     .await?;
+
+                if was_upgraded {
+                    // HTTP upgrade
+                    let _ = upgrade_tx.send(Upgraded::new(self.io, self.leftover));
+                    return Ok(());
+                }
             }
             Ok(())
         }
