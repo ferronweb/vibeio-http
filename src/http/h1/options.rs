@@ -2,6 +2,7 @@
 pub struct Http1Options {
     pub(crate) max_header_size: usize,
     pub(crate) max_header_count: usize,
+    pub(crate) send_date_header: bool,
 }
 
 impl Http1Options {
@@ -10,6 +11,7 @@ impl Http1Options {
         Self {
             max_header_size: 16384,
             max_header_count: 128,
+            send_date_header: true,
         }
     }
 
@@ -20,6 +22,11 @@ impl Http1Options {
 
     pub fn max_header_count(mut self, count: usize) -> Self {
         self.max_header_count = count;
+        self
+    }
+
+    pub fn send_date_header(mut self, send: bool) -> Self {
+        self.send_date_header = send;
         self
     }
 }

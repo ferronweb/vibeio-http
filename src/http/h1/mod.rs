@@ -383,6 +383,16 @@ where
                         .insert(header::CONNECTION, HeaderValue::from_static("close"));
                 }
 
+                if self.options.send_date_header {
+                    response.headers_mut().insert(
+                        header::DATE,
+                        HeaderValue::from_str(&httpdate::fmt_http_date(
+                            std::time::SystemTime::now(),
+                        ))
+                        .map_err(|e| std::io::Error::other(e.to_string()))?,
+                    );
+                }
+
                 // Write response to IO
                 self.write_response(response, version).await?;
             }
