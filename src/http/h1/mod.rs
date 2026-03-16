@@ -66,18 +66,18 @@ where
     async fn read_body_fn(
         &mut self,
         body_tx: &async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
-        content_length: usize,
+        content_length: u64,
     ) -> Result<(), std::io::Error> {
         let mut remaining = content_length;
         while remaining > 0 {
-            let mut buf: Box<[u8]> = vec![0u8; remaining.min(16384)].into_boxed_slice();
+            let mut buf: Box<[u8]> = vec![0u8; remaining.min(16384) as usize].into_boxed_slice();
             let n = self.io.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
             let mut chunk = bytes::Bytes::from_owner(buf);
             chunk.truncate(n);
-            remaining -= n;
+            remaining -= n as u64;
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
@@ -187,9 +187,29 @@ where
             impl Body<Data = bytes::Bytes, Error = impl std::error::Error> + Unpin,
         >,
     ) -> Result<(), std::io::Error> {
+        // If the body has a size hint, set the Content-Length header if it's not already set
+        if let Some(suggested_content_length) = response.body().size_hint().exact() {
+            let headers = response.headers_mut();
+            if !headers.contains_key(header::CONTENT_LENGTH) {
+                headers.insert(
+                    header::CONTENT_LENGTH,
+                    suggested_content_length.try_into().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid content length",
+                        )
+                    })?,
+                );
+            }
+        }
+
         let mut head = Vec::new();
         head.extend_from_slice(b"HTTP/1.1 ");
         head.extend_from_slice(response.status().as_str().as_bytes());
+        if let Some(canonical_reason) = response.status().canonical_reason() {
+            head.extend_from_slice(b" ");
+            head.extend_from_slice(canonical_reason.as_bytes());
+        }
         head.extend_from_slice(b"\r\n");
         for (name, value) in response.headers() {
             head.extend_from_slice(name.as_str().as_bytes());
@@ -236,7 +256,7 @@ where
                 .headers()
                 .get(header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<usize>().ok())
+                .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
 
             // Get HTTP response
