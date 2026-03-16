@@ -275,6 +275,13 @@ where
                     .map_or(false, |s| s.parse::<u64>().is_ok())
             });
 
+        if chunked {
+            response.headers_mut().insert(
+                header::TRANSFER_ENCODING,
+                HeaderValue::from_static("chunked"),
+            );
+        }
+
         let mut head = Vec::new();
         if version == Version::HTTP_10 {
             head.extend_from_slice(b"HTTP/1.0 ");
