@@ -767,6 +767,8 @@ where
                     let early_hints = EarlyHints::new(early_hints_tx);
                     request.extensions_mut().insert(early_hints);
                     // Safety: the function below is used only in futures_util::future::select
+                    // Also, another function that would borrow self would read data,
+                    // while this function would write data
                     let mut_self =
                         unsafe { std::mem::transmute::<&mut Self, &mut Self>(&mut self) };
                     Box::pin(async {
