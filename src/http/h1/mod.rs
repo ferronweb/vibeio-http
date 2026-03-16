@@ -634,7 +634,7 @@ where
         error_fn: EF,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: FnMut(Request<Incoming>) -> Fut,
+        F: Fn(Request<Incoming>) -> Fut,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
@@ -819,7 +819,7 @@ where
         request_fn: F,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: FnMut(Request<Incoming>) -> Fut,
+        F: Fn(Request<Incoming>) -> Fut,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
