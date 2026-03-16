@@ -1,6 +1,7 @@
 mod options;
+mod tests;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 pub use options::Http1Options;
 
 use std::{
@@ -23,6 +24,7 @@ use crate::http::{HttpProtocol, Incoming};
 
 pub struct Http1<Io> {
     io: Io,
+    leftover: Option<bytes::Bytes>,
     options: options::Http1Options,
 }
 
@@ -32,7 +34,28 @@ where
 {
     #[inline]
     pub fn new(io: Io, options: options::Http1Options) -> Self {
-        Self { io, options }
+        Self {
+            io,
+            leftover: None,
+            options,
+        }
+    }
+
+    #[inline]
+    async fn read_with_leftover(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        if let Some(leftover) = &mut self.leftover {
+            let len = leftover.remaining().min(buf.len());
+            if len != 0 {
+                leftover.copy_to_slice(buf);
+            }
+            if !leftover.has_remaining() {
+                self.leftover = None;
+            }
+            if len != 0 {
+                return Ok(len);
+            }
+        };
+        self.io.read(buf).await
     }
 
     #[inline]
@@ -44,7 +67,7 @@ where
         let mut remaining = content_length;
         while remaining > 0 {
             let mut buf: Box<[u8]> = vec![0u8; remaining.min(16384) as usize].into_boxed_slice();
-            let n = self.io.read(&mut buf).await?;
+            let n = self.read_with_leftover(&mut buf).await?;
             if n == 0 {
                 break;
             }
@@ -54,6 +77,7 @@ where
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
+        body_tx.close(); // Close the body_tx channel to signal EOF
         Ok(())
     }
 
@@ -82,13 +106,12 @@ where
                 "partial request head",
             ));
         }
-        let leftover = bytes::Bytes::from(head_buf[to_parse_length..].to_vec());
+        self.leftover = Some(bytes::Bytes::from(head_buf[to_parse_length..].to_vec()));
 
         // Convert httparse HTTP request to `http` one
         let (body_tx, body_rx) = async_channel::bounded(2);
         let request_body = Http1Body {
             inner: Box::pin(body_rx),
-            leftover,
         };
         let mut request = Request::new(Incoming::new(request_body));
         match req.version {
@@ -115,7 +138,6 @@ where
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             request.headers_mut().append(name, value);
         }
-
         Ok((request, body_tx))
     }
 
@@ -127,9 +149,12 @@ where
         let mut whitespace_trimmed = None;
         loop {
             let mut temp_buf = [0u8; 4096];
-            let n = self.io.read(&mut temp_buf).await?;
+            let n = self.read_with_leftover(&mut temp_buf).await?;
             if n == 0 {
-                break;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF",
+                ));
             }
             let begin_search = bytes_read.saturating_sub(3);
             buf[bytes_read..(bytes_read + n).min(self.options.max_header_size)]
@@ -359,7 +384,7 @@ where
                     } else {
                         Ok(self.read_request().await)
                     } {
-                        Ok(Ok((request, body_tx))) => (request, body_tx),
+                        Ok(Ok(d)) => d,
                         Ok(Err(e)) => {
                             // Parse error
                             if let Ok(mut response) = error_fn(false).await {
@@ -481,7 +506,6 @@ where
 struct Http1Body {
     #[allow(clippy::type_complexity)]
     inner: Pin<Box<Receiver<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>>>,
-    leftover: bytes::Bytes,
 }
 
 impl Body for Http1Body {
@@ -489,15 +513,10 @@ impl Body for Http1Body {
     type Error = std::io::Error;
 
     fn poll_frame(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        let mut this = self;
-        if !this.leftover.is_empty() {
-            let chunk = this.leftover.split_to(4096);
-            return Poll::Ready(Some(Ok(http_body::Frame::data(chunk))));
-        }
-        match this.inner.as_mut().poll_next(cx) {
+        match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
