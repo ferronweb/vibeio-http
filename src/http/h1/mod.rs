@@ -585,6 +585,7 @@ where
                 write_buf = to_write;
             }
             self.io.write_all(&write_buf).await?;
+            self.io.flush().await?;
             Ok::<(), std::io::Error>(())
         });
 
@@ -602,13 +603,12 @@ where
 
     #[inline]
     async fn write_100_continue(&mut self, version: Version) -> Result<(), std::io::Error> {
-        let mut head = Vec::new();
         if version == Version::HTTP_10 {
-            head.extend_from_slice(b"HTTP/1.0 100 Continue\r\n\r\n");
+            self.io.write_all(b"HTTP/1.0 100 Continue\r\n\r\n").await?;
         } else {
-            head.extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
+            self.io.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
         }
-        self.io.write_all(&head).await?;
+        self.io.flush().await?;
 
         Ok(())
     }
