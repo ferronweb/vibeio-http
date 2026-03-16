@@ -21,7 +21,7 @@ fn main() -> std::io::Result<()> {
             let (stream, _) = listener.accept().await?;
 
             vibeio::spawn(async move {
-                Http1::new(stream.into_poll()?)
+                Http1::new(stream.into_poll()?, http::Http1Options::default())
                     .handle(|_request| async move {
                         let response = Response::new(Full::new(Bytes::from_static(b"Hello World")));
                         Ok::<_, std::convert::Infallible>(response)

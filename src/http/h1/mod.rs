@@ -20,15 +20,16 @@ Performance:
  - buffer reuse
 
 Security:
- - max header size
- - max headers
  - read timeout
  - body size limits
 
 Others:
- - configurable options
  - 400 Bad Request fn for request parsing errors
  */
+
+mod options;
+
+pub use options::Http1Options;
 
 use std::{
     pin::Pin,
@@ -49,6 +50,7 @@ use crate::http::{HttpProtocol, Incoming};
 
 pub struct Http1<Io> {
     io: Io,
+    options: options::Http1Options,
 }
 
 impl<Io> Http1<Io>
@@ -56,8 +58,8 @@ where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     #[inline]
-    pub fn new(io: Io) -> Self {
-        Self { io }
+    pub fn new(io: Io, options: options::Http1Options) -> Self {
+        Self { io, options }
     }
 
     #[inline]
@@ -98,7 +100,8 @@ where
         let (head_buf, to_parse_length) = self.get_head().await?;
 
         // Parse HTTP request using httparse
-        let mut headers = [httparse::EMPTY_HEADER; 128];
+        let mut headers =
+            vec![httparse::EMPTY_HEADER; self.options.max_header_count].into_boxed_slice();
         let mut req = httparse::Request::new(&mut headers);
         let status = req
             .parse(&head_buf[..to_parse_length])
@@ -148,7 +151,7 @@ where
 
     #[inline]
     async fn get_head(&mut self) -> Result<(bytes::Bytes, usize), std::io::Error> {
-        let mut buf: Box<[u8]> = Box::new([0u8; 16384]);
+        let mut buf: Box<[u8]> = vec![0u8; self.options.max_header_size].into_boxed_slice();
         let mut bytes_read: usize = 0;
         loop {
             let mut temp_buf = [0u8; 4096];
@@ -157,8 +160,9 @@ where
                 break;
             }
             let begin_search = bytes_read.saturating_sub(3);
-            buf[bytes_read..(bytes_read + n).min(16384)].copy_from_slice(&temp_buf[..n]);
-            bytes_read = (bytes_read + n).min(16384);
+            buf[bytes_read..(bytes_read + n).min(self.options.max_header_size)]
+                .copy_from_slice(&temp_buf[..n]);
+            bytes_read = (bytes_read + n).min(self.options.max_header_size);
 
             if let Some((separator_index, separator_len)) =
                 search_header_body_separator(&buf[begin_search..])
@@ -169,7 +173,7 @@ where
                 return Ok((buf_ro, to_parse_length));
             }
 
-            if bytes_read >= 16384 {
+            if bytes_read >= self.options.max_header_size {
                 break;
             }
         }
