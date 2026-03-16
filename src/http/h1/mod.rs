@@ -39,7 +39,7 @@ use std::{
 
 use async_channel::Receiver;
 use futures_util::stream::Stream;
-use http::{HeaderName, HeaderValue, Method, Request, Response, Uri, header};
+use http::{HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
 use http_body::Body;
 use http_body_util::BodyExt;
 use memchr::memchr2;
@@ -186,6 +186,7 @@ where
         mut response: Response<
             impl Body<Data = bytes::Bytes, Error = impl std::error::Error> + Unpin,
         >,
+        version: Version,
     ) -> Result<(), std::io::Error> {
         // If the body has a size hint, set the Content-Length header if it's not already set
         if let Some(suggested_content_length) = response.body().size_hint().exact() {
@@ -204,7 +205,11 @@ where
         }
 
         let mut head = Vec::new();
-        head.extend_from_slice(b"HTTP/1.1 ");
+        if version == Version::HTTP_10 {
+            head.extend_from_slice(b"HTTP/1.0 ");
+        } else {
+            head.extend_from_slice(b"HTTP/1.1 ");
+        }
         head.extend_from_slice(response.status().as_str().as_bytes());
         if let Some(canonical_reason) = response.status().canonical_reason() {
             head.extend_from_slice(b" ");
@@ -247,47 +252,77 @@ where
         ResE: std::error::Error,
         ResBE: std::error::Error,
     {
+        let mut keep_alive = true;
+
         async move {
-            // TODO: 400 Bad Request fn
-            let (request, body_tx) = self.read_request().await?;
+            while keep_alive {
+                // TODO: 400 Bad Request fn
+                let (request, body_tx) = self.read_request().await?;
 
-            // Content-Length header
-            let content_length = request
-                .headers()
-                .get(header::CONTENT_LENGTH)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0);
+                // Connection header detection
+                let connection_header_split = request
+                    .headers()
+                    .get(header::CONNECTION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.split(",").map(|v| v.trim()));
+                let is_connection_close = connection_header_split
+                    .clone()
+                    .is_some_and(|mut split| split.any(|v| v.eq_ignore_ascii_case("close")));
+                let is_connection_keep_alive = connection_header_split
+                    .is_some_and(|mut split| split.any(|v| v.eq_ignore_ascii_case("keep-alive")));
+                keep_alive = !is_connection_close
+                    && (is_connection_keep_alive || request.version() == http::Version::HTTP_11);
 
-            // Get HTTP response
-            let response = {
-                let read_body_fut = Box::pin(self.read_body_fn(&body_tx, content_length));
-                let request_fut = Box::pin(request_fn(request));
-                let select_either = futures_util::future::select(request_fut, read_body_fut).await;
+                let version = request.version();
 
-                let (response, body_fut) = match select_either {
-                    futures_util::future::Either::Left((response, read_body_fut)) => {
-                        (response, Some(read_body_fut))
-                    }
-                    futures_util::future::Either::Right((result, request_fut)) => {
-                        if let Err(e) = result {
-                            return Err(e);
+                // Content-Length header
+                let content_length = request
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+
+                // Get HTTP response
+                let mut response = {
+                    let read_body_fut = Box::pin(self.read_body_fn(&body_tx, content_length));
+                    let request_fut = Box::pin(request_fn(request));
+                    let select_either =
+                        futures_util::future::select(request_fut, read_body_fut).await;
+
+                    let (response, body_fut) = match select_either {
+                        futures_util::future::Either::Left((response, read_body_fut)) => {
+                            (response, Some(read_body_fut))
                         }
-                        (request_fut.await, None)
+                        futures_util::future::Either::Right((result, request_fut)) => {
+                            if let Err(e) = result {
+                                return Err(e);
+                            }
+                            (request_fut.await, None)
+                        }
+                    };
+
+                    // Drain away remaining body
+                    if let Some(body_fut) = body_fut {
+                        body_fut.await?;
                     }
+
+                    response.map_err(|e| std::io::Error::other(e.to_string()))?
                 };
 
-                // Drain away remaining body
-                if let Some(body_fut) = body_fut {
-                    body_fut.await?;
+                if keep_alive {
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+                } else {
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("close"));
                 }
 
-                response.map_err(|e| std::io::Error::other(e.to_string()))?
-            };
-
-            // Write response to IO
-            self.write_response(response).await?;
-
+                // Write response to IO
+                self.write_response(response, version).await?;
+            }
             Ok(())
         }
     }
