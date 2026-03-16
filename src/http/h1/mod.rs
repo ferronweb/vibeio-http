@@ -115,7 +115,7 @@ where
         let leftover = bytes::Bytes::from(head_buf[to_parse_length..].to_vec());
 
         // Convert httparse HTTP request to `http` one
-        let (body_tx, body_rx) = async_channel::unbounded();
+        let (body_tx, body_rx) = async_channel::bounded(2);
         let request_body = Http1Body {
             inner: Box::pin(body_rx),
             leftover,
