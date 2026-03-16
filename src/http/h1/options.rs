@@ -5,6 +5,7 @@ pub struct Http1Options {
     pub(crate) send_date_header: bool,
     pub(crate) header_read_timeout: Option<std::time::Duration>,
     pub(crate) send_continue_response: bool,
+    pub(crate) enable_early_hints: bool,
 }
 
 impl Http1Options {
@@ -16,6 +17,7 @@ impl Http1Options {
             send_date_header: true,
             header_read_timeout: Some(std::time::Duration::from_secs(30)),
             send_continue_response: true,
+            enable_early_hints: false,
         }
     }
 
@@ -41,6 +43,11 @@ impl Http1Options {
 
     pub fn send_continue_response(mut self, send: bool) -> Self {
         self.send_continue_response = send;
+        self
+    }
+
+    pub fn enable_early_hints(mut self, enable: bool) -> Self {
+        self.enable_early_hints = enable;
         self
     }
 }

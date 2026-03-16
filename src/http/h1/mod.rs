@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 pub use upgrade::*;
 
 use std::{
+    cell::UnsafeCell,
     pin::Pin,
     str::FromStr,
     task::{Context, Poll},
@@ -22,7 +23,7 @@ use memchr::{memchr2, memchr3_iter, memmem};
 use smallvec::SmallVec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::http::{HttpProtocol, Incoming};
+use crate::http::{EarlyHints, HttpProtocol, Incoming};
 
 pub struct Http1<Io> {
     io: Io,
@@ -620,6 +621,37 @@ where
 
         Ok(())
     }
+
+    #[inline]
+    async fn write_early_hints(
+        &mut self,
+        version: Version,
+        headers: http::HeaderMap,
+    ) -> Result<(), std::io::Error> {
+        let mut head = Vec::new();
+        if version == Version::HTTP_10 {
+            head.extend_from_slice(b"HTTP/1.0 103 Early Hints\r\n");
+        } else {
+            head.extend_from_slice(b"HTTP/1.1 103 Early Hints\r\n");
+        }
+        let mut current_header_name = None;
+        for (name, value) in headers {
+            if let Some(name) = name {
+                current_header_name = Some(name);
+            };
+            if let Some(current_header_name) = &current_header_name {
+                head.extend_from_slice(current_header_name.as_str().as_bytes());
+                head.extend_from_slice(b": ");
+                head.extend_from_slice(value.as_bytes());
+                head.extend_from_slice(b"\r\n");
+            }
+        }
+        head.extend_from_slice(b"\r\n");
+
+        self.io.write_all(&head).await?;
+
+        Ok(())
+    }
 }
 
 impl<Io> HttpProtocol for Http1<Io>
@@ -712,6 +744,30 @@ where
                     }
                 }
 
+                // 103 Early Hints
+                let early_hints_fut: Pin<
+                    Box<dyn std::future::Future<Output = Result<(), std::io::Error>>>,
+                > = if self.options.enable_early_hints {
+                    let (early_hints_tx, early_hints_rx) = async_channel::unbounded();
+                    let early_hints = EarlyHints::new(early_hints_tx);
+                    request.extensions_mut().insert(early_hints);
+                    // Safety: the function below is used only in futures_util::future::select
+                    let mut_self =
+                        unsafe { std::mem::transmute::<&mut Self, &mut Self>(&mut self) };
+                    Box::pin(async {
+                        let early_hints_rx = early_hints_rx;
+                        while let Ok((headers, sender)) = early_hints_rx.recv().await {
+                            sender
+                                .into_inner()
+                                .send(mut_self.write_early_hints(version, headers).await)
+                                .ok();
+                        }
+                        futures_util::future::pending::<Result<(), std::io::Error>>().await
+                    })
+                } else {
+                    Box::pin(futures_util::future::pending())
+                };
+
                 // Content-Length header
                 let content_length = request
                     .headers()
@@ -758,16 +814,29 @@ where
                         }
                     });
                     let request_fut = Box::pin(request_fn(request));
+
+                    let select_read_body_either =
+                        futures_util::future::select(request_fut, early_hints_fut);
                     let select_either =
-                        futures_util::future::select(request_fut, read_body_fut).await;
+                        futures_util::future::select(select_read_body_either, read_body_fut).await;
 
                     let (response, body_fut) = match select_either {
-                        futures_util::future::Either::Left((response, read_body_fut)) => {
-                            (response, Some(read_body_fut))
-                        }
+                        futures_util::future::Either::Left((response, read_body_fut)) => (
+                            match response {
+                                futures_util::future::Either::Left((response, _)) => response,
+                                futures_util::future::Either::Right((_, _)) => unreachable!(),
+                            },
+                            Some(read_body_fut),
+                        ),
                         futures_util::future::Either::Right((result, request_fut)) => {
                             result?;
-                            (request_fut.await, None)
+                            (
+                                match request_fut.await {
+                                    futures_util::future::Either::Left((response, _)) => response,
+                                    futures_util::future::Either::Right((_, _)) => unreachable!(),
+                                },
+                                None,
+                            )
                         }
                     };
 

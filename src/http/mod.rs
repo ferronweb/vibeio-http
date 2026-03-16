@@ -1,6 +1,8 @@
+mod early_hints;
 mod h1;
 mod incoming;
 
+pub use early_hints::*;
 pub use h1::*;
 pub use incoming::*;
 
