@@ -33,6 +33,7 @@ use bytes::Bytes;
 pub use options::Http1Options;
 
 use std::{
+    convert::Infallible,
     pin::Pin,
     str::FromStr,
     task::{Context, Poll},
@@ -42,7 +43,7 @@ use async_channel::Receiver;
 use futures_util::stream::Stream;
 use http::{HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
 use http_body::Body;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Empty};
 use memchr::memchr2;
 use smallvec::SmallVec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -304,9 +305,10 @@ where
 {
     #[allow(clippy::manual_async_fn)]
     #[inline]
-    fn handle<F, Fut, ResB, ResBE, ResE>(
+    fn handle_with_error_fn<F, Fut, ResB, ResBE, ResE, EF, EFut, EResB, EResBE, EResE>(
         mut self,
         mut request_fn: F,
+        error_fn: EF,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
         F: FnMut(Request<Incoming>) -> Fut,
@@ -314,13 +316,25 @@ where
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,
+        EF: FnOnce(bool) -> EFut,
+        EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
+        EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin,
+        EResE: std::error::Error,
+        EResBE: std::error::Error,
     {
         let mut keep_alive = true;
 
         async move {
             while keep_alive {
-                // TODO: 400 Bad Request fn
-                let (request, body_tx) = self.read_request().await?;
+                let (request, body_tx) = match self.read_request().await {
+                    Ok((request, body_tx)) => (request, body_tx),
+                    Err(e) => {
+                        if let Ok(response) = error_fn(false).await {
+                            let _ = self.write_response(response, Version::HTTP_11).await;
+                        }
+                        return Err(e);
+                    }
+                };
 
                 // Connection header detection
                 let connection_header_split = request
@@ -398,6 +412,28 @@ where
             }
             Ok(())
         }
+    }
+
+    fn handle<F, Fut, ResB, ResBE, ResE>(
+        self,
+        request_fn: F,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
+    where
+        F: FnMut(Request<Incoming>) -> Fut,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
+        ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
+        ResE: std::error::Error,
+        ResBE: std::error::Error,
+    {
+        self.handle_with_error_fn(request_fn, |is_timeout| async move {
+            let mut response = Response::builder();
+            if is_timeout {
+                response = response.status(http::StatusCode::REQUEST_TIMEOUT);
+            } else {
+                response = response.status(http::StatusCode::BAD_REQUEST);
+            }
+            Ok::<_, http::Error>(response.body(Empty::new())?)
+        })
     }
 }
 
