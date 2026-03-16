@@ -13,7 +13,7 @@ use std::{
 
 use async_channel::Receiver;
 use futures_util::stream::Stream;
-use http::{HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
 use http_body::Body;
 use http_body_util::{BodyExt, Empty};
 use memchr::{memchr2, memchr3_iter, memmem};
@@ -82,7 +82,10 @@ where
     }
 
     #[inline]
-    async fn read_body_chunk(&mut self) -> Result<bytes::Bytes, std::io::Error> {
+    async fn read_body_chunk(
+        &mut self,
+        would_have_trailers: bool,
+    ) -> Result<bytes::Bytes, std::io::Error> {
         let len = {
             let mut len_buf: Box<[u8]> = vec![0u8; 48].into_boxed_slice();
             let mut len_buf_pos = 0;
@@ -121,13 +124,13 @@ where
                     }
                     break len;
                 }
-                let mut chunk = bytes::Bytes::from_owner(len_buf);
-                chunk.truncate(n);
-                return Ok(chunk);
             }
         };
         let mut chunk = vec![0u8; len + 2];
         let mut read = 0;
+        if len == 0 && would_have_trailers {
+            return Ok(bytes::Bytes::new()); // Empty terminating chunk
+        }
         // + 2, because we need to read the trailing CRLF
         while read < len + 2 {
             let n = self.read_with_leftover(&mut chunk[read..]).await?;
@@ -138,17 +141,103 @@ where
     }
 
     #[inline]
+    async fn read_trailers(&mut self) -> Result<Option<http::HeaderMap>, std::io::Error> {
+        let mut buf: Box<[u8]> = vec![0u8; self.options.max_header_size].into_boxed_slice();
+        let mut bytes_read: usize = 0;
+        loop {
+            let mut temp_buf = [0u8; 4096];
+            let n = self.read_with_leftover(&mut temp_buf).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF",
+                ));
+            }
+            let begin_search = bytes_read.saturating_sub(3);
+            buf[bytes_read..(bytes_read + n).min(self.options.max_header_size)]
+                .copy_from_slice(&temp_buf[..n]);
+            bytes_read = (bytes_read + n).min(self.options.max_header_size);
+
+            if bytes_read > 2 {
+                if buf[0] == b'\r' && buf[1] == b'\n' {
+                    // No trailers, return None
+                    return Ok(None);
+                }
+            }
+
+            if let Some(separator_index) = memmem::find(&buf[begin_search..bytes_read], b"\r\n\r\n")
+            {
+                let to_parse_length = begin_search + separator_index + 4;
+                let mut buf_ro = bytes::Bytes::from_owner(buf);
+                buf_ro.truncate(bytes_read);
+                let leftover_to_add = buf_ro.split_off(to_parse_length);
+                if let Some(leftover) = self.leftover.take() {
+                    let mut new_leftover = Vec::new();
+                    new_leftover.extend(leftover_to_add);
+                    new_leftover.extend(leftover);
+                    self.leftover = Some(bytes::Bytes::from(new_leftover));
+                } else {
+                    self.leftover = Some(leftover_to_add);
+                }
+
+                // Parse trailers using `httparse` crate's header parsing
+                let mut httparse_trailers =
+                    vec![httparse::EMPTY_HEADER; self.options.max_header_count].into_boxed_slice();
+                let status = httparse::parse_headers(&buf_ro[..], &mut httparse_trailers)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+                if let httparse::Status::Complete((_, trailers)) = status {
+                    let mut trailers_constructed = HeaderMap::new();
+                    for header in trailers {
+                        if header == &httparse::EMPTY_HEADER {
+                            // No more headers...
+                            break;
+                        }
+                        let name = HeaderName::from_bytes(header.name.as_bytes())
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        let value = HeaderValue::from_bytes(header.value)
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        trailers_constructed.append(name, value);
+                    }
+
+                    return Ok(Some(trailers_constructed));
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "trailer headers incomplete",
+                    ));
+                }
+            }
+
+            if bytes_read >= self.options.max_header_size {
+                break;
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "request too large",
+        ))
+    }
+
+    #[inline]
     async fn read_chunked_body_fn(
         &mut self,
         body_tx: &async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+        would_have_trailers: bool,
     ) -> Result<(), std::io::Error> {
         loop {
-            let chunk = self.read_body_chunk().await?;
+            let chunk = self.read_body_chunk(would_have_trailers).await?;
             if chunk.is_empty() {
                 break;
             }
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
+        }
+        if would_have_trailers {
+            // Trailers
+            let trailers = self.read_trailers().await?;
+            if let Some(trailers) = trailers {
+                let _ = body_tx.send(Ok(http_body::Frame::trailers(trailers))).await;
+            }
         }
         body_tx.close(); // Close the body_tx channel to signal EOF
         Ok(())
@@ -179,7 +268,15 @@ where
                 "partial request head",
             ));
         }
-        self.leftover = Some(bytes::Bytes::from(head_buf[to_parse_length..].to_vec()));
+        let leftover_to_add = bytes::Bytes::from(head_buf[to_parse_length..].to_vec());
+        if let Some(leftover) = self.leftover.take() {
+            let mut new_leftover = Vec::new();
+            new_leftover.extend(leftover_to_add);
+            new_leftover.extend(leftover);
+            self.leftover = Some(bytes::Bytes::from(new_leftover));
+        } else {
+            self.leftover = Some(leftover_to_add);
+        }
 
         // Convert httparse HTTP request to `http` one
         let (body_tx, body_rx) = async_channel::bounded(2);
@@ -595,12 +692,17 @@ where
                         v.split(',')
                             .any(|v| v.trim().eq_ignore_ascii_case("chunked"))
                     });
+                let has_trailers = request
+                    .headers()
+                    .get(header::TRAILER)
+                    .map(|v| v.to_str().ok().map_or(false, |s| !s.is_empty()))
+                    .unwrap_or(false);
 
                 // Get HTTP response
                 let mut response = {
                     let read_body_fut = Box::pin(async {
                         if chunked {
-                            self.read_chunked_body_fn(&body_tx).await
+                            self.read_chunked_body_fn(&body_tx, has_trailers).await
                         } else {
                             self.read_body_fn(&body_tx, content_length).await
                         }
