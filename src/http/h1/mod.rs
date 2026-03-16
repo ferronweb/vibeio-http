@@ -5,7 +5,6 @@ use bytes::{Buf, Bytes};
 pub use options::Http1Options;
 
 use std::{
-    convert::Infallible,
     pin::Pin,
     str::FromStr,
     task::{Context, Poll},
@@ -402,6 +401,7 @@ where
             impl Body<Data = bytes::Bytes, Error = impl std::error::Error> + Unpin,
         >,
         version: Version,
+        write_trailers: bool,
     ) -> Result<(), std::io::Error> {
         // Date header
         if self.options.send_date_header {
@@ -480,43 +480,77 @@ where
         let (write_queue_tx, write_queue_rx) = async_channel::bounded::<bytes::Bytes>(2);
         let body_write_future = Box::pin(async {
             let mut head_written = false;
+            let mut trailers_written = false;
             while let Some(chunk) = response.body_mut().frame().await {
                 let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
-                if let Ok(data) = chunk.into_data() {
-                    if !head_written {
-                        // Write head with first chunk at once
-                        let mut head = head.split_off(0);
-                        if chunked {
-                            // Chunked encoding
-                            head.extend_from_slice(format!("{:X}", data.len()).as_bytes());
+                match chunk.into_data() {
+                    Ok(data) => {
+                        if !head_written {
+                            // Write head with first chunk at once
+                            let mut head = head.split_off(0);
+                            if chunked {
+                                // Chunked encoding
+                                head.extend_from_slice(format!("{:X}", data.len()).as_bytes());
+                                head.extend_from_slice(b"\r\n");
+                            }
+                            head.extend(data);
+                            if chunked {
+                                head.extend_from_slice(b"\r\n");
+                            }
+                            write_queue_tx
+                                .send(Bytes::from_owner(head))
+                                .await
+                                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                            head_written = true;
+                        } else if chunked {
+                            let chunked_data = Vec::new();
+                            head.extend_from_slice(
+                                format!("{:X}", data.len()).to_string().as_bytes(),
+                            );
                             head.extend_from_slice(b"\r\n");
-                        }
-                        head.extend(data);
-                        if chunked {
+                            head.extend(data);
                             head.extend_from_slice(b"\r\n");
+                            write_queue_tx
+                                .send(Bytes::from_owner(chunked_data))
+                                .await
+                                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        } else {
+                            write_queue_tx
+                                .send(data)
+                                .await
+                                .map_err(|e| std::io::Error::other(e.to_string()))?;
                         }
-                        write_queue_tx
-                            .send(Bytes::from_owner(head))
-                            .await
-                            .map_err(|e| std::io::Error::other(e.to_string()))?;
-                        head_written = true;
-                    } else if chunked {
-                        let chunked_data = Vec::new();
-                        head.extend_from_slice(format!("{:X}", data.len()).to_string().as_bytes());
-                        head.extend_from_slice(b"\r\n");
-                        head.extend(data);
-                        head.extend_from_slice(b"\r\n");
-                        write_queue_tx
-                            .send(Bytes::from_owner(chunked_data))
-                            .await
-                            .map_err(|e| std::io::Error::other(e.to_string()))?;
-                    } else {
-                        write_queue_tx
-                            .send(data)
-                            .await
-                            .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
-                }
+                    Err(chunk) => {
+                        if let Ok(trailers) = chunk.into_trailers() {
+                            if write_trailers {
+                                let mut trail = Vec::new();
+                                trail.extend_from_slice(b"0\r\n");
+                                let mut current_header_name = None;
+                                for (name, value) in trailers {
+                                    if let Some(name) = name {
+                                        current_header_name = Some(name);
+                                    };
+                                    if let Some(current_header_name) = &current_header_name {
+                                        trail.extend_from_slice(
+                                            current_header_name.as_str().as_bytes(),
+                                        );
+                                        trail.extend_from_slice(b": ");
+                                        trail.extend_from_slice(value.as_bytes());
+                                        trail.extend_from_slice(b"\r\n");
+                                    }
+                                }
+                                trail.extend_from_slice(b"\r\n");
+                                write_queue_tx
+                                    .send(Bytes::from_owner(trail))
+                                    .await
+                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                trailers_written = true;
+                            }
+                            break;
+                        }
+                    }
+                };
             }
             if !head_written {
                 write_queue_tx
@@ -524,7 +558,7 @@ where
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
             }
-            if chunked {
+            if chunked && !trailers_written {
                 // Terminating chunk
                 write_queue_tx
                     .send(Bytes::from_static(b"0\r\n\r\n"))
@@ -615,39 +649,40 @@ where
 
         async move {
             while keep_alive {
-                let (request, body_tx) =
-                    match if let Some(timeout) = self.options.header_read_timeout {
-                        vibeio::time::timeout(timeout, self.read_request()).await
-                    } else {
-                        Ok(self.read_request().await)
-                    } {
-                        Ok(Ok(d)) => d,
-                        Ok(Err(e)) => {
-                            // Parse error
-                            if let Ok(mut response) = error_fn(false).await {
-                                response
-                                    .headers_mut()
-                                    .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                let (request, body_tx) = match if let Some(timeout) =
+                    self.options.header_read_timeout
+                {
+                    vibeio::time::timeout(timeout, self.read_request()).await
+                } else {
+                    Ok(self.read_request().await)
+                } {
+                    Ok(Ok(d)) => d,
+                    Ok(Err(e)) => {
+                        // Parse error
+                        if let Ok(mut response) = error_fn(false).await {
+                            response
+                                .headers_mut()
+                                .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-                                let _ = self.write_response(response, Version::HTTP_11).await;
-                            }
-                            return Err(e);
+                            let _ = self.write_response(response, Version::HTTP_11, false).await;
                         }
-                        Err(_) => {
-                            // Timeout error
-                            if let Ok(mut response) = error_fn(true).await {
-                                response
-                                    .headers_mut()
-                                    .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                        return Err(e);
+                    }
+                    Err(_) => {
+                        // Timeout error
+                        if let Ok(mut response) = error_fn(true).await {
+                            response
+                                .headers_mut()
+                                .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-                                let _ = self.write_response(response, Version::HTTP_11).await;
-                            }
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "header read timeout",
-                            ));
+                            let _ = self.write_response(response, Version::HTTP_11, false).await;
                         }
-                    };
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "header read timeout",
+                        ));
+                    }
+                };
 
                 // Connection header detection
                 let connection_header_split = request
@@ -697,6 +732,15 @@ where
                     .get(header::TRAILER)
                     .map(|v| v.to_str().ok().map_or(false, |s| !s.is_empty()))
                     .unwrap_or(false);
+                let write_trailers = request
+                    .headers()
+                    .get(header::TE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| {
+                        v.split(',')
+                            .any(|v| v.trim().eq_ignore_ascii_case("trailers"))
+                    })
+                    .unwrap_or(false);
 
                 // Get HTTP response
                 let mut response = {
@@ -742,7 +786,8 @@ where
                 }
 
                 // Write response to IO
-                self.write_response(response, version).await?;
+                self.write_response(response, version, write_trailers)
+                    .await?;
             }
             Ok(())
         }

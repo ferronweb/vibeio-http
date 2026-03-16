@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use bytes::Bytes;
+use futures_util::StreamExt;
 use http_body_util::{BodyExt, Empty, Full};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -229,6 +231,53 @@ async fn test_chunked_response() {
     // Assert the response
     assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
     assert!(response_buf.ends_with(b"\r\n\r\nD\r\nHello, World!\r\n0\r\n\r\n"));
+
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_chunked_response_trailers() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+
+    let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
+    let server_task = tokio::spawn(server.handle(|_req| async {
+        // Construct ody with trailers
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        let data_stream = futures_util::stream::once(async move {
+            Ok::<_, std::io::Error>(http_body::Frame::data(Bytes::from_static(b"Hello, World!")))
+        });
+        let trailer_stream =
+            futures_util::stream::once(async move { Ok(http_body::Frame::trailers(trailers)) });
+        let stream = data_stream.chain(trailer_stream);
+        let body = http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(stream));
+
+        Ok::<_, http::Error>(
+            http::Response::builder()
+                .status(200)
+                .header(http::header::TRANSFER_ENCODING, "chunked")
+                .body(body)
+                .unwrap(),
+        )
+    }));
+    let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+
+    // Write a GET request
+    client_writer
+        .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\nTE: trailers\r\n\r\n")
+        .await
+        .unwrap();
+
+    // Read the response
+    let mut response_buf = Vec::new();
+    client_reader.read_to_end(&mut response_buf).await.unwrap();
+
+    // Assert the response
+    assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
+    assert!(
+        response_buf
+            .ends_with(b"\r\n\r\nD\r\nHello, World!\r\n0\r\ncontent-type: text/plain\r\n\r\n")
+    );
 
     server_task.await.unwrap().unwrap();
 }
