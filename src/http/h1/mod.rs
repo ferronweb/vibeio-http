@@ -1,32 +1,3 @@
-/*
-TODO:
-
-HTTP/1.1:
- - keep-alive
- - chunked encoding (req + resp)
- - request body streaming
- - trailers
- - 1xx responses
- - header size limits
- - slowloris protection
- - HTTP upgrades (CONNECT method and "Upgrade" header)
- - returning upgraded connection
- - handling buffered bytes during upgrade
- - pipelining handling (optional)
-
-Performance:
- - zerocopy file responses
- - vectored writes (writev)
- - buffer reuse
-
-Security:
- - read timeout
- - body size limits
-
-Others:
- - 400 Bad Request fn for request parsing errors
- */
-
 mod options;
 
 use bytes::Bytes;
