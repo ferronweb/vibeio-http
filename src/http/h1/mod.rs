@@ -3,6 +3,7 @@ mod tests;
 mod upgrade;
 
 pub use options::*;
+use tokio_util::sync::CancellationToken;
 pub use upgrade::*;
 
 use std::{
@@ -27,6 +28,7 @@ pub struct Http1<Io> {
     io: Io,
     leftover: Option<bytes::Bytes>,
     options: options::Http1Options,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl<Io> Http1<Io>
@@ -39,7 +41,13 @@ where
             io,
             leftover: None,
             options,
+            cancel_token: None,
         }
+    }
+
+    #[inline]
+    pub fn graceful_shutdown_token(&mut self, token: CancellationToken) {
+        self.cancel_token = Some(token);
     }
 
     #[inline]
@@ -795,6 +803,11 @@ where
                     // HTTP upgrade
                     let _ = upgrade_tx.send(Upgraded::new(self.io, self.leftover));
                     return Ok(());
+                }
+
+                if self.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    // Graceful shutdown requested, break out of loop
+                    break;
                 }
             }
             Ok(())
