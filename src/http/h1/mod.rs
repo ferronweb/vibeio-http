@@ -148,7 +148,8 @@ where
                     })?;
                     // Ignore the trailing CRLF
                     if let Some(leftover) = self.leftover.take() {
-                        let mut new_leftover = Vec::new();
+                        let mut new_leftover =
+                            Vec::with_capacity(leftover.len() + (len_buf.len() - pos - 2));
                         new_leftover.extend_from_slice(&len_buf[pos + 2..]);
                         new_leftover.extend(leftover);
                         self.leftover = Some(bytes::Bytes::from(new_leftover));
@@ -212,7 +213,8 @@ where
                 buf_ro.truncate(bytes_read);
                 let leftover_to_add = buf_ro.split_off(to_parse_length);
                 if let Some(leftover) = self.leftover.take() {
-                    let mut new_leftover = Vec::new();
+                    let mut new_leftover =
+                        Vec::with_capacity(leftover_to_add.len() + leftover.len());
                     new_leftover.extend(leftover_to_add);
                     new_leftover.extend(leftover);
                     self.leftover = Some(bytes::Bytes::from(new_leftover));
@@ -223,7 +225,7 @@ where
                 // Parse trailers using `httparse` crate's header parsing
                 let mut httparse_trailers =
                     vec![httparse::EMPTY_HEADER; self.options.max_header_count].into_boxed_slice();
-                let status = httparse::parse_headers(&buf_ro[..], &mut httparse_trailers)
+                let status = httparse::parse_headers(&buf_ro, &mut httparse_trailers)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
                 if let httparse::Status::Complete((_, trailers)) = status {
                     let mut trailers_constructed = HeaderMap::new();
@@ -605,25 +607,15 @@ where
                     let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
                     match chunk.into_data() {
                         Ok(data) => {
-                            if !head_written {
-                                // Write head with first chunk at once
-                                let mut head = head.split_off(0);
-                                if chunked {
-                                    // Chunked encoding
-                                    head.extend_from_slice(format!("{:X}", data.len()).as_bytes());
-                                    head.extend_from_slice(b"\r\n");
-                                }
-                                head.extend(data);
-                                if chunked {
-                                    head.extend_from_slice(b"\r\n");
-                                }
-                                write_queue_tx
-                                    .send(Bytes::from_owner(head))
-                                    .await
-                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                                head_written = true;
-                            } else if chunked {
-                                let mut chunked_data = Vec::new();
+                            if chunked {
+                                let mut chunked_data = if head_written {
+                                    Vec::with_capacity(
+                                        data.len() + 4 + (data.len().ilog2() / 4) as usize,
+                                    )
+                                } else {
+                                    head_written = true;
+                                    head.split_off(0)
+                                };
                                 chunked_data.extend_from_slice(
                                     format!("{:X}", data.len()).to_string().as_bytes(),
                                 );
@@ -635,10 +627,20 @@ where
                                     .await
                                     .map_err(|e| std::io::Error::other(e.to_string()))?;
                             } else {
-                                write_queue_tx
-                                    .send(data)
-                                    .await
-                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                if head_written {
+                                    write_queue_tx
+                                        .send(data)
+                                        .await
+                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                } else {
+                                    head_written = true;
+                                    let mut data_to_write = head.split_off(0);
+                                    data_to_write.extend_from_slice(data.as_ref());
+                                    write_queue_tx
+                                        .send(Bytes::from_owner(data_to_write))
+                                        .await
+                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                }
                             }
                         }
                         Err(chunk) => {
@@ -940,17 +942,10 @@ where
                     let select_read_body_either =
                         futures_util::future::select(request_fut, early_hints_fut);
                     let select_either =
-                        futures_util::future::select(select_read_body_either, read_body_fut).await;
+                        futures_util::future::select(read_body_fut, select_read_body_either).await;
 
                     let (response, body_fut) = match select_either {
-                        futures_util::future::Either::Left((response, read_body_fut)) => (
-                            match response {
-                                futures_util::future::Either::Left((response, _)) => response,
-                                futures_util::future::Either::Right((_, _)) => unreachable!(),
-                            },
-                            Some(read_body_fut),
-                        ),
-                        futures_util::future::Either::Right((result, request_fut)) => {
+                        futures_util::future::Either::Left((result, request_fut)) => {
                             result?;
                             (
                                 match request_fut.await {
@@ -960,6 +955,13 @@ where
                                 None,
                             )
                         }
+                        futures_util::future::Either::Right((response, read_body_fut)) => (
+                            match response {
+                                futures_util::future::Either::Left((response, _)) => response,
+                                futures_util::future::Either::Right((_, _)) => unreachable!(),
+                            },
+                            Some(read_body_fut),
+                        ),
                     };
 
                     // Drain away remaining body
