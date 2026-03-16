@@ -76,7 +76,9 @@ where
     ) -> Result<(), std::io::Error> {
         let mut remaining = content_length;
         while remaining > 0 {
-            let mut buf: Box<[u8]> = vec![0u8; remaining.min(16384) as usize].into_boxed_slice();
+            // Safety: u8 is a primitive type, so we can safely assume initialization
+            let mut buf: Box<[u8]> =
+                unsafe { Box::new_uninit_slice(remaining.min(16384) as usize).assume_init() };
             let n = self.read_with_leftover(&mut buf).await?;
             if n == 0 {
                 break;
@@ -97,7 +99,8 @@ where
         would_have_trailers: bool,
     ) -> Result<bytes::Bytes, std::io::Error> {
         let len = {
-            let mut len_buf: Box<[u8]> = vec![0u8; 48].into_boxed_slice();
+            // Safety: u8 is a primitive type, so we can safely assume initialization
+            let mut len_buf: Box<[u8]> = unsafe { Box::new_uninit_slice(48).assume_init() };
             let mut len_buf_pos = 0;
             loop {
                 if len_buf_pos >= len_buf.len() {
@@ -136,7 +139,8 @@ where
                 }
             }
         };
-        let mut chunk = vec![0u8; len + 2];
+        // Safety: u8 is a primitive type, so we can safely assume initialization
+        let mut chunk: Box<[u8]> = unsafe { Box::new_uninit_slice(len + 2).assume_init() };
         let mut read = 0;
         if len == 0 && would_have_trailers {
             return Ok(bytes::Bytes::new()); // Empty terminating chunk
@@ -144,15 +148,24 @@ where
         // + 2, because we need to read the trailing CRLF
         while read < len + 2 {
             let n = self.read_with_leftover(&mut chunk[read..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF",
+                ));
+            }
             read += n;
         }
+        let mut chunk = bytes::Bytes::from_owner(chunk);
         chunk.truncate(len);
-        Ok(bytes::Bytes::from(chunk))
+        Ok(chunk)
     }
 
     #[inline]
     async fn read_trailers(&mut self) -> Result<Option<http::HeaderMap>, std::io::Error> {
-        let mut buf: Box<[u8]> = vec![0u8; self.options.max_header_size].into_boxed_slice();
+        // Safety: u8 is a primitive type, so we can safely assume initialization
+        let mut buf: Box<[u8]> =
+            unsafe { Box::new_uninit_slice(self.options.max_header_size).assume_init() };
         let mut bytes_read: usize = 0;
         loop {
             let mut temp_buf = [0u8; 4096];
@@ -322,7 +335,9 @@ where
     #[inline]
     async fn get_head(&mut self) -> Result<(bytes::Bytes, usize), std::io::Error> {
         let mut request_line_read = false;
-        let mut buf: Box<[u8]> = vec![0u8; self.options.max_header_size].into_boxed_slice();
+        // Safety: u8 is a primitive type, so we can safely assume initialization
+        let mut buf: Box<[u8]> =
+            unsafe { Box::new_uninit_slice(self.options.max_header_size).assume_init() };
         let mut bytes_read: usize = 0;
         let mut whitespace_trimmed = None;
         loop {
