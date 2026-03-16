@@ -6,6 +6,7 @@ pub struct Http1Options {
     pub(crate) header_read_timeout: Option<std::time::Duration>,
     pub(crate) send_continue_response: bool,
     pub(crate) enable_early_hints: bool,
+    pub(crate) enable_vectored_write: bool,
 }
 
 impl Http1Options {
@@ -18,6 +19,7 @@ impl Http1Options {
             header_read_timeout: Some(std::time::Duration::from_secs(30)),
             send_continue_response: true,
             enable_early_hints: false,
+            enable_vectored_write: false,
         }
     }
 
@@ -33,6 +35,11 @@ impl Http1Options {
 
     pub fn send_date_header(mut self, send: bool) -> Self {
         self.send_date_header = send;
+        self
+    }
+
+    pub fn enable_vectored_write(mut self, enable: bool) -> Self {
+        self.enable_vectored_write = enable;
         self
     }
 

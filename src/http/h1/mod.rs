@@ -8,6 +8,7 @@ pub use upgrade::*;
 
 use std::{
     cell::UnsafeCell,
+    io::IoSlice,
     pin::Pin,
     str::FromStr,
     task::{Context, Poll},
@@ -66,6 +67,18 @@ where
             }
         };
         self.io.read(buf).await
+    }
+
+    #[inline]
+    async fn write_all_vectored(&mut self, mut bufs: &mut [IoSlice<'_>]) -> std::io::Result<()> {
+        while !bufs.is_empty() {
+            let n = self.io.write_vectored(bufs).await?;
+            if n == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            IoSlice::advance_slices(&mut bufs, n);
+        }
+        Ok(())
     }
 
     #[inline]
@@ -473,94 +486,78 @@ where
             {}
         }
 
-        let mut head = Vec::new();
-        if version == Version::HTTP_10 {
-            head.extend_from_slice(b"HTTP/1.0 ");
-        } else {
-            head.extend_from_slice(b"HTTP/1.1 ");
-        }
-        head.extend_from_slice(response.status().as_str().as_bytes());
-        if let Some(canonical_reason) = response.status().canonical_reason() {
-            head.extend_from_slice(b" ");
-            head.extend_from_slice(canonical_reason.as_bytes());
-        }
-        head.extend_from_slice(b"\r\n");
-        for (name, value) in response.headers() {
-            head.extend_from_slice(name.as_str().as_bytes());
-            head.extend_from_slice(b": ");
-            head.extend_from_slice(value.as_bytes());
-            head.extend_from_slice(b"\r\n");
-        }
-        head.extend_from_slice(b"\r\n");
+        if self.io.is_write_vectored() && self.options.enable_vectored_write {
+            let response = UnsafeCell::new(response);
+            // Safety: There's only one "response_mut" mutable reference use, and it's used to obtain data from the body only.
+            // The "response_ref" reference is used for read-only access to headers and status.
+            let response_ref = unsafe { &*response.get() };
+            let response_mut = unsafe { &mut *response.get() };
+            let mut head: Vec<IoSlice<'_>> = Vec::new();
+            if version == Version::HTTP_10 {
+                head.push(IoSlice::new(b"HTTP/1.0 "));
+            } else {
+                head.push(IoSlice::new(b"HTTP/1.1 "));
+            }
+            let status = response_ref.status();
+            head.push(IoSlice::new(status.as_str().as_bytes()));
+            if let Some(canonical_reason) = status.canonical_reason() {
+                head.push(IoSlice::new(b" "));
+                head.push(IoSlice::new(canonical_reason.as_bytes()));
+            }
+            head.push(IoSlice::new(b"\r\n"));
+            for (name, value) in response_ref.headers() {
+                head.push(IoSlice::new(name.as_str().as_bytes()));
+                head.push(IoSlice::new(b": "));
+                head.push(IoSlice::new(value.as_bytes()));
+                head.push(IoSlice::new(b"\r\n"));
+            }
+            head.push(IoSlice::new(b"\r\n"));
 
-        let (write_queue_tx, write_queue_rx) = async_channel::bounded::<bytes::Bytes>(2);
-        let body_write_future = Box::pin(async {
-            let mut head_written = false;
             let mut trailers_written = false;
-            while let Some(chunk) = response.body_mut().frame().await {
+            let mut head_written = false;
+            while let Some(chunk) = response_mut.body_mut().frame().await {
                 let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
                 match chunk.into_data() {
                     Ok(data) => {
-                        if !head_written {
-                            // Write head with first chunk at once
-                            let mut head = head.split_off(0);
-                            if chunked {
-                                // Chunked encoding
-                                head.extend_from_slice(format!("{:X}", data.len()).as_bytes());
-                                head.extend_from_slice(b"\r\n");
+                        if chunked {
+                            let data_len = format!("{:X}", data.len()).to_string();
+                            let mut iovecs = [
+                                IoSlice::new(data_len.as_bytes()),
+                                IoSlice::new(b"\r\n"),
+                                IoSlice::new(&data),
+                                IoSlice::new(b"\r\n"),
+                            ];
+                            if head_written {
+                                self.write_all_vectored(&mut iovecs).await?;
+                            } else {
+                                let mut iovecs2 = head.split_off(0);
+                                iovecs2.extend_from_slice(&iovecs);
+                                self.write_all_vectored(&mut iovecs2).await?;
+                                head_written = true;
                             }
-                            head.extend(data);
-                            if chunked {
-                                head.extend_from_slice(b"\r\n");
-                            }
-                            write_queue_tx
-                                .send(Bytes::from_owner(head))
-                                .await
-                                .map_err(|e| std::io::Error::other(e.to_string()))?;
-                            head_written = true;
-                        } else if chunked {
-                            let chunked_data = Vec::new();
-                            head.extend_from_slice(
-                                format!("{:X}", data.len()).to_string().as_bytes(),
-                            );
-                            head.extend_from_slice(b"\r\n");
-                            head.extend(data);
-                            head.extend_from_slice(b"\r\n");
-                            write_queue_tx
-                                .send(Bytes::from_owner(chunked_data))
-                                .await
-                                .map_err(|e| std::io::Error::other(e.to_string()))?;
                         } else {
-                            write_queue_tx
-                                .send(data)
-                                .await
-                                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                            if head_written {
+                                self.write_all_vectored(&mut [IoSlice::new(&data)]).await?;
+                            } else {
+                                let mut iovecs2 = head.split_off(0);
+                                iovecs2.push(IoSlice::new(&data));
+                                self.write_all_vectored(&mut iovecs2).await?;
+                            }
                         }
                     }
                     Err(chunk) => {
                         if let Ok(trailers) = chunk.into_trailers() {
                             if write_trailers {
-                                let mut trail = Vec::new();
-                                trail.extend_from_slice(b"0\r\n");
-                                let mut current_header_name = None;
-                                for (name, value) in trailers {
-                                    if let Some(name) = name {
-                                        current_header_name = Some(name);
-                                    };
-                                    if let Some(current_header_name) = &current_header_name {
-                                        trail.extend_from_slice(
-                                            current_header_name.as_str().as_bytes(),
-                                        );
-                                        trail.extend_from_slice(b": ");
-                                        trail.extend_from_slice(value.as_bytes());
-                                        trail.extend_from_slice(b"\r\n");
-                                    }
+                                let mut trail: Vec<IoSlice<'_>> = Vec::new();
+                                trail.push(IoSlice::new(b"0\r\n"));
+                                for (name, value) in &trailers {
+                                    trail.push(IoSlice::new(name.as_str().as_bytes()));
+                                    trail.push(IoSlice::new(b": "));
+                                    trail.push(IoSlice::new(value.as_bytes()));
+                                    trail.push(IoSlice::new(b"\r\n"));
                                 }
-                                trail.extend_from_slice(b"\r\n");
-                                write_queue_tx
-                                    .send(Bytes::from_owner(trail))
-                                    .await
-                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                trail.push(IoSlice::new(b"\r\n"));
+                                self.write_all_vectored(&mut trail).await?;
                                 trailers_written = true;
                             }
                             break;
@@ -569,56 +566,162 @@ where
                 };
             }
             if !head_written {
-                write_queue_tx
-                    .send(Bytes::from_owner(head))
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                self.write_all_vectored(&mut head).await?;
             }
             if chunked && !trailers_written {
                 // Terminating chunk
-                write_queue_tx
-                    .send(Bytes::from_static(b"0\r\n\r\n"))
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                self.write_all_vectored(&mut [IoSlice::new(b"0\r\n\r\n")])
+                    .await?;
             }
-            write_queue_tx.close();
-
-            futures_util::future::pending::<Result<(), std::io::Error>>().await
-        });
-        let write_future = Box::pin(async {
-            let mut write_buf = Vec::new();
-            loop {
-                let chunk = if write_buf.is_empty() {
-                    let Some(chunk) = write_queue_rx.recv().await.ok() else {
-                        // Channel closed, break out of loop
-                        break;
-                    };
-                    Some(chunk)
-                } else {
-                    let result = write_queue_rx.try_recv();
-                    if result.as_ref().is_err_and(|e| e.is_closed()) {
-                        break;
-                    }
-                    result.ok()
-                };
-                if let Some(chunk) = chunk {
-                    write_buf.extend(chunk);
-                }
-                let written = self.io.write(&write_buf).await?;
-                let to_write = write_buf.split_off(written);
-                write_buf = to_write;
-            }
-            self.io.write_all(&write_buf).await?;
             self.io.flush().await?;
-            Ok::<(), std::io::Error>(())
-        });
-
-        match futures_util::future::select(body_write_future, write_future).await {
-            futures_util::future::Either::Left((result, _)) => {
-                result?;
+        } else {
+            let mut head = Vec::new();
+            if version == Version::HTTP_10 {
+                head.extend_from_slice(b"HTTP/1.0 ");
+            } else {
+                head.extend_from_slice(b"HTTP/1.1 ");
             }
-            futures_util::future::Either::Right((result, _)) => {
-                result?;
+            head.extend_from_slice(response.status().as_str().as_bytes());
+            if let Some(canonical_reason) = response.status().canonical_reason() {
+                head.extend_from_slice(b" ");
+                head.extend_from_slice(canonical_reason.as_bytes());
+            }
+            head.extend_from_slice(b"\r\n");
+            for (name, value) in response.headers() {
+                head.extend_from_slice(name.as_str().as_bytes());
+                head.extend_from_slice(b": ");
+                head.extend_from_slice(value.as_bytes());
+                head.extend_from_slice(b"\r\n");
+            }
+            head.extend_from_slice(b"\r\n");
+
+            let (write_queue_tx, write_queue_rx) = async_channel::bounded::<bytes::Bytes>(2);
+            let body_write_future = Box::pin(async {
+                let mut head_written = false;
+                let mut trailers_written = false;
+                while let Some(chunk) = response.body_mut().frame().await {
+                    let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
+                    match chunk.into_data() {
+                        Ok(data) => {
+                            if !head_written {
+                                // Write head with first chunk at once
+                                let mut head = head.split_off(0);
+                                if chunked {
+                                    // Chunked encoding
+                                    head.extend_from_slice(format!("{:X}", data.len()).as_bytes());
+                                    head.extend_from_slice(b"\r\n");
+                                }
+                                head.extend(data);
+                                if chunked {
+                                    head.extend_from_slice(b"\r\n");
+                                }
+                                write_queue_tx
+                                    .send(Bytes::from_owner(head))
+                                    .await
+                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                head_written = true;
+                            } else if chunked {
+                                let chunked_data = Vec::new();
+                                head.extend_from_slice(
+                                    format!("{:X}", data.len()).to_string().as_bytes(),
+                                );
+                                head.extend_from_slice(b"\r\n");
+                                head.extend(data);
+                                head.extend_from_slice(b"\r\n");
+                                write_queue_tx
+                                    .send(Bytes::from_owner(chunked_data))
+                                    .await
+                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                            } else {
+                                write_queue_tx
+                                    .send(data)
+                                    .await
+                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                            }
+                        }
+                        Err(chunk) => {
+                            if let Ok(trailers) = chunk.into_trailers() {
+                                if write_trailers {
+                                    let mut trail = Vec::new();
+                                    trail.extend_from_slice(b"0\r\n");
+                                    let mut current_header_name = None;
+                                    for (name, value) in trailers {
+                                        if let Some(name) = name {
+                                            current_header_name = Some(name);
+                                        };
+                                        if let Some(current_header_name) = &current_header_name {
+                                            trail.extend_from_slice(
+                                                current_header_name.as_str().as_bytes(),
+                                            );
+                                            trail.extend_from_slice(b": ");
+                                            trail.extend_from_slice(value.as_bytes());
+                                            trail.extend_from_slice(b"\r\n");
+                                        }
+                                    }
+                                    trail.extend_from_slice(b"\r\n");
+                                    write_queue_tx
+                                        .send(Bytes::from_owner(trail))
+                                        .await
+                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                    trailers_written = true;
+                                }
+                                break;
+                            }
+                        }
+                    };
+                }
+                if !head_written {
+                    write_queue_tx
+                        .send(Bytes::from_owner(head))
+                        .await
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                }
+                if chunked && !trailers_written {
+                    // Terminating chunk
+                    write_queue_tx
+                        .send(Bytes::from_static(b"0\r\n\r\n"))
+                        .await
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                }
+                write_queue_tx.close();
+
+                futures_util::future::pending::<Result<(), std::io::Error>>().await
+            });
+            let write_future = Box::pin(async {
+                let mut write_buf = Vec::new();
+                loop {
+                    let chunk = if write_buf.is_empty() {
+                        let Some(chunk) = write_queue_rx.recv().await.ok() else {
+                            // Channel closed, break out of loop
+                            break;
+                        };
+                        Some(chunk)
+                    } else {
+                        let result = write_queue_rx.try_recv();
+                        if result.as_ref().is_err_and(|e| e.is_closed()) {
+                            break;
+                        }
+                        result.ok()
+                    };
+                    if let Some(chunk) = chunk {
+                        write_buf.extend(chunk);
+                    }
+                    let written = self.io.write(&write_buf).await?;
+                    let to_write = write_buf.split_off(written);
+                    write_buf = to_write;
+                }
+                self.io.write_all(&write_buf).await?;
+                self.io.flush().await?;
+                Ok::<(), std::io::Error>(())
+            });
+
+            match futures_util::future::select(body_write_future, write_future).await {
+                futures_util::future::Either::Left((result, _)) => {
+                    result?;
+                }
+                futures_util::future::Either::Right((result, _)) => {
+                    result?;
+                }
             }
         }
 

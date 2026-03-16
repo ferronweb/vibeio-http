@@ -212,6 +212,58 @@ async fn test_fragmented() {
             let mut response_buf = Vec::new();
             client_reader.read_to_end(&mut response_buf).await.unwrap();
 
+            println!(
+                "response: {:?}",
+                std::str::from_utf8(&response_buf).unwrap()
+            );
+            // Assert the response
+            assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
+            assert!(response_buf.ends_with(b"\r\n\r\nHello, World!"));
+
+            server_task.await.unwrap().unwrap();
+        })
+        .await
+}
+
+#[tokio::test]
+async fn test_fragmented_non_vectored() {
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let (client_io, server_io) = tokio::io::duplex(16);
+
+            let server = Http1::new(
+                server_io,
+                Http1Options::new()
+                    .header_read_timeout(None)
+                    .enable_vectored_write(false),
+            );
+            let server_task = tokio::task::spawn_local(server.handle(|_req| async {
+                Ok::<_, http::Error>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(Full::new(bytes::Bytes::from_static(b"Hello, World!")))
+                        .unwrap(),
+                )
+            }));
+
+            let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+
+            tokio::task::spawn_local(async move {
+                // Write a GET request
+                client_writer
+                    .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+
+            // Read the response
+            let mut response_buf = Vec::new();
+            client_reader.read_to_end(&mut response_buf).await.unwrap();
+
+            println!(
+                "response: {:?}",
+                std::str::from_utf8(&response_buf).unwrap()
+            );
             // Assert the response
             assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
             assert!(response_buf.ends_with(b"\r\n\r\nHello, World!"));
