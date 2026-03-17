@@ -327,15 +327,17 @@ where
     async fn read_request(
         &mut self,
     ) -> Result<
-        (
+        Option<(
             Request<Incoming>,
             async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
-        ),
+        )>,
         std::io::Error,
     > {
         // Parse HTTP request using httparse
         let (request, body_tx, leftover_to_add) = {
-            let (head_buf, to_parse_length, headers) = self.get_head().await?;
+            let Some((head_buf, to_parse_length, headers)) = self.get_head().await? else {
+                return Ok(None);
+            };
             // Safety: The headers are read only after the request head has been parsed
             let headers = unsafe {
                 std::mem::transmute::<
@@ -401,13 +403,14 @@ where
         } else {
             self.leftover = Some(leftover_to_add);
         }
-        Ok((request, body_tx))
+        Ok(Some((request, body_tx)))
     }
 
     #[inline]
     async fn get_head(
         &mut self,
-    ) -> Result<(&[u8], usize, &mut [MaybeUninit<httparse::Header<'static>>]), std::io::Error> {
+    ) -> Result<Option<(&[u8], usize, &mut [MaybeUninit<httparse::Header<'static>>])>, std::io::Error>
+    {
         let mut request_line_read = false;
         let mut bytes_read: usize = 0;
         let mut whitespace_trimmed = None;
@@ -418,6 +421,9 @@ where
             };
             let n = self.read_with_leftover(temp_buf).await?;
             if n == 0 {
+                if whitespace_trimmed.is_none() {
+                    return Ok(None);
+                }
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "unexpected EOF",
@@ -471,11 +477,11 @@ where
                     {
                         let to_parse_length =
                             begin_search + separator_index + separator_len - whitespace_trimmed;
-                        return Ok((
+                        return Ok(Some((
                             &self.head_buf[whitespace_trimmed..bytes_read],
                             to_parse_length,
                             &mut self.parsed_headers,
-                        ));
+                        )));
                     }
                 }
             }
@@ -760,7 +766,10 @@ where
             } else {
                 Ok(self.read_request().await)
             } {
-                Ok(Ok(d)) => d,
+                Ok(Ok(Some(d))) => d,
+                Ok(Ok(None)) => {
+                    return Ok(());
+                }
                 Ok(Err(e)) => {
                     // Parse error
                     if let Ok(mut response) = error_fn(false).await {
