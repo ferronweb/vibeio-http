@@ -27,23 +27,25 @@ use std::{
 use async_channel::Receiver;
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::stream::Stream;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, Version, header};
+use http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, Version};
 use http_body::Body;
 use http_body_util::{BodyExt, Empty};
 use memchr::{memchr2, memchr3_iter, memmem};
 use smallvec::SmallVec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::http::{EarlyHints, HttpProtocol, Incoming, h1::writebuf::WriteBuf};
+use crate::http::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
 pub struct Http1<Io> {
     io: Io,
-    leftover: Option<bytes::Bytes>,
     options: options::Http1Options,
     cancel_token: Option<CancellationToken>,
-    head_buf: Box<[u8]>,
     parsed_headers: Box<[MaybeUninit<httparse::Header<'static>>]>,
     date_header_value_cached: Option<(String, std::time::SystemTime)>,
+    cached_headers: Option<HeaderMap>,
+    read_buf: BytesMut,
     write_buf: WriteBuf,
 }
 
@@ -69,18 +71,17 @@ where
     #[inline]
     pub fn new(io: Io, options: options::Http1Options) -> Self {
         // Safety: u8 is a primitive type, so we can safely assume initialization
-        let head_buf: Box<[u8]> =
-            unsafe { Box::new_uninit_slice(options.max_header_size).assume_init() };
+        let read_buf = BytesMut::with_capacity(options.max_header_size);
         let parsed_headers: Box<[MaybeUninit<httparse::Header<'static>>]> =
             Box::new_uninit_slice(options.max_header_count);
         Self {
             io,
-            leftover: None,
             options,
             cancel_token: None,
-            head_buf,
             parsed_headers,
             date_header_value_cached: None,
+            cached_headers: None,
+            read_buf,
             write_buf: WriteBuf::new(),
         }
     }
@@ -108,20 +109,26 @@ where
     }
 
     #[inline]
-    async fn read_with_leftover(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        if let Some(leftover) = &mut self.leftover {
-            let len = leftover.remaining().min(buf.len());
-            if len != 0 {
-                leftover.copy_to_slice(&mut buf[..len]);
-            }
-            if !leftover.has_remaining() {
-                self.leftover = None;
-            }
-            if len != 0 {
-                return Ok(len);
-            }
-        };
-        self.io.read(buf).await
+    async fn fill_buf(&mut self) -> Result<usize, std::io::Error> {
+        if self.read_buf.remaining() < 1024 {
+            self.read_buf.reserve(1024);
+        }
+        let spare_capacity = self.read_buf.spare_capacity_mut();
+        // Safety: The buffer is are read only after the request head has been parsed
+        let n = self
+            .io
+            .read(unsafe {
+                &mut *std::ptr::slice_from_raw_parts_mut(
+                    spare_capacity.as_mut_ptr() as *mut u8,
+                    spare_capacity.len(),
+                )
+            })
+            .await?;
+        if n == 0 {
+            return Ok(0);
+        }
+        unsafe { self.read_buf.set_len(self.read_buf.len() + n) };
+        Ok(n)
     }
 
     #[inline]
@@ -131,21 +138,25 @@ where
         content_length: u64,
     ) -> Result<(), std::io::Error> {
         let mut remaining = content_length;
+        let mut just_started = true;
         while remaining > 0 {
-            // Safety: u8 is a primitive type, so we can safely assume initialization
-            let mut buf = unsafe {
-                #[allow(invalid_value)]
-                #[allow(clippy::uninit_assumed_init)]
-                MaybeUninit::<[u8; 16384]>::uninit().assume_init()
-            };
-            let to_read_ln = remaining.min(16384) as usize;
-            let n = self.read_with_leftover(&mut buf[..to_read_ln]).await?;
-            if n == 0 {
-                break;
+            let have_to_read_buf = !just_started || self.read_buf.is_empty();
+            just_started = false;
+            if have_to_read_buf {
+                let n = self.fill_buf().await?;
+                if n == 0 {
+                    break;
+                }
             }
-            let mut chunk = bytes::Bytes::from_owner(buf);
-            chunk.truncate(n);
-            remaining -= n as u64;
+            let chunk = self
+                .read_buf
+                .split_to(
+                    self.read_buf
+                        .len()
+                        .min(remaining.min(usize::MAX as u64) as usize),
+                )
+                .freeze();
+            remaining -= chunk.len() as u64;
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
@@ -160,109 +171,116 @@ where
     ) -> Result<bytes::Bytes, std::io::Error> {
         let len = {
             // Safety: u8 is a primitive type, so we can safely assume initialization
-            let mut len_buf = unsafe {
-                #[allow(invalid_value)]
-                #[allow(clippy::uninit_assumed_init)]
-                MaybeUninit::<[u8; 48]>::uninit().assume_init()
-            };
-            let mut len_buf_pos = 0;
+            let mut len_buf_pos: usize = 0;
+            let mut just_started = true;
             loop {
-                if len_buf_pos >= len_buf.len() {
+                if len_buf_pos >= 48 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "chunk length buffer overflow",
                     ));
                 }
-                let n = self.read_with_leftover(&mut len_buf[len_buf_pos..]).await?;
+
+                let begin_search = len_buf_pos.saturating_sub(1);
+
+                let have_to_read_buf = !just_started || self.read_buf.is_empty();
+                just_started = false;
+                if have_to_read_buf {
+                    let n = self.fill_buf().await?;
+                    if n == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "unexpected EOF",
+                        ));
+                    }
+                    len_buf_pos += n;
+                } else {
+                    len_buf_pos += self.read_buf.len();
+                }
+
+                if let Some(pos) =
+                    memmem::find(&self.read_buf[begin_search..len_buf_pos.min(48)], b"\r\n")
+                {
+                    let numbers =
+                        std::str::from_utf8(&self.read_buf[begin_search..begin_search + pos])
+                            .map_err(|_| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "invalid chunk length",
+                                )
+                            })?;
+                    let len = usize::from_str_radix(numbers, 16).map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk length")
+                    })?;
+                    // Ignore the trailing CRLF
+                    self.read_buf.advance(begin_search + pos + 2);
+                    break len;
+                }
+            }
+        };
+        // Safety: u8 is a primitive type, so we can safely assume initialization
+        let mut read = 0;
+        if len == 0 && would_have_trailers {
+            return Ok(bytes::Bytes::new()); // Empty terminating chunk
+        }
+        let mut just_started = true;
+        // + 2, because we need to read the trailing CRLF
+        while read < len + 2 {
+            let have_to_read_buf = !just_started || self.read_buf.is_empty();
+            just_started = false;
+            if have_to_read_buf {
+                let n = self.fill_buf().await?;
                 if n == 0 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "unexpected EOF",
                     ));
                 }
-                len_buf_pos += n;
-                if let Some(pos) = memmem::find(&len_buf[..len_buf_pos], b"\r\n") {
-                    let numbers = std::str::from_utf8(&len_buf[..pos]).map_err(|_| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk length")
-                    })?;
-                    let len = usize::from_str_radix(numbers, 16).map_err(|_| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk length")
-                    })?;
-                    // Ignore the trailing CRLF
-                    if let Some(leftover) = self.leftover.take() {
-                        let mut new_leftover =
-                            Vec::with_capacity(leftover.len() + (len_buf.len() - pos - 2));
-                        new_leftover.extend_from_slice(&len_buf[pos + 2..]);
-                        new_leftover.extend(leftover);
-                        self.leftover = Some(bytes::Bytes::from(new_leftover));
-                    } else {
-                        let mut leftover = Bytes::from_owner(len_buf);
-                        leftover.advance(pos + 2);
-                        self.leftover = Some(leftover);
-                    }
-                    break len;
-                }
+                read += n;
+            } else {
+                read += self.read_buf.len();
             }
-        };
-        // Safety: u8 is a primitive type, so we can safely assume initialization
-        let mut chunk: Box<[u8]> = unsafe { Box::new_uninit_slice(len + 2).assume_init() };
-        let mut read = 0;
-        if len == 0 && would_have_trailers {
-            return Ok(bytes::Bytes::new()); // Empty terminating chunk
         }
-        // + 2, because we need to read the trailing CRLF
-        while read < len + 2 {
-            let n = self.read_with_leftover(&mut chunk[read..]).await?;
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "unexpected EOF",
-                ));
-            }
-            read += n;
-        }
-        let mut chunk = bytes::Bytes::from_owner(chunk);
-        chunk.truncate(len);
+        let chunk = self.read_buf.split_to(len).freeze();
+        self.read_buf.advance(2); // Ignore the trailing CRLF
         Ok(chunk)
     }
 
     #[inline]
     async fn read_trailers(&mut self) -> Result<Option<http::HeaderMap>, std::io::Error> {
         // Safety: u8 is a primitive type, so we can safely assume initialization
-        let mut buf: Box<[u8]> =
-            unsafe { Box::new_uninit_slice(self.options.max_header_size).assume_init() };
         let mut bytes_read: usize = 0;
+        let mut just_started = true;
         while bytes_read < self.options.max_header_size {
-            let n = self.read_with_leftover(&mut buf[bytes_read..]).await?;
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "unexpected EOF",
-                ));
-            }
-            let begin_search = bytes_read.saturating_sub(3);
-            bytes_read = (bytes_read + n).min(self.options.max_header_size);
+            let old_bytes_read = bytes_read;
+            let begin_search = old_bytes_read.saturating_sub(3);
 
-            if bytes_read > 2 && buf[0] == b'\r' && buf[1] == b'\n' {
+            let have_to_read_buf = !just_started || self.read_buf.is_empty();
+            just_started = false;
+            if have_to_read_buf {
+                let n = self.fill_buf().await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF",
+                    ));
+                }
+                bytes_read = (old_bytes_read + n).min(self.options.max_header_size);
+            } else {
+                bytes_read =
+                    (old_bytes_read + self.read_buf.len()).min(self.options.max_header_size)
+            }
+
+            if bytes_read > 2 && self.read_buf[0] == b'\r' && self.read_buf[1] == b'\n' {
                 // No trailers, return None
                 return Ok(None);
             }
 
-            if let Some(separator_index) = memmem::find(&buf[begin_search..bytes_read], b"\r\n\r\n")
+            if let Some(separator_index) =
+                memmem::find(&self.read_buf[begin_search..bytes_read], b"\r\n\r\n")
             {
                 let to_parse_length = begin_search + separator_index + 4;
-                let mut buf_ro = bytes::Bytes::from_owner(buf);
-                buf_ro.truncate(bytes_read);
-                let leftover_to_add = buf_ro.split_off(to_parse_length);
-                if let Some(leftover) = self.leftover.take() {
-                    let mut new_leftover =
-                        Vec::with_capacity(leftover_to_add.len() + leftover.len());
-                    new_leftover.extend(leftover_to_add);
-                    new_leftover.extend(leftover);
-                    self.leftover = Some(bytes::Bytes::from(new_leftover));
-                } else {
-                    self.leftover = Some(leftover_to_add);
-                }
+                let buf_ro = self.read_buf.split_to(to_parse_length).freeze();
 
                 // Parse trailers using `httparse` crate's header parsing
                 let mut httparse_trailers =
@@ -278,8 +296,14 @@ where
                         }
                         let name = HeaderName::from_bytes(header.name.as_bytes())
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
-                        let value = HeaderValue::from_bytes(header.value)
-                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        let value_start = header.value.as_ptr() as usize - buf_ro.as_ptr() as usize;
+                        let value_len = header.value.len();
+                        // Safety: the header value is already validated by httparse
+                        let value = unsafe {
+                            HeaderValue::from_maybe_shared_unchecked(
+                                buf_ro.slice(value_start..(value_start + value_len)),
+                            )
+                        };
                         trailers_constructed.append(name, value);
                     }
 
@@ -334,8 +358,8 @@ where
         std::io::Error,
     > {
         // Parse HTTP request using httparse
-        let (request, body_tx, leftover_to_add) = {
-            let Some((head_buf, to_parse_length, headers)) = self.get_head().await? else {
+        let (request, body_tx) = {
+            let Some((head, headers)) = self.get_head().await? else {
                 return Ok(None);
             };
             // Safety: The headers are read only after the request head has been parsed
@@ -347,7 +371,7 @@ where
             };
             let mut req = httparse::Request::new(&mut []);
             let status = req
-                .parse_with_uninit_headers(&head_buf[..to_parse_length], headers)
+                .parse_with_uninit_headers(&head, headers)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             if status.is_partial() {
                 return Err(std::io::Error::new(
@@ -375,8 +399,12 @@ where
                 *request.uri_mut() =
                     Uri::from_str(path).map_err(|e| std::io::Error::other(e.to_string()))?;
             }
-            let mut header_map = http::HeaderMap::try_with_capacity(req.headers.len())
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut header_map = self.cached_headers.take().unwrap_or_default();
+            header_map.clear();
+            let additional_capacity = req.headers.len().saturating_sub(header_map.capacity());
+            if additional_capacity > 0 {
+                header_map.reserve(additional_capacity);
+            }
             for header in req.headers {
                 if header == &httparse::EMPTY_HEADER {
                     // No more headers...
@@ -384,57 +412,57 @@ where
                 }
                 let name = HeaderName::from_bytes(header.name.as_bytes())
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
-                let value = HeaderValue::from_bytes(header.value)
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let value_start = header.value.as_ptr() as usize - head.as_ptr() as usize;
+                let value_len = header.value.len();
+                // Safety: the header value is already validated by httparse
+                let value = unsafe {
+                    HeaderValue::from_maybe_shared_unchecked(
+                        head.slice(value_start..(value_start + value_len)),
+                    )
+                };
                 header_map.append(name, value);
             }
             *request.headers_mut() = header_map;
 
-            (
-                request,
-                body_tx,
-                Bytes::copy_from_slice(&head_buf[to_parse_length..]),
-            )
+            (request, body_tx)
         };
-        if let Some(leftover) = self.leftover.take() {
-            let mut new_leftover = BytesMut::from(leftover_to_add);
-            new_leftover.extend(leftover);
-            self.leftover = Some(new_leftover.freeze());
-        } else {
-            self.leftover = Some(leftover_to_add);
-        }
         Ok(Some((request, body_tx)))
     }
 
     #[inline]
     async fn get_head(
         &mut self,
-    ) -> Result<Option<(&[u8], usize, &mut [MaybeUninit<httparse::Header<'static>>])>, std::io::Error>
+    ) -> Result<Option<(Bytes, &mut [MaybeUninit<httparse::Header<'static>>])>, std::io::Error>
     {
         let mut request_line_read = false;
         let mut bytes_read: usize = 0;
         let mut whitespace_trimmed = None;
+        let mut just_started = true;
         while bytes_read < self.options.max_header_size {
-            // Safety: The buffer is are read only after the request head has been parsed
-            let temp_buf = unsafe {
-                std::mem::transmute::<&mut [u8], &mut [u8]>(&mut self.head_buf[bytes_read..])
-            };
-            let n = self.read_with_leftover(temp_buf).await?;
-            if n == 0 {
-                if whitespace_trimmed.is_none() {
-                    return Ok(None);
-                }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "unexpected EOF",
-                ));
-            }
             let old_bytes_read = bytes_read;
             let begin_search = old_bytes_read.saturating_sub(3);
-            bytes_read = (bytes_read + n).min(self.options.max_header_size);
+
+            let have_to_read_buf = !just_started || self.read_buf.is_empty();
+            just_started = false;
+            if have_to_read_buf {
+                let n = self.fill_buf().await?;
+                if n == 0 {
+                    if whitespace_trimmed.is_none() {
+                        return Ok(None);
+                    }
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF",
+                    ));
+                }
+                bytes_read = (old_bytes_read + n).min(self.options.max_header_size);
+            } else {
+                bytes_read =
+                    (old_bytes_read + self.read_buf.len()).min(self.options.max_header_size)
+            }
 
             if whitespace_trimmed.is_none() {
-                whitespace_trimmed = self.head_buf[old_bytes_read..bytes_read]
+                whitespace_trimmed = self.read_buf[old_bytes_read..bytes_read]
                     .iter()
                     .position(|b| !b.is_ascii_whitespace());
             }
@@ -446,11 +474,11 @@ where
                         b' ',
                         b'\r',
                         b'\n',
-                        &self.head_buf[whitespace_trimmed..bytes_read],
+                        &self.read_buf[whitespace_trimmed..bytes_read],
                     );
                     let mut spaces = 0;
                     for separator_index in memchr {
-                        if self.head_buf[whitespace_trimmed + separator_index] == b' ' {
+                        if self.read_buf[whitespace_trimmed + separator_index] == b' ' {
                             if spaces >= 2 {
                                 return Err(std::io::Error::new(
                                     std::io::ErrorKind::InvalidInput,
@@ -473,15 +501,13 @@ where
                 if request_line_read {
                     let begin_search = begin_search.max(whitespace_trimmed);
                     if let Some((separator_index, separator_len)) =
-                        search_header_body_separator(&self.head_buf[begin_search..bytes_read])
+                        search_header_body_separator(&self.read_buf[begin_search..bytes_read])
                     {
                         let to_parse_length =
                             begin_search + separator_index + separator_len - whitespace_trimmed;
-                        return Ok(Some((
-                            &self.head_buf[whitespace_trimmed..bytes_read],
-                            to_parse_length,
-                            &mut self.parsed_headers,
-                        )));
+                        self.read_buf.advance(whitespace_trimmed);
+                        let head = self.read_buf.split_to(to_parse_length);
+                        return Ok(Some((head.freeze(), &mut self.parsed_headers)));
                     }
                 }
             }
@@ -557,28 +583,29 @@ where
         // The "response_ref" reference is used for read-only access to headers and status.
         let response_ref = unsafe { &*response.get() };
         let response_mut = unsafe { &mut *response.get() };
+
+        let mut head = Vec::with_capacity(30 + response_ref.headers().len() * 30); // Similar to Hyper's heuristic
+        if version == Version::HTTP_10 {
+            head.extend_from_slice(b"HTTP/1.0 ");
+        } else {
+            head.extend_from_slice(b"HTTP/1.1 ");
+        }
+        let status = response_ref.status();
+        head.extend_from_slice(status.as_str().as_bytes());
+        if let Some(canonical_reason) = status.canonical_reason() {
+            head.extend_from_slice(b" ");
+            head.extend_from_slice(canonical_reason.as_bytes());
+        }
+        head.extend_from_slice(b"\r\n");
+        for (name, value) in response_ref.headers() {
+            head.extend_from_slice(name.as_str().as_bytes());
+            head.extend_from_slice(b": ");
+            head.extend_from_slice(value.as_bytes());
+            head.extend_from_slice(b"\r\n");
+        }
+        head.extend_from_slice(b"\r\n");
         unsafe {
-            if version == Version::HTTP_10 {
-                self.write_buf.push(IoSlice::new(b"HTTP/1.0 "));
-            } else {
-                self.write_buf.push(IoSlice::new(b"HTTP/1.1 "));
-            }
-            let status = response_ref.status();
-            self.write_buf
-                .push(IoSlice::new(status.as_str().as_bytes()));
-            if let Some(canonical_reason) = status.canonical_reason() {
-                self.write_buf.push(IoSlice::new(b" "));
-                self.write_buf
-                    .push(IoSlice::new(canonical_reason.as_bytes()));
-            }
-            self.write_buf.push(IoSlice::new(b"\r\n"));
-            for (name, value) in response_ref.headers() {
-                self.write_buf.push(IoSlice::new(name.as_str().as_bytes()));
-                self.write_buf.push(IoSlice::new(b": "));
-                self.write_buf.push(IoSlice::new(value.as_bytes()));
-                self.write_buf.push(IoSlice::new(b"\r\n"));
-            }
-            self.write_buf.push(IoSlice::new(b"\r\n"));
+            self.write_buf.push(IoSlice::new(&head));
         }
 
         if !chunked {
@@ -604,7 +631,8 @@ where
                         )
                         .await?;
                         self.io.flush().await?;
-                        drop(response);
+                        let reclaimed_headers = response.into_inner().into_parts().0.headers;
+                        self.cached_headers = Some(reclaimed_headers);
                         return Ok(());
                     }
                 }
@@ -617,10 +645,10 @@ where
             match chunk.into_data() {
                 Ok(data) => {
                     if chunked {
-                        let data_len = format!("{:X}", data.len()).to_string();
+                        let mut data_len_buf = Vec::with_capacity(16);
+                        write_chunk_size(&mut data_len_buf, data.len());
                         unsafe {
-                            self.write_buf.push(IoSlice::new(data_len.as_bytes()));
-                            self.write_buf.push(IoSlice::new(b"\r\n"));
+                            self.write_buf.push(IoSlice::new(&data_len_buf));
                             self.write_buf.push(IoSlice::new(&data));
                             self.write_buf.push(IoSlice::new(b"\r\n"));
                             self.write_buf
@@ -671,6 +699,8 @@ where
                 .await?;
         }
         self.io.flush().await?;
+        let reclaimed_headers = response.into_inner().into_parts().0.headers;
+        self.cached_headers = Some(reclaimed_headers);
 
         Ok(())
     }
@@ -956,7 +986,15 @@ where
 
             if was_upgraded {
                 // HTTP upgrade
-                let _ = upgrade_tx.send(Upgraded::new(self.io, self.leftover));
+                let frozen_buf = self.read_buf.freeze();
+                let _ = upgrade_tx.send(Upgraded::new(
+                    self.io,
+                    if frozen_buf.is_empty() {
+                        None
+                    } else {
+                        Some(frozen_buf)
+                    },
+                ));
                 return Ok(());
             }
 
@@ -1088,4 +1126,22 @@ fn search_header_body_separator(slice: &[u8]) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+/// Writes the chunk size to the given buffer in hexadecimal format, followed by `\r\n`.
+#[inline]
+fn write_chunk_size(dst: &mut Vec<u8>, len: usize) {
+    let mut buf = [0u8; 18];
+    let mut n = len;
+    let mut pos = buf.len();
+    loop {
+        pos -= 1;
+        buf[pos] = HEX_DIGITS[n & 0xF];
+        n >>= 4;
+        if n == 0 {
+            break;
+        }
+    }
+    dst.extend_from_slice(&buf[pos..]);
+    dst.extend_from_slice(b"\r\n");
 }

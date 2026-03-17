@@ -6,8 +6,8 @@ use http_body_util::{BodyExt, Empty, Full};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::{
+    h1::{prepare_upgrade, Http1, Http1Options},
     HttpProtocol,
-    h1::{Http1, Http1Options, prepare_upgrade},
 };
 
 #[tokio::test]
@@ -167,11 +167,9 @@ async fn test_connection_close() {
 
             // Assert the response
             assert!(response_buf.starts_with(b"HTTP/1.1 200 OK\r\n"));
-            assert!(
-                response_buf
-                    .windows(19)
-                    .any(|w| w == b"connection: close\r\n")
-            );
+            assert!(response_buf
+                .windows(19)
+                .any(|w| w == b"connection: close\r\n"));
 
             // The connection should be closed by the server. A read should return 0 bytes.
             let n = client_reader.read(&mut response_buf).await.unwrap();
@@ -356,11 +354,8 @@ async fn test_chunked_response_trailers() {
 
             // Assert the response
             assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
-            assert!(
-                response_buf.ends_with(
-                    b"\r\n\r\nD\r\nHello, World!\r\n0\r\ncontent-type: text/plain\r\n\r\n"
-                )
-            );
+            assert!(response_buf
+                .ends_with(b"\r\n\r\nD\r\nHello, World!\r\n0\r\ncontent-type: text/plain\r\n\r\n"));
 
             server_task.await.unwrap().unwrap();
         })
