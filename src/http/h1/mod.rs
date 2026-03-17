@@ -61,7 +61,7 @@ where
     }
 
     #[inline]
-    pub fn get_date_header_value(&mut self) -> &str {
+    fn get_date_header_value(&mut self) -> &str {
         let now = std::time::SystemTime::now();
         if self.date_header_value_cached.as_ref().is_none_or(|v| {
             v.1.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
@@ -77,8 +77,9 @@ where
     }
 
     #[inline]
-    pub fn graceful_shutdown_token(&mut self, token: CancellationToken) {
+    pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
+        self
     }
 
     #[inline]
@@ -623,13 +624,20 @@ where
                 head.extend_from_slice(b"HTTP/1.1 ");
             }
             head.extend_from_slice(response.status().as_str().as_bytes());
-            if let Some(canonical_reason) = response.status().canonical_reason() {
-                head.extend_from_slice(b" ");
-                head.extend_from_slice(canonical_reason.as_bytes());
-            }
+            head.extend_from_slice(b" ");
+            head.extend_from_slice(
+                response
+                    .status()
+                    .canonical_reason()
+                    .map_or(b"Unknown Status Code", |cr| cr.as_bytes()),
+            );
             head.extend_from_slice(b"\r\n");
             for (name, value) in response.headers() {
                 head.extend_from_slice(name.as_str().as_bytes());
+                if value.is_empty() {
+                    head.extend_from_slice(b":\r\n");
+                    continue;
+                }
                 head.extend_from_slice(b": ");
                 head.extend_from_slice(value.as_bytes());
                 head.extend_from_slice(b"\r\n");
@@ -692,6 +700,10 @@ where
                                             trail.extend_from_slice(
                                                 current_header_name.as_str().as_bytes(),
                                             );
+                                            if value.is_empty() {
+                                                trail.extend_from_slice(b":\r\n");
+                                                continue;
+                                            }
                                             trail.extend_from_slice(b": ");
                                             trail.extend_from_slice(value.as_bytes());
                                             trail.extend_from_slice(b"\r\n");
@@ -798,6 +810,10 @@ where
             };
             if let Some(current_header_name) = &current_header_name {
                 head.extend_from_slice(current_header_name.as_str().as_bytes());
+                if value.is_empty() {
+                    head.extend_from_slice(b":\r\n");
+                    continue;
+                }
                 head.extend_from_slice(b": ");
                 head.extend_from_slice(value.as_bytes());
                 head.extend_from_slice(b"\r\n");
