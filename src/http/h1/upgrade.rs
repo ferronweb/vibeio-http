@@ -1,6 +1,7 @@
 use std::{
+    future::Future,
     pin::Pin,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{atomic::AtomicBool, Arc},
     task::ready,
 };
 
