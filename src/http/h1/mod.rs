@@ -971,10 +971,16 @@ where
                     .headers_mut()
                     .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
             } else if keep_alive {
-                response
-                    .headers_mut()
-                    .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
-            } else {
+                if version == Version::HTTP_10
+                    || response.headers().contains_key(header::CONNECTION)
+                {
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+                }
+            } else if version == Version::HTTP_11
+                || response.headers().contains_key(header::CONNECTION)
+            {
                 response
                     .headers_mut()
                     .insert(header::CONNECTION, HeaderValue::from_static("close"));
