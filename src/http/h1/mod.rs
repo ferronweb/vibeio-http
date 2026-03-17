@@ -596,6 +596,7 @@ where
                             self.write_all_vectored(&mut head).await?;
                             zerocopy_fn(
                                 zero_copy.handle,
+                                // Safety: the lifetime of the static reference is bound by the lifetime of the Io struct
                                 unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
                                 content_length,
                             )
@@ -709,6 +710,7 @@ where
                             self.io.write_all(&mut head).await?;
                             zerocopy_fn(
                                 zero_copy.handle,
+                                // Safety: the lifetime of the static reference is bound by the lifetime of the Io struct
                                 unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
                                 content_length,
                             )
