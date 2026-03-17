@@ -1,10 +1,17 @@
 mod options;
 mod tests;
 mod upgrade;
+mod zerocopy;
 
 pub use options::*;
 use tokio_util::sync::CancellationToken;
 pub use upgrade::*;
+pub use zerocopy::*;
+
+#[cfg(unix)]
+pub(crate) type RawHandle = std::os::fd::RawFd;
+#[cfg(windows)]
+pub(crate) type RawHandle = std::os::windows::io::RawHandle;
 
 use std::{
     cell::UnsafeCell,
@@ -38,9 +45,24 @@ pub struct Http1<Io> {
     date_header_value_cached: Option<(String, std::time::SystemTime)>,
 }
 
+#[cfg(target_os = "linux")]
 impl<Io> Http1<Io>
 where
-    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    for<'a> Io: tokio::io::AsyncRead
+        + tokio::io::AsyncWrite
+        + vibeio::io::AsInnerRawHandle<'a>
+        + Unpin
+        + 'static,
+{
+    #[inline]
+    pub fn zerocopy(self) -> Http1Zerocopy<Io> {
+        Http1Zerocopy { inner: self }
+    }
+}
+
+impl<Io> Http1<Io>
+where
+    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
 {
     #[inline]
     pub fn new(io: Io, options: options::Http1Options) -> Self {
@@ -474,14 +496,19 @@ where
     }
 
     #[inline]
-    async fn write_response(
+    async fn write_response<Z, ZFut>(
         &mut self,
         mut response: Response<
             impl Body<Data = bytes::Bytes, Error = impl std::error::Error> + Unpin,
         >,
         version: Version,
         write_trailers: bool,
-    ) -> Result<(), std::io::Error> {
+        zerocopy_fn: Option<Z>,
+    ) -> Result<(), std::io::Error>
+    where
+        Z: FnMut(RawHandle, &'static Io, u64) -> ZFut,
+        ZFut: std::future::Future<Output = Result<(), std::io::Error>>,
+    {
         // Date header
         if self.options.send_date_header {
             response.headers_mut().insert(
@@ -555,6 +582,31 @@ where
                 head.push(IoSlice::new(b"\r\n"));
             }
             head.push(IoSlice::new(b"\r\n"));
+
+            if !chunked {
+                if let Some(content_length) = response_ref
+                    .headers()
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    if let Some(zero_copy) = response_ref.extensions().get::<ZerocopyResponse>() {
+                        if let Some(mut zerocopy_fn) = zerocopy_fn {
+                            // Zerocopy
+                            self.write_all_vectored(&mut head).await?;
+                            zerocopy_fn(
+                                zero_copy.handle,
+                                unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
+                                content_length,
+                            )
+                            .await?;
+                            self.io.flush().await?;
+                            drop(response);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
 
             let mut trailers_written = false;
             let mut head_written = false;
@@ -643,6 +695,31 @@ where
                 head.extend_from_slice(b"\r\n");
             }
             head.extend_from_slice(b"\r\n");
+
+            if !chunked {
+                if let Some(content_length) = response
+                    .headers()
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    if let Some(zero_copy) = response.extensions().get::<ZerocopyResponse>() {
+                        if let Some(mut zerocopy_fn) = zerocopy_fn {
+                            // Zerocopy
+                            self.io.write_all(&mut head).await?;
+                            zerocopy_fn(
+                                zero_copy.handle,
+                                unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
+                                content_length,
+                            )
+                            .await?;
+                            self.io.flush().await?;
+                            drop(response);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
 
             let (write_queue_tx, write_queue_rx) = async_channel::bounded::<bytes::Bytes>(2);
             let body_write_future = Box::pin(async {
@@ -825,17 +902,26 @@ where
 
         Ok(())
     }
-}
 
-impl<Io> HttpProtocol for Http1<Io>
-where
-    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
-{
     #[inline]
-    async fn handle_with_error_fn<F, Fut, ResB, ResBE, ResE, EF, EFut, EResB, EResBE, EResE>(
+    pub(crate) async fn handle_with_error_fn_and_zerocopy<
+        F,
+        Fut,
+        ResB,
+        ResBE,
+        ResE,
+        EF,
+        EFut,
+        EResB,
+        EResBE,
+        EResE,
+        ZF,
+        ZFut,
+    >(
         mut self,
         request_fn: F,
         error_fn: EF,
+        mut zerocopy_fn: Option<ZF>,
     ) -> Result<(), std::io::Error>
     where
         F: Fn(Request<Incoming>) -> Fut,
@@ -848,43 +934,50 @@ where
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin,
         EResE: std::error::Error,
         EResBE: std::error::Error,
+        ZF: FnMut(RawHandle, &'static Io, u64) -> ZFut,
+        ZFut: std::future::Future<Output = Result<(), std::io::Error>>,
     {
         let mut keep_alive = true;
 
         while keep_alive {
-            let (mut request, body_tx) =
-                match if let Some(timeout) = self.options.header_read_timeout {
-                    vibeio::time::timeout(timeout, self.read_request()).await
-                } else {
-                    Ok(self.read_request().await)
-                } {
-                    Ok(Ok(d)) => d,
-                    Ok(Err(e)) => {
-                        // Parse error
-                        if let Ok(mut response) = error_fn(false).await {
-                            response
-                                .headers_mut()
-                                .insert(header::CONNECTION, HeaderValue::from_static("close"));
+            let (mut request, body_tx) = match if let Some(timeout) =
+                self.options.header_read_timeout
+            {
+                vibeio::time::timeout(timeout, self.read_request()).await
+            } else {
+                Ok(self.read_request().await)
+            } {
+                Ok(Ok(d)) => d,
+                Ok(Err(e)) => {
+                    // Parse error
+                    if let Ok(mut response) = error_fn(false).await {
+                        response
+                            .headers_mut()
+                            .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-                            let _ = self.write_response(response, Version::HTTP_11, false).await;
-                        }
-                        return Err(e);
+                        let _ = self
+                            .write_response(response, Version::HTTP_11, false, zerocopy_fn.as_mut())
+                            .await;
                     }
-                    Err(_) => {
-                        // Timeout error
-                        if let Ok(mut response) = error_fn(true).await {
-                            response
-                                .headers_mut()
-                                .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                    return Err(e);
+                }
+                Err(_) => {
+                    // Timeout error
+                    if let Ok(mut response) = error_fn(true).await {
+                        response
+                            .headers_mut()
+                            .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-                            let _ = self.write_response(response, Version::HTTP_11, false).await;
-                        }
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "header read timeout",
-                        ));
+                        let _ = self
+                            .write_response(response, Version::HTTP_11, false, zerocopy_fn.as_mut())
+                            .await;
                     }
-                };
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "header read timeout",
+                    ));
+                }
+            };
 
             // Connection header detection
             let connection_header_split = request
@@ -1036,7 +1129,7 @@ where
             }
 
             // Write response to IO
-            self.write_response(response, version, write_trailers)
+            self.write_response(response, version, write_trailers, zerocopy_fn.as_mut())
                 .await?;
 
             if was_upgraded {
@@ -1051,6 +1144,47 @@ where
             }
         }
         Ok(())
+    }
+}
+
+impl<Io> HttpProtocol for Http1<Io>
+where
+    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+{
+    #[inline]
+    fn handle_with_error_fn<F, Fut, ResB, ResBE, ResE, EF, EFut, EResB, EResBE, EResE>(
+        self,
+        request_fn: F,
+        error_fn: EF,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
+    where
+        F: Fn(Request<Incoming>) -> Fut,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
+        ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
+        ResE: std::error::Error,
+        ResBE: std::error::Error,
+        EF: FnOnce(bool) -> EFut,
+        EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
+        EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin,
+        EResE: std::error::Error,
+        EResBE: std::error::Error,
+    {
+        #[allow(clippy::type_complexity)]
+        let no_zerocopy: Option<
+            Box<
+                dyn FnMut(
+                    RawHandle,
+                    &Io,
+                    u64,
+                ) -> Box<
+                    dyn std::future::Future<Output = Result<(), std::io::Error>>
+                        + Unpin
+                        + Send
+                        + Sync,
+                >,
+            >,
+        > = None;
+        self.handle_with_error_fn_and_zerocopy(request_fn, error_fn, no_zerocopy)
     }
 
     #[inline]
