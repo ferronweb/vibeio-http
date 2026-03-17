@@ -1,6 +1,7 @@
 mod options;
 mod tests;
 mod upgrade;
+mod writebuf;
 mod zerocopy;
 
 pub use options::*;
@@ -33,7 +34,7 @@ use memchr::{memchr2, memchr3_iter, memmem};
 use smallvec::SmallVec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::http::{EarlyHints, HttpProtocol, Incoming};
+use crate::http::{EarlyHints, HttpProtocol, Incoming, h1::writebuf::WriteBuf};
 
 pub struct Http1<Io> {
     io: Io,
@@ -43,6 +44,7 @@ pub struct Http1<Io> {
     head_buf: Box<[u8]>,
     parsed_headers: Box<[MaybeUninit<httparse::Header<'static>>]>,
     date_header_value_cached: Option<(String, std::time::SystemTime)>,
+    write_buf: WriteBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -79,6 +81,7 @@ where
             head_buf,
             parsed_headers,
             date_header_value_cached: None,
+            write_buf: WriteBuf::new(),
         }
     }
 
@@ -119,18 +122,6 @@ where
             }
         };
         self.io.read(buf).await
-    }
-
-    #[inline]
-    async fn write_all_vectored(&mut self, mut bufs: &mut [IoSlice<'_>]) -> std::io::Result<()> {
-        while !bufs.is_empty() {
-            let n = self.io.write_vectored(bufs).await?;
-            if n == 0 {
-                return Err(std::io::ErrorKind::WriteZero.into());
-            }
-            IoSlice::advance_slices(&mut bufs, n);
-        }
-        Ok(())
     }
 
     #[inline]
@@ -555,305 +546,125 @@ where
             {}
         }
 
-        if self.io.is_write_vectored() && self.options.enable_vectored_write {
-            let response = UnsafeCell::new(response);
-            // Safety: There's only one "response_mut" mutable reference use, and it's used to obtain data from the body only.
-            // The "response_ref" reference is used for read-only access to headers and status.
-            let response_ref = unsafe { &*response.get() };
-            let response_mut = unsafe { &mut *response.get() };
-            let mut head: Vec<IoSlice<'_>> =
-                Vec::with_capacity(6 + (response_ref.headers().len() * 4));
+        let response = UnsafeCell::new(response);
+        // Safety: There's only one "response_mut" mutable reference use, and it's used to obtain data from the body only.
+        // The "response_ref" reference is used for read-only access to headers and status.
+        let response_ref = unsafe { &*response.get() };
+        let response_mut = unsafe { &mut *response.get() };
+        unsafe {
             if version == Version::HTTP_10 {
-                head.push(IoSlice::new(b"HTTP/1.0 "));
+                self.write_buf.push(IoSlice::new(b"HTTP/1.0 "));
             } else {
-                head.push(IoSlice::new(b"HTTP/1.1 "));
+                self.write_buf.push(IoSlice::new(b"HTTP/1.1 "));
             }
             let status = response_ref.status();
-            head.push(IoSlice::new(status.as_str().as_bytes()));
+            self.write_buf
+                .push(IoSlice::new(status.as_str().as_bytes()));
             if let Some(canonical_reason) = status.canonical_reason() {
-                head.push(IoSlice::new(b" "));
-                head.push(IoSlice::new(canonical_reason.as_bytes()));
+                self.write_buf.push(IoSlice::new(b" "));
+                self.write_buf
+                    .push(IoSlice::new(canonical_reason.as_bytes()));
             }
-            head.push(IoSlice::new(b"\r\n"));
+            self.write_buf.push(IoSlice::new(b"\r\n"));
             for (name, value) in response_ref.headers() {
-                head.push(IoSlice::new(name.as_str().as_bytes()));
-                head.push(IoSlice::new(b": "));
-                head.push(IoSlice::new(value.as_bytes()));
-                head.push(IoSlice::new(b"\r\n"));
+                self.write_buf.push(IoSlice::new(name.as_str().as_bytes()));
+                self.write_buf.push(IoSlice::new(b": "));
+                self.write_buf.push(IoSlice::new(value.as_bytes()));
+                self.write_buf.push(IoSlice::new(b"\r\n"));
             }
-            head.push(IoSlice::new(b"\r\n"));
+            self.write_buf.push(IoSlice::new(b"\r\n"));
+        }
 
-            if !chunked {
-                if let Some(content_length) = response_ref
-                    .headers()
-                    .get(http::header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    if let Some(zero_copy) = response_ref.extensions().get::<ZerocopyResponse>() {
-                        if let Some(mut zerocopy_fn) = zerocopy_fn {
-                            // Zerocopy
-                            self.write_all_vectored(&mut head).await?;
-                            zerocopy_fn(
-                                zero_copy.handle,
-                                // Safety: the lifetime of the static reference is bound by the lifetime of the Io struct
-                                unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
-                                content_length,
-                            )
-                            .await?;
-                            self.io.flush().await?;
-                            drop(response);
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            let mut trailers_written = false;
-            let mut head_written = false;
-            while let Some(chunk) = response_mut.body_mut().frame().await {
-                let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
-                match chunk.into_data() {
-                    Ok(data) => {
-                        if chunked {
-                            let data_len = format!("{:X}", data.len()).to_string();
-                            let mut iovecs = [
-                                IoSlice::new(data_len.as_bytes()),
-                                IoSlice::new(b"\r\n"),
-                                IoSlice::new(&data),
-                                IoSlice::new(b"\r\n"),
-                            ];
-                            if head_written {
-                                self.write_all_vectored(&mut iovecs).await?;
-                            } else {
-                                let mut iovecs2 = head.split_off(0);
-                                iovecs2.extend_from_slice(&iovecs);
-                                self.write_all_vectored(&mut iovecs2).await?;
-                                head_written = true;
-                            }
-                        } else if head_written {
-                            self.write_all_vectored(&mut [IoSlice::new(&data)]).await?;
-                        } else {
-                            head_written = true;
-                            let mut iovecs2 = head.split_off(0);
-                            iovecs2.push(IoSlice::new(&data));
-                            self.write_all_vectored(&mut iovecs2).await?;
-                        }
-                    }
-                    Err(chunk) => {
-                        if let Ok(trailers) = chunk.into_trailers() {
-                            if write_trailers {
-                                let mut trail: Vec<IoSlice<'_>> = Vec::new();
-                                trail.push(IoSlice::new(b"0\r\n"));
-                                for (name, value) in &trailers {
-                                    trail.push(IoSlice::new(name.as_str().as_bytes()));
-                                    trail.push(IoSlice::new(b": "));
-                                    trail.push(IoSlice::new(value.as_bytes()));
-                                    trail.push(IoSlice::new(b"\r\n"));
-                                }
-                                trail.push(IoSlice::new(b"\r\n"));
-                                self.write_all_vectored(&mut trail).await?;
-                                trailers_written = true;
-                            }
-                            break;
-                        }
-                    }
-                };
-            }
-            if !head_written {
-                self.write_all_vectored(&mut head).await?;
-            }
-            if chunked && !trailers_written {
-                // Terminating chunk
-                self.write_all_vectored(&mut [IoSlice::new(b"0\r\n\r\n")])
-                    .await?;
-            }
-            self.io.flush().await?;
-        } else {
-            let mut head = Vec::new();
-            if version == Version::HTTP_10 {
-                head.extend_from_slice(b"HTTP/1.0 ");
-            } else {
-                head.extend_from_slice(b"HTTP/1.1 ");
-            }
-            head.extend_from_slice(response.status().as_str().as_bytes());
-            head.extend_from_slice(b" ");
-            head.extend_from_slice(
-                response
-                    .status()
-                    .canonical_reason()
-                    .map_or(b"Unknown Status Code", |cr| cr.as_bytes()),
-            );
-            head.extend_from_slice(b"\r\n");
-            for (name, value) in response.headers() {
-                head.extend_from_slice(name.as_str().as_bytes());
-                if value.is_empty() {
-                    head.extend_from_slice(b":\r\n");
-                    continue;
-                }
-                head.extend_from_slice(b": ");
-                head.extend_from_slice(value.as_bytes());
-                head.extend_from_slice(b"\r\n");
-            }
-            head.extend_from_slice(b"\r\n");
-
-            if !chunked {
-                if let Some(content_length) = response
-                    .headers()
-                    .get(http::header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    if let Some(zero_copy) = response.extensions().get::<ZerocopyResponse>() {
-                        if let Some(mut zerocopy_fn) = zerocopy_fn {
-                            // Zerocopy
-                            self.io.write_all(&mut head).await?;
-                            zerocopy_fn(
-                                zero_copy.handle,
-                                // Safety: the lifetime of the static reference is bound by the lifetime of the Io struct
-                                unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
-                                content_length,
-                            )
-                            .await?;
-                            self.io.flush().await?;
-                            drop(response);
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            let (write_queue_tx, write_queue_rx) = async_channel::bounded::<bytes::Bytes>(2);
-            let body_write_future = Box::pin(async {
-                let mut head_written = false;
-                let mut trailers_written = false;
-                while let Some(chunk) = response.body_mut().frame().await {
-                    let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
-                    match chunk.into_data() {
-                        Ok(data) => {
-                            if chunked {
-                                let mut chunked_data = if head_written {
-                                    Vec::with_capacity(
-                                        data.len() + 4 + (data.len().ilog2() / 4) as usize,
-                                    )
-                                } else {
-                                    head_written = true;
-                                    head.split_off(0)
-                                };
-                                chunked_data.extend_from_slice(
-                                    format!("{:X}", data.len()).to_string().as_bytes(),
-                                );
-                                chunked_data.extend_from_slice(b"\r\n");
-                                chunked_data.extend(data);
-                                chunked_data.extend_from_slice(b"\r\n");
-                                write_queue_tx
-                                    .send(Bytes::from_owner(chunked_data))
-                                    .await
-                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                            } else if head_written {
-                                write_queue_tx
-                                    .send(data)
-                                    .await
-                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                            } else {
-                                head_written = true;
-                                let mut data_to_write = head.split_off(0);
-                                data_to_write.extend_from_slice(data.as_ref());
-                                write_queue_tx
-                                    .send(Bytes::from_owner(data_to_write))
-                                    .await
-                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                            }
-                        }
-                        Err(chunk) => {
-                            if let Ok(trailers) = chunk.into_trailers() {
-                                if write_trailers {
-                                    let mut trail = Vec::new();
-                                    trail.extend_from_slice(b"0\r\n");
-                                    let mut current_header_name = None;
-                                    for (name, value) in trailers {
-                                        if let Some(name) = name {
-                                            current_header_name = Some(name);
-                                        };
-                                        if let Some(current_header_name) = &current_header_name {
-                                            trail.extend_from_slice(
-                                                current_header_name.as_str().as_bytes(),
-                                            );
-                                            if value.is_empty() {
-                                                trail.extend_from_slice(b":\r\n");
-                                                continue;
-                                            }
-                                            trail.extend_from_slice(b": ");
-                                            trail.extend_from_slice(value.as_bytes());
-                                            trail.extend_from_slice(b"\r\n");
-                                        }
-                                    }
-                                    trail.extend_from_slice(b"\r\n");
-                                    write_queue_tx
-                                        .send(Bytes::from_owner(trail))
-                                        .await
-                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                                    trailers_written = true;
-                                }
-                                break;
-                            }
-                        }
-                    };
-                }
-                if !head_written {
-                    write_queue_tx
-                        .send(Bytes::from_owner(head))
-                        .await
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                }
-                if chunked && !trailers_written {
-                    // Terminating chunk
-                    write_queue_tx
-                        .send(Bytes::from_static(b"0\r\n\r\n"))
-                        .await
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                }
-                write_queue_tx.close();
-
-                futures_util::future::pending::<Result<(), std::io::Error>>().await
-            });
-            let write_future = Box::pin(async {
-                let mut write_buf = Vec::new();
-                loop {
-                    let chunk = if write_buf.is_empty() {
-                        let Some(chunk) = write_queue_rx.recv().await.ok() else {
-                            // Channel closed, break out of loop
-                            break;
+        if !chunked {
+            if let Some(content_length) = response_ref
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                if let Some(zero_copy) = response_ref.extensions().get::<ZerocopyResponse>() {
+                    if let Some(mut zerocopy_fn) = zerocopy_fn {
+                        // Zerocopy
+                        unsafe {
+                            self.write_buf
+                                .flush(&mut self.io, self.options.enable_vectored_write)
+                                .await?
                         };
-                        Some(chunk)
-                    } else {
-                        let result = write_queue_rx.try_recv();
-                        if result.as_ref().is_err_and(|e| e.is_closed()) {
-                            break;
-                        }
-                        result.ok()
-                    };
-                    if let Some(chunk) = chunk {
-                        write_buf.extend(chunk);
+                        zerocopy_fn(
+                            zero_copy.handle,
+                            // Safety: the lifetime of the static reference is bound by the lifetime of the Io struct
+                            unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
+                            content_length,
+                        )
+                        .await?;
+                        self.io.flush().await?;
+                        drop(response);
+                        return Ok(());
                     }
-                    let written = self.io.write(&write_buf).await?;
-                    let to_write = write_buf.split_off(written);
-                    write_buf = to_write;
-                }
-                self.io.write_all(&write_buf).await?;
-                self.io.flush().await?;
-                Ok::<(), std::io::Error>(())
-            });
-
-            match futures_util::future::select(body_write_future, write_future).await {
-                futures_util::future::Either::Left((result, _)) => {
-                    result?;
-                }
-                futures_util::future::Either::Right((result, _)) => {
-                    result?;
                 }
             }
         }
+
+        let mut trailers_written = false;
+        while let Some(chunk) = response_mut.body_mut().frame().await {
+            let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
+            match chunk.into_data() {
+                Ok(data) => {
+                    if chunked {
+                        let data_len = format!("{:X}", data.len()).to_string();
+                        unsafe {
+                            self.write_buf.push(IoSlice::new(data_len.as_bytes()));
+                            self.write_buf.push(IoSlice::new(b"\r\n"));
+                            self.write_buf.push(IoSlice::new(&data));
+                            self.write_buf.push(IoSlice::new(b"\r\n"));
+                            self.write_buf
+                                .write(&mut self.io, self.options.enable_vectored_write)
+                                .await?;
+                        };
+                    } else {
+                        unsafe {
+                            self.write_buf.push(IoSlice::new(&data));
+                            self.write_buf
+                                .write(&mut self.io, self.options.enable_vectored_write)
+                                .await?;
+                        }
+                    }
+                }
+                Err(chunk) => {
+                    if let Ok(trailers) = chunk.into_trailers() {
+                        if write_trailers {
+                            unsafe {
+                                self.write_buf.push(IoSlice::new(b"0\r\n"));
+                                for (name, value) in &trailers {
+                                    self.write_buf.push(IoSlice::new(name.as_str().as_bytes()));
+                                    self.write_buf.push(IoSlice::new(b": "));
+                                    self.write_buf.push(IoSlice::new(value.as_bytes()));
+                                    self.write_buf.push(IoSlice::new(b"\r\n"));
+                                }
+                                self.write_buf.push(IoSlice::new(b"\r\n"));
+                                self.write_buf
+                                    .write(&mut self.io, self.options.enable_vectored_write)
+                                    .await?;
+                            }
+                            trailers_written = true;
+                        }
+                        break;
+                    }
+                }
+            };
+        }
+        if chunked && !trailers_written {
+            // Terminating chunk
+            unsafe {
+                self.write_buf.push(IoSlice::new(b"0\r\n\r\n"));
+            }
+        }
+        unsafe {
+            self.write_buf
+                .flush(&mut self.io, self.options.enable_vectored_write)
+                .await?;
+        }
+        self.io.flush().await?;
 
         Ok(())
     }
