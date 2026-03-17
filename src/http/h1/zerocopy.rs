@@ -55,8 +55,8 @@ where
             Some(move |fd, io, len| async move {
                 use std::os::fd::BorrowedFd;
 
-                let mut fd = unsafe { BorrowedFd::borrow_raw(fd) };
-                let _ = vibeio::io::sendfile_exact(&mut fd, io, len).await?;
+                let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                let _ = vibeio::io::sendfile_exact(&fd, io, len).await?;
                 Ok(())
             }),
         )

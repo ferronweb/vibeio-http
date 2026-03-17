@@ -510,7 +510,7 @@ where
         if self.options.send_date_header {
             response.headers_mut().insert(
                 header::DATE,
-                HeaderValue::from_str(&self.get_date_header_value())
+                HeaderValue::from_str(self.get_date_header_value())
                     .map_err(|e| std::io::Error::other(e.to_string()))?,
             );
         }
