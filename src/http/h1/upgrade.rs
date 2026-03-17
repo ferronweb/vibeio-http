@@ -48,7 +48,7 @@ impl AsyncRead for Upgraded {
             }
             return std::task::Poll::Ready(Ok(()));
         }
-        (&mut *self.reader).as_mut().poll_read(cx, buf)
+        (*self.reader).as_mut().poll_read(cx, buf)
     }
 }
 
@@ -59,7 +59,7 @@ impl AsyncWrite for Upgraded {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        (&mut *self.writer).as_mut().poll_write(cx, buf)
+        (*self.writer).as_mut().poll_write(cx, buf)
     }
 
     #[inline]
@@ -67,7 +67,7 @@ impl AsyncWrite for Upgraded {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        (&mut *self.writer).as_mut().poll_flush(cx)
+        (*self.writer).as_mut().poll_flush(cx)
     }
 
     #[inline]
@@ -75,7 +75,7 @@ impl AsyncWrite for Upgraded {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        (&mut *self.writer).as_mut().poll_shutdown(cx)
+        (*self.writer).as_mut().poll_shutdown(cx)
     }
 
     #[inline]
@@ -89,7 +89,7 @@ impl AsyncWrite for Upgraded {
         cx: &mut std::task::Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        (&mut *self.writer).as_mut().poll_write_vectored(cx, bufs)
+        (*self.writer).as_mut().poll_write_vectored(cx, bufs)
     }
 }
 

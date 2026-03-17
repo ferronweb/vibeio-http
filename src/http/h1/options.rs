@@ -19,7 +19,7 @@ impl Http1Options {
             header_read_timeout: Some(std::time::Duration::from_secs(30)),
             send_continue_response: true,
             enable_early_hints: false,
-            enable_vectored_write: false,
+            enable_vectored_write: true,
         }
     }
 

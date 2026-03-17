@@ -22,9 +22,8 @@ impl EarlyHints {
         self.inner
             .send((headers, futures_util::lock::Mutex::new(tx)))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        rx.await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            .map_err(std::io::Error::other)?;
+        rx.await.map_err(std::io::Error::other)?
     }
 }
 
@@ -34,7 +33,7 @@ pub async fn send_early_hints(
 ) -> Result<(), std::io::Error> {
     req.extensions()
         .get::<EarlyHints>()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "early hints not supported"))?
+        .ok_or_else(|| std::io::Error::other("early hints not supported"))?
         .send(headers)
         .await
 }
