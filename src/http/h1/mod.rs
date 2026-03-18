@@ -5,7 +5,6 @@ mod writebuf;
 mod zerocopy;
 
 pub use options::*;
-use tokio_util::sync::CancellationToken;
 pub use upgrade::*;
 pub use zerocopy::*;
 
@@ -31,6 +30,7 @@ use http_body::Body;
 use http_body_util::{BodyExt, Empty};
 use memchr::{memchr3_iter, memmem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
 use crate::http::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
 
