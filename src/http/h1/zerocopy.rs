@@ -45,12 +45,12 @@ pub unsafe fn install_zerocopy(response: &mut http::Response<impl Body>, handle:
 /// regular [`Http1`] handler.
 ///
 /// Only available on Linux (`target_os = "linux"`).
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
 pub struct Http1Zerocopy<Io> {
     pub(super) inner: Http1<Io>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
 impl<Io> HttpProtocol for Http1Zerocopy<Io>
 where
     for<'a> Io: tokio::io::AsyncRead

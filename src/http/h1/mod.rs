@@ -78,7 +78,7 @@ pub struct Http1<Io> {
     write_buf: WriteBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
 impl<Io> Http1<Io>
 where
     for<'a> Io: tokio::io::AsyncRead

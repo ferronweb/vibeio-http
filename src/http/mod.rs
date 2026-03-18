@@ -1,8 +1,10 @@
 mod early_hints;
+#[cfg(feature = "h1")]
 mod h1;
 mod incoming;
 
 pub use early_hints::*;
+#[cfg(feature = "h1")]
 pub use h1::*;
 pub use incoming::*;
 
