@@ -18,7 +18,7 @@ send_wrapper = "0.6.0"
 smallvec = "1.15.1"
 tokio = "1.50.0"
 tokio-util = "0.7.18"
-vibeio = "0.2.1"
+vibeio = "0.2.3"
 
 [dev-dependencies]
 tokio = { version = "1.50.0", features = ["test-util", "full"] }
