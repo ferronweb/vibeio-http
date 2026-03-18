@@ -1,7 +1,10 @@
+#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
 use http::Response;
 use http_body::Body;
+#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
 use http_body_util::Empty;
 
+#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
 use super::{Http1, HttpProtocol};
 
 #[derive(Clone)]
