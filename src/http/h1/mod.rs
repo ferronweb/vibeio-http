@@ -29,8 +29,7 @@ use futures_util::stream::Stream;
 use http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, Version};
 use http_body::Body;
 use http_body_util::{BodyExt, Empty};
-use memchr::{memchr2, memchr3_iter, memmem};
-use smallvec::SmallVec;
+use memchr::{memchr3_iter, memmem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
