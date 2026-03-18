@@ -124,6 +124,7 @@ async fn test_keep_alive() {
                 .await;
 
             // Read second response
+            let mut response_buf = vec![0; 1024];
             let n = client_reader.read(&mut response_buf).await.unwrap();
             response_buf.truncate(n);
             assert!(response_buf.starts_with(b"HTTP/1.1 200 OK\r\n"));

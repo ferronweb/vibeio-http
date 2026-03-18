@@ -855,9 +855,7 @@ where
             }
 
             // 103 Early Hints
-            let early_hints_fut: Pin<
-                Box<dyn std::future::Future<Output = Result<(), std::io::Error>>>,
-            > = if self.options.enable_early_hints {
+            let early_hints_fut = if self.options.enable_early_hints {
                 let (early_hints_tx, early_hints_rx) = async_channel::unbounded();
                 let early_hints = EarlyHints::new(early_hints_tx);
                 request.extensions_mut().insert(early_hints);
@@ -865,7 +863,7 @@ where
                 // Also, another function that would borrow self would read data,
                 // while this function would write data
                 let mut_self = unsafe { std::mem::transmute::<&mut Self, &mut Self>(&mut self) };
-                Box::pin(async {
+                Some(async {
                     let early_hints_rx = early_hints_rx;
                     while let Ok((headers, sender)) = early_hints_rx.recv().await {
                         sender
@@ -876,7 +874,7 @@ where
                     futures_util::future::pending::<Result<(), std::io::Error>>().await
                 })
             } else {
-                Box::pin(futures_util::future::pending())
+                None
             };
 
             // Content-Length header
@@ -917,19 +915,28 @@ where
 
             // Get HTTP response
             let mut response = {
-                let read_body_fut = Box::pin(async {
+                let read_body_fut = async {
                     if chunked {
                         self.read_chunked_body_fn(&body_tx, has_trailers).await
                     } else {
                         self.read_body_fn(&body_tx, content_length).await
                     }
-                });
-                let request_fut = Box::pin(request_fn(request));
+                };
+                let read_body_fut_pin = std::pin::pin!(read_body_fut);
+                let request_fut = request_fn(request);
+                let request_fut_pin = std::pin::pin!(request_fut);
+                let early_hints_fut: Pin<
+                    Box<dyn std::future::Future<Output = Result<(), std::io::Error>>>,
+                > = if let Some(early_hints) = early_hints_fut {
+                    Box::pin(early_hints)
+                } else {
+                    Box::pin(futures_util::future::pending::<Result<(), std::io::Error>>())
+                };
 
                 let select_read_body_either =
-                    futures_util::future::select(request_fut, early_hints_fut);
+                    futures_util::future::select(request_fut_pin, early_hints_fut);
                 let select_either =
-                    futures_util::future::select(read_body_fut, select_read_body_either).await;
+                    futures_util::future::select(read_body_fut_pin, select_read_body_either).await;
 
                 let (response, body_fut) = match select_either {
                     futures_util::future::Either::Left((result, request_fut)) => {
@@ -1103,27 +1110,13 @@ fn search_header_body_separator(slice: &[u8]) -> Option<(usize, usize)> {
         // Slice too short
         return None;
     }
-    let mut last_chars: SmallVec<[u8; 4]> = SmallVec::with_capacity(4);
-    let mut index = 0;
-    while let Some(found_index) = memchr2(b'\r', b'\n', &slice[index..]) {
-        if found_index > 0 {
-            // Not "\n\n", "\r\n\r\n", "\r\r", nor "\n\n"...
-            last_chars.clear();
-        }
-        let ch = slice[index + found_index];
-        if last_chars.get(last_chars.len().saturating_sub(1)) == Some(&ch) {
-            // "\n\n" or "\r\r"
-            return Some((index + found_index - 1, 2));
-        } else {
-            last_chars.push(ch);
-        }
-        if last_chars.len() == 4 {
-            // "\r\n\r\n" or "\n\r\n\r"
-            return Some((index + found_index - 3, 4));
-        }
-        index += found_index + 1;
-        if index >= slice.len() {
-            break;
+    for (i, b) in slice.iter().copied().enumerate() {
+        if b == b'\r' {
+            if slice[i + 1..].chunks(3).next() == Some(&b"\n\r\n"[..]) {
+                return Some((i, 4));
+            }
+        } else if b == b'\n' && slice.get(i + 1) == Some(&b'\n') {
+            return Some((i, 2));
         }
     }
     None
