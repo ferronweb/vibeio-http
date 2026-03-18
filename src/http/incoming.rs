@@ -13,8 +13,8 @@ use http_body::Body;
 /// keeping the handler signature simple regardless of the underlying transport
 /// or encoding (content-length, chunked, etc.).
 ///
-/// Data frames are yielded as [`bytes::Bytes`] chunks. Trailer frames (HTTP/1.1
-/// chunked trailers) are forwarded transparently. The stream ends when
+/// Data frames are yielded as [`bytes::Bytes`] chunks. Trailer frames (like
+/// HTTP/1.1 chunked trailers) are forwarded transparently. The stream ends when
 /// [`Body::poll_frame`] returns `Poll::Ready(None)`.
 pub struct Incoming {
     inner: Pin<Box<dyn Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync>>,
