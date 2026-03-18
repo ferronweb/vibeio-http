@@ -46,7 +46,7 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 /// - Chunked response encoding and trailer support
 /// - `100 Continue` and `103 Early Hints` interim responses
 /// - HTTP connection upgrades (e.g. WebSocket)
-/// - Optional zero-copy response sending on Linux (see [`Http1::zerocopy`])
+/// - Optional zero-copy response sending on Linux (see `Http1::zerocopy`)
 /// - Keep-alive connection reuse
 /// - Graceful shutdown via a [`CancellationToken`]
 ///
