@@ -12,12 +12,39 @@ pub(super) struct ZerocopyResponse {
 unsafe impl Send for ZerocopyResponse {}
 unsafe impl Sync for ZerocopyResponse {}
 
+/// Installs a zero-copy hint on an HTTP response, directing the connection
+/// handler to use emulated sendfile (Linux only) to transmit the body.
+///
+/// # Parameters
+///
+/// - `response` – the response whose extensions will receive the hint.
+/// - `handle` – the raw file descriptor of the file to send. The caller is
+///   responsible for ensuring the file descriptor remains valid and open for
+///   the entire duration of the response write.
+///
+/// # Safety
+///
+/// The caller must guarantee that `handle` is a valid, open file descriptor
+/// that will not be closed before the response body has been fully sent.
 pub unsafe fn install_zerocopy(response: &mut http::Response<impl Body>, handle: super::RawHandle) {
     response
         .extensions_mut()
         .insert(ZerocopyResponse { handle });
 }
 
+/// An HTTP/1.x connection handler that uses emulated sendfile for zero-copy
+/// response body transmission on Linux.
+///
+/// Obtain an instance via [`Http1::zerocopy`]. When a response has a
+/// `ZerocopyResponse` extension installed (see [`install_zerocopy`]), the
+/// handler will use emulated sendfile (utilizing the Linux `splice(2)` syscall
+/// and Unix pipes) to stream the file from the kernel page cache
+/// to the socket, bypassing user-space copies.
+///
+/// For responses without that extension the behaviour is identical to the
+/// regular [`Http1`] handler.
+///
+/// Only available on Linux (`target_os = "linux"`).
 #[cfg(target_os = "linux")]
 pub struct Http1Zerocopy<Io> {
     pub(super) inner: Http1<Io>,

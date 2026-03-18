@@ -5,11 +5,26 @@ use std::{
 
 use http_body::Body;
 
+/// A type-erased, boxed HTTP request body.
+///
+/// `Incoming` is the concrete body type placed inside every
+/// [`Request`](http::Request) passed to the user-supplied handler. It wraps
+/// any [`Body`] implementation behind a single, heap-allocated trait object,
+/// keeping the handler signature simple regardless of the underlying transport
+/// or encoding (content-length, chunked, etc.).
+///
+/// Data frames are yielded as [`bytes::Bytes`] chunks. Trailer frames (HTTP/1.1
+/// chunked trailers) are forwarded transparently. The stream ends when
+/// [`Body::poll_frame`] returns `Poll::Ready(None)`.
 pub struct Incoming {
     inner: Pin<Box<dyn Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync>>,
 }
 
 impl Incoming {
+    /// Wraps a concrete [`Body`] implementation in an `Incoming`.
+    ///
+    /// The body is pinned and heap-allocated so that the resulting `Incoming`
+    /// value is `'static` and can be moved freely across await points.
     #[inline]
     pub fn new(
         inner: impl Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync + 'static,

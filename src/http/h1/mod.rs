@@ -37,6 +37,37 @@ use crate::http::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
+/// An HTTP/1.x connection handler.
+///
+/// `Http1` wraps an async I/O stream (`Io`) and provides a complete
+/// HTTP/1.0 and HTTP/1.1 server implementation, including:
+///
+/// - Request head parsing (via [`httparse`])
+/// - Streaming request bodies (content-length and chunked transfer-encoding)
+/// - Chunked response encoding and trailer support
+/// - `100 Continue` and `103 Early Hints` interim responses
+/// - HTTP connection upgrades (e.g. WebSocket)
+/// - Optional zero-copy response sending on Linux (see [`Http1::zerocopy`])
+/// - Keep-alive connection reuse
+/// - Graceful shutdown via a [`CancellationToken`]
+///
+/// # Construction
+///
+/// ```rust,ignore
+/// let http1 = Http1::new(tcp_stream, Http1Options::default());
+/// ```
+///
+/// # Serving requests
+///
+/// Use the [`HttpProtocol`] trait methods ([`handle`](HttpProtocol::handle) /
+/// [`handle_with_error_fn`](HttpProtocol::handle_with_error_fn)) to drive the
+/// connection to completion:
+///
+/// ```rust,ignore
+/// http1.handle(|req| async move {
+///     Ok::<_, Infallible>(Response::new(Full::new(Bytes::from("Hello!"))))
+/// }).await?;
+/// ```
 pub struct Http1<Io> {
     io: Io,
     options: options::Http1Options,
@@ -57,6 +88,16 @@ where
         + Unpin
         + 'static,
 {
+    /// Converts this `Http1` into an [`Http1Zerocopy`] that uses emulated
+    /// sendfile (Linux only) to send response bodies without copying data
+    /// through user space.
+    ///
+    /// The response body must have a `ZerocopyResponse` extension installed
+    /// (via [`install_zerocopy`]) containing the file descriptor to send from.
+    /// Responses without that extension are sent normally.
+    ///
+    /// Only available on Linux (`target_os = "linux"`), and only when `Io`
+    /// implements [`vibeio::io::AsInnerRawHandle`].
     #[inline]
     pub fn zerocopy(self) -> Http1Zerocopy<Io> {
         Http1Zerocopy { inner: self }
@@ -67,6 +108,16 @@ impl<Io> Http1<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
 {
+    /// Creates a new `Http1` connection handler wrapping the given I/O stream.
+    ///
+    /// The `options` value controls limits, timeouts, and optional features;
+    /// see [`Http1Options`] for details.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let http1 = Http1::new(tcp_stream, Http1Options::default());
+    /// ```
     #[inline]
     pub fn new(io: Io, options: options::Http1Options) -> Self {
         // Safety: u8 is a primitive type, so we can safely assume initialization
@@ -101,6 +152,15 @@ where
             .unwrap_or("")
     }
 
+    /// Attaches a [`CancellationToken`] for graceful shutdown.
+    ///
+    /// After the current in-flight request has been fully handled and its
+    /// response written, the connection loop checks whether the token has been
+    /// cancelled. If it has, the loop exits cleanly instead of waiting for the
+    /// next request.
+    ///
+    /// This allows the server to drain active connections without abruptly
+    /// closing them mid-response.
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);

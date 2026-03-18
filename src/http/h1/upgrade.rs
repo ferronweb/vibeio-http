@@ -12,6 +12,16 @@ use http_body::Body;
 use send_wrapper::SendWrapper;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// Represents a successfully upgraded HTTP/1.x connection.
+///
+/// After a successful HTTP upgrade handshake (e.g. WebSocket or HTTP/2
+/// cleartext), the original TCP stream is handed off as an [`Upgraded`] value.
+/// It implements both [`AsyncRead`] and [`AsyncWrite`], so it can be used as a
+/// plain async I/O object by the protocol taking over the connection.
+///
+/// Any bytes that were already read from the socket as part of the HTTP request
+/// but not yet consumed are prepended to the read stream via the `leftover`
+/// buffer, ensuring no data is lost during the transition.
 pub struct Upgraded {
     reader: SendWrapper<Pin<Box<dyn AsyncRead + Unpin>>>,
     writer: SendWrapper<Pin<Box<dyn AsyncWrite + Unpin>>>,
@@ -126,6 +136,25 @@ impl Future for Upgrade {
     }
 }
 
+/// A future that resolves to an [`Upgraded`] connection once the HTTP upgrade
+/// handshake has been completed by the server side.
+///
+/// Obtain an `OnUpgrade` by calling [`prepare_upgrade`] on an incoming
+/// request. The future will yield `Some(Upgraded)` when the server has
+/// finished writing the upgrade response, or `None` if the upgrade was
+/// cancelled or the connection was closed before the handshake completed.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// if let Some(on_upgrade) = prepare_upgrade(&mut request) {
+///     tokio::spawn(async move {
+///         if let Some(upgraded) = on_upgrade.await {
+///             // `upgraded` is now a raw async I/O stream
+///         }
+///     });
+/// }
+/// ```
 #[derive(Clone)]
 pub struct OnUpgrade {
     inner: Upgrade,
@@ -143,6 +172,20 @@ impl Future for OnUpgrade {
     }
 }
 
+/// Prepares an HTTP upgrade on the given request.
+///
+/// This function removes the internal `Upgrade` token from the request's
+/// extensions and marks the connection as "to be upgraded". The returned
+/// [`OnUpgrade`] future resolves to the raw [`Upgraded`] I/O stream after the
+/// server has sent the `101 Switching Protocols` response.
+///
+/// Returns `None` if the request does not carry an upgrade token, which
+/// happens when the connection handler was not configured to support upgrades
+/// or the upgrade extension has already been consumed.
+///
+/// # Panics
+///
+/// Does not panic; returns `None` instead of panicking on missing state.
 pub fn prepare_upgrade(req: &mut Request<impl Body>) -> Option<OnUpgrade> {
     req.extensions_mut().remove::<Upgrade>().map(|inner| {
         inner
