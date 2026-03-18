@@ -15,7 +15,6 @@ pub(crate) type RawHandle = std::os::fd::RawFd;
 pub(crate) type RawHandle = std::os::windows::io::RawHandle;
 
 use std::{
-    cell::UnsafeCell,
     io::IoSlice,
     mem::MaybeUninit,
     pin::Pin,
@@ -578,26 +577,22 @@ where
             {}
         }
 
-        let response = UnsafeCell::new(response);
-        // Safety: There's only one "response_mut" mutable reference use, and it's used to obtain data from the body only.
-        // The "response_ref" reference is used for read-only access to headers and status.
-        let response_ref = unsafe { &*response.get() };
-        let response_mut = unsafe { &mut *response.get() };
+        let (parts, mut body) = response.into_parts();
 
-        let mut head = Vec::with_capacity(30 + response_ref.headers().len() * 30); // Similar to Hyper's heuristic
+        let mut head = Vec::with_capacity(30 + parts.headers.len() * 30); // Similar to Hyper's heuristic
         if version == Version::HTTP_10 {
             head.extend_from_slice(b"HTTP/1.0 ");
         } else {
             head.extend_from_slice(b"HTTP/1.1 ");
         }
-        let status = response_ref.status();
+        let status = parts.status;
         head.extend_from_slice(status.as_str().as_bytes());
         if let Some(canonical_reason) = status.canonical_reason() {
             head.extend_from_slice(b" ");
             head.extend_from_slice(canonical_reason.as_bytes());
         }
         head.extend_from_slice(b"\r\n");
-        for (name, value) in response_ref.headers() {
+        for (name, value) in &parts.headers {
             head.extend_from_slice(name.as_str().as_bytes());
             head.extend_from_slice(b": ");
             head.extend_from_slice(value.as_bytes());
@@ -609,13 +604,13 @@ where
         }
 
         if !chunked {
-            if let Some(content_length) = response_ref
-                .headers()
+            if let Some(content_length) = parts
+                .headers
                 .get(http::header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
             {
-                if let Some(zero_copy) = response_ref.extensions().get::<ZerocopyResponse>() {
+                if let Some(zero_copy) = parts.extensions.get::<ZerocopyResponse>() {
                     if let Some(mut zerocopy_fn) = zerocopy_fn {
                         // Zerocopy
                         unsafe {
@@ -631,7 +626,7 @@ where
                         )
                         .await?;
                         self.io.flush().await?;
-                        let reclaimed_headers = response.into_inner().into_parts().0.headers;
+                        let reclaimed_headers = parts.headers;
                         self.cached_headers = Some(reclaimed_headers);
                         return Ok(());
                     }
@@ -640,7 +635,7 @@ where
         }
 
         let mut trailers_written = false;
-        while let Some(chunk) = response_mut.body_mut().frame().await {
+        while let Some(chunk) = body.frame().await {
             let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
             match chunk.into_data() {
                 Ok(data) => {
@@ -699,7 +694,7 @@ where
                 .await?;
         }
         self.io.flush().await?;
-        let reclaimed_headers = response.into_inner().into_parts().0.headers;
+        let reclaimed_headers = parts.headers;
         self.cached_headers = Some(reclaimed_headers);
 
         Ok(())
