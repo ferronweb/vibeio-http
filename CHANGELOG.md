@@ -4,7 +4,7 @@
 
 **Not released yet**
 
-- Performed some performance optimizations for HTTP/2
+- Performed some performance optimizations for HTTP/1.x and HTTP/2
 
 ## `vibeio-http` 0.1.0
 

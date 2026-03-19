@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+const WRITE_BUF_BATCH_THRESHOLD: usize = 16384;
 
 /// An HTTP/1.x connection handler.
 ///
@@ -75,6 +76,7 @@ pub struct Http1<Io> {
     date_header_value_cached: Option<(String, std::time::SystemTime)>,
     cached_headers: Option<HeaderMap>,
     read_buf: BytesMut,
+    response_head_buf: Vec<u8>,
     write_buf: WriteBuf,
 }
 
@@ -131,6 +133,7 @@ where
             date_header_value_cached: None,
             cached_headers: None,
             read_buf,
+            response_head_buf: Vec::with_capacity(1024),
             write_buf: WriteBuf::new(),
         }
     }
@@ -638,7 +641,13 @@ where
 
         let (parts, mut body) = response.into_parts();
 
-        let mut head = Vec::with_capacity(30 + parts.headers.len() * 30); // Similar to Hyper's heuristic
+        self.response_head_buf.clear();
+        let estimated_head_len = 30 + parts.headers.len() * 30; // Similar to Hyper's heuristic
+        if self.response_head_buf.capacity() < estimated_head_len {
+            self.response_head_buf
+                .reserve(estimated_head_len - self.response_head_buf.capacity());
+        }
+        let head = &mut self.response_head_buf;
         if version == Version::HTTP_10 {
             head.extend_from_slice(b"HTTP/1.0 ");
         } else {
@@ -659,7 +668,7 @@ where
         }
         head.extend_from_slice(b"\r\n");
         unsafe {
-            self.write_buf.push(IoSlice::new(&head));
+            self.write_buf.push(IoSlice::new(head));
         }
 
         if !chunked {
@@ -699,19 +708,18 @@ where
             match chunk.into_data() {
                 Ok(data) => {
                     if chunked {
-                        let mut data_len_buf = Vec::with_capacity(16);
-                        write_chunk_size(&mut data_len_buf, data.len());
+                        let mut chunk_size_buf = [0u8; 18];
+                        let chunk_size = write_chunk_size(&mut chunk_size_buf, data.len());
+                        self.write_buf.push_copy(chunk_size);
+                        self.write_buf.push_bytes(data);
                         unsafe {
-                            self.write_buf.push(IoSlice::new(&data_len_buf));
-                            self.write_buf.push(IoSlice::new(&data));
                             self.write_buf.push(IoSlice::new(b"\r\n"));
-                            self.write_buf
-                                .write(&mut self.io, self.options.enable_vectored_write)
-                                .await?;
-                        };
+                        }
                     } else {
+                        self.write_buf.push_bytes(data);
+                    }
+                    while self.write_buf.len() >= WRITE_BUF_BATCH_THRESHOLD {
                         unsafe {
-                            self.write_buf.push(IoSlice::new(&data));
                             self.write_buf
                                 .write(&mut self.io, self.options.enable_vectored_write)
                                 .await?;
@@ -724,15 +732,12 @@ where
                             unsafe {
                                 self.write_buf.push(IoSlice::new(b"0\r\n"));
                                 for (name, value) in &trailers {
-                                    self.write_buf.push(IoSlice::new(name.as_str().as_bytes()));
+                                    self.write_buf.push_copy(name.as_str().as_bytes());
                                     self.write_buf.push(IoSlice::new(b": "));
-                                    self.write_buf.push(IoSlice::new(value.as_bytes()));
+                                    self.write_buf.push_copy(value.as_bytes());
                                     self.write_buf.push(IoSlice::new(b"\r\n"));
                                 }
                                 self.write_buf.push(IoSlice::new(b"\r\n"));
-                                self.write_buf
-                                    .write(&mut self.io, self.options.enable_vectored_write)
-                                    .await?;
                             }
                             trailers_written = true;
                         }
@@ -1183,18 +1188,18 @@ fn search_header_body_separator(slice: &[u8]) -> Option<(usize, usize)> {
 
 /// Writes the chunk size to the given buffer in hexadecimal format, followed by `\r\n`.
 #[inline]
-fn write_chunk_size(dst: &mut Vec<u8>, len: usize) {
-    let mut buf = [0u8; 18];
+fn write_chunk_size(dst: &mut [u8; 18], len: usize) -> &[u8] {
     let mut n = len;
-    let mut pos = buf.len();
+    let mut pos = dst.len() - 2;
     loop {
         pos -= 1;
-        buf[pos] = HEX_DIGITS[n & 0xF];
+        dst[pos] = HEX_DIGITS[n & 0xF];
         n >>= 4;
         if n == 0 {
             break;
         }
     }
-    dst.extend_from_slice(&buf[pos..]);
-    dst.extend_from_slice(b"\r\n");
+    dst[dst.len() - 2] = b'\r';
+    dst[dst.len() - 1] = b'\n';
+    &dst[pos..]
 }
