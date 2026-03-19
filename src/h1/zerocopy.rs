@@ -69,12 +69,12 @@ where
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
         F: Fn(http::Request<super::Incoming>) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<http::Response<ResB>, ResE>>,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,
         EF: FnOnce(bool) -> EFut,
-        EFut: std::future::Future<Output = Result<http::Response<EResB>, EResE>>,
+        EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin,
         EResE: std::error::Error,
         EResBE: std::error::Error,
@@ -98,7 +98,7 @@ where
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
         F: Fn(http::Request<super::Incoming>) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<http::Response<ResB>, ResE>>,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,

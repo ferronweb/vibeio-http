@@ -16,7 +16,7 @@ use http::{Request, Response};
 use http_body::{Body, Frame};
 use http_body_util::BodyExt;
 
-use crate::http::{h2::date::DateCache, EarlyHints, HttpProtocol, Incoming};
+use crate::{h2::date::DateCache, EarlyHints, HttpProtocol, Incoming};
 
 static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::HeaderName::from_static("keep-alive"),
@@ -191,8 +191,8 @@ where
         request_fn: F,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: Fn(http::Request<super::Incoming>) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<http::Response<ResB>, ResE>>,
+        F: Fn(Request<super::Incoming>) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: http_body::Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,

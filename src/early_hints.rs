@@ -38,7 +38,7 @@ impl EarlyHints {
 ///
 /// The connection must be HTTP/2 or HTTP/3, or if HTTP/1.1, the server must
 /// have been created with
-/// [`Http1Options::enable_early_hints`](crate::http::h1::Http1Options::enable_early_hints)
+/// [`Http1Options::enable_early_hints`](crate::h1::Http1Options::enable_early_hints)
 /// set to `true`. When that option is enabled the handler inserts an
 /// `EarlyHints` token into each request's extensions. If the token is absent
 /// (i.e. early hints were not enabled) this function returns an error.

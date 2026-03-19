@@ -32,7 +32,7 @@ use memchr::{memchr3_iter, memmem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::http::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
+use crate::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
@@ -305,7 +305,7 @@ where
     }
 
     #[inline]
-    async fn read_trailers(&mut self) -> Result<Option<http::HeaderMap>, std::io::Error> {
+    async fn read_trailers(&mut self) -> Result<Option<HeaderMap>, std::io::Error> {
         // Safety: u8 is a primitive type, so we can safely assume initialization
         let mut bytes_read: usize = 0;
         let mut just_started = true;
@@ -665,7 +665,7 @@ where
         if !chunked {
             if let Some(content_length) = parts
                 .headers
-                .get(http::header::CONTENT_LENGTH)
+                .get(header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
             {

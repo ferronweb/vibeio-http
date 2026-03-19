@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 mod early_hints;
 #[cfg(feature = "h1")]
 mod h1;

@@ -21,12 +21,8 @@ pub struct Incoming {
 }
 
 impl Incoming {
-    /// Wraps a concrete [`Body`] implementation in an `Incoming`.
-    ///
-    /// The body is pinned and heap-allocated so that the resulting `Incoming`
-    /// value is `'static` and can be moved freely across await points.
     #[inline]
-    pub fn new(
+    pub(crate) fn new(
         inner: impl Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync + 'static,
     ) -> Self {
         Self {

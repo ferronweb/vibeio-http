@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use http_body_util::{BodyExt, Empty, Full};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::http::{
+use crate::{
     early_hints,
     h1::{prepare_upgrade, Http1, Http1Options},
     HttpProtocol,
