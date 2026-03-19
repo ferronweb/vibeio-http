@@ -120,6 +120,32 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
     }
 }
 
+/// An HTTP/3 connection handler.
+///
+/// `Http3` wraps a QUIC connection (`Io`) and drives the HTTP/3 server
+/// connection using the [`h3`] crate. It supports:
+///
+/// - Concurrent request stream handling
+/// - Streaming request/response bodies and trailers
+/// - Automatic `100 Continue` and `103 Early Hints` interim responses
+/// - Per-connection `Date` header caching
+/// - Graceful shutdown via a [`CancellationToken`]
+///
+/// > **Note:** The underlying [`h3`] crate is still experimental. The API may
+/// > change in future releases and there may be occasional bugs. Use with care
+/// > in production environments.
+///
+/// # Construction
+///
+/// ```rust,ignore
+/// let http3 = Http3::new(quic_connection, Http3Options::default());
+/// ```
+///
+/// # Serving requests
+///
+/// Use the [`HttpProtocol`] trait methods ([`handle`](HttpProtocol::handle) /
+/// [`handle_with_error_fn`](HttpProtocol::handle_with_error_fn)) to drive the
+/// connection to completion.
 pub struct Http3<Io> {
     io_to_handshake: Option<Io>,
     date_header_value_cached: DateCache,
@@ -131,6 +157,18 @@ impl<Io> Http3<Io>
 where
     Io: h3::quic::Connection<bytes::Bytes> + Unpin + 'static,
 {
+    /// Creates a new `Http3` connection handler wrapping the given QUIC
+    /// connection.
+    ///
+    /// The `options` value controls HTTP/3 protocol configuration, connection
+    /// setup and accept timeouts, and optional behaviour such as automatic
+    /// `100 Continue` responses; see [`Http3Options`] for details.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let http3 = Http3::new(quic_connection, Http3Options::default());
+    /// ```
     #[inline]
     pub fn new(io: Io, options: Http3Options) -> Self {
         Self {
@@ -141,6 +179,11 @@ where
         }
     }
 
+    /// Attaches a [`CancellationToken`] for graceful shutdown.
+    ///
+    /// When the token is cancelled, the handler sends an HTTP/3 graceful
+    /// shutdown signal (via `h3`'s `shutdown`), stops accepting new request
+    /// streams, and exits cleanly.
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
