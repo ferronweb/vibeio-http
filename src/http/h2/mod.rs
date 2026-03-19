@@ -115,6 +115,28 @@ async fn wait_for_send_capacity(send: &mut h2::SendStream<Bytes>) -> Result<(), 
     }
 }
 
+/// An HTTP/2 connection handler.
+///
+/// `Http2` wraps an async I/O stream (`Io`) and drives the HTTP/2 server
+/// connection using the [`h2`] crate. It supports:
+///
+/// - Concurrent request stream handling
+/// - Streaming request/response bodies and trailers
+/// - Automatic `100 Continue` and `103 Early Hints` interim responses
+/// - Per-connection `Date` header caching
+/// - Graceful shutdown via a [`CancellationToken`]
+///
+/// # Construction
+///
+/// ```rust,ignore
+/// let http2 = Http2::new(tcp_stream, Http2Options::default());
+/// ```
+///
+/// # Serving requests
+///
+/// Use the [`HttpProtocol`] trait methods ([`handle`](HttpProtocol::handle) /
+/// [`handle_with_error_fn`](HttpProtocol::handle_with_error_fn)) to drive the
+/// connection to completion.
 pub struct Http2<Io> {
     io_to_handshake: Option<Io>,
     date_header_value_cached: DateCache,
@@ -126,6 +148,17 @@ impl<Io> Http2<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
 {
+    /// Creates a new `Http2` connection handler wrapping the given I/O stream.
+    ///
+    /// The `options` value controls HTTP/2 protocol configuration, handshake
+    /// and accept timeouts, and optional behaviour such as automatic
+    /// `100 Continue` responses; see [`Http2Options`] for details.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let http2 = Http2::new(tcp_stream, Http2Options::default());
+    /// ```
     #[inline]
     pub fn new(io: Io, options: Http2Options) -> Self {
         Self {
@@ -136,6 +169,10 @@ where
         }
     }
 
+    /// Attaches a [`CancellationToken`] for graceful shutdown.
+    ///
+    /// When the token is cancelled, the handler sends HTTP/2 graceful shutdown
+    /// signals (GOAWAY), stops accepting new streams, and exits cleanly.
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
