@@ -219,7 +219,7 @@ where
             })?;
 
             while let Some(request) = {
-                match {
+                let res = {
                     let accept_fut_orig = h2.accept();
                     let accept_fut_orig_pin = std::pin::pin!(accept_fut_orig);
                     let cancel_token = self.cancel_token.clone();
@@ -251,7 +251,8 @@ where
                             (None, false)
                         }
                     }
-                } {
+                };
+                match res {
                     (Some(request), _) => request,
                     (None, graceful) => {
                         h2.graceful_shutdown();
