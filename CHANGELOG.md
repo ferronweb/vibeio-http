@@ -1,8 +1,8 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.1.1
 
-**Not released yet**
+**Released in March 19, 2026**
 
 - Performed some performance optimizations for HTTP/1.x and HTTP/2
 
