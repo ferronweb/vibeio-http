@@ -52,7 +52,10 @@ impl Body for H2Body {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if !self.data_done {
             match self.recv.poll_data(cx) {
-                Poll::Ready(Some(Ok(data))) => return Poll::Ready(Some(Ok(Frame::data(data)))),
+                Poll::Ready(Some(Ok(data))) => {
+                    let _ = self.recv.flow_control().release_capacity(data.len());
+                    return Poll::Ready(Some(Ok(Frame::data(data))));
+                }
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(h2_error_to_io(err)))),
                 Poll::Ready(None) => self.data_done = true,
                 Poll::Pending => return Poll::Pending,
@@ -82,37 +85,43 @@ fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
     std::io::Error::other(h2::Error::from(reason))
 }
 
-async fn wait_for_send_capacity(send: &mut h2::SendStream<Bytes>) -> Result<(), std::io::Error> {
-    send.reserve_capacity(1);
-
-    if send.capacity() == 0 {
-        std::future::poll_fn(|cx| loop {
-            match send.poll_capacity(cx) {
-                Poll::Ready(Some(Ok(0))) => {}
-                Poll::Ready(Some(Ok(_))) => return Poll::Ready(Ok(())),
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(h2_error_to_io(err))),
-                Poll::Ready(None) => {
-                    return Poll::Ready(Err(std::io::Error::other(
-                        "send stream capacity unexpectedly closed",
-                    )))
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        })
-        .await
-    } else {
-        let reset_reason = std::future::poll_fn(|cx| match send.poll_reset(cx) {
-            Poll::Ready(Ok(reason)) => Poll::Ready(Ok(Some(reason))),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(h2_error_to_io(err))),
-            Poll::Pending => Poll::Ready(Ok(None)),
-        })
-        .await?;
-        if let Some(reason) = reset_reason {
-            Err(h2_reason_to_io(reason))
-        } else {
-            Ok(())
-        }
+#[inline]
+async fn wait_for_send_capacity(
+    send: &mut h2::SendStream<Bytes>,
+    desired_capacity: usize,
+) -> Result<usize, std::io::Error> {
+    if desired_capacity == 0 {
+        return Ok(0);
     }
+
+    send.reserve_capacity(desired_capacity);
+
+    if send.capacity() > 0 {
+        return Ok(send.capacity().min(desired_capacity));
+    }
+
+    std::future::poll_fn(|cx| loop {
+        match send.poll_reset(cx) {
+            Poll::Ready(Ok(reason)) => return Poll::Ready(Err(h2_reason_to_io(reason))),
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(h2_error_to_io(err))),
+            Poll::Pending => {}
+        }
+
+        match send.poll_capacity(cx) {
+            Poll::Ready(Some(Ok(0))) => {}
+            Poll::Ready(Some(Ok(capacity))) => {
+                return Poll::Ready(Ok(capacity.min(desired_capacity)));
+            }
+            Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(h2_error_to_io(err))),
+            Poll::Ready(None) => {
+                return Poll::Ready(Err(std::io::Error::other(
+                    "send stream capacity unexpectedly closed",
+                )))
+            }
+            Poll::Pending => return Poll::Pending,
+        }
+    })
+    .await
 }
 
 /// An HTTP/2 connection handler.
@@ -443,16 +452,41 @@ where
                             Ok(frame) => {
                                 if frame.is_data() {
                                     match frame.into_data() {
-                                        Ok(data) => {
-                                            if wait_for_send_capacity(&mut send).await.is_err() {
-                                                return;
+                                        Ok(mut data) => {
+                                            let response_is_end_stream =
+                                                response_body.is_end_stream();
+                                            if data.is_empty() {
+                                                if send
+                                                    .send_data(data, response_is_end_stream)
+                                                    .is_err()
+                                                {
+                                                    return;
+                                                }
+                                                if response_is_end_stream {
+                                                    return;
+                                                }
+                                                continue;
                                             }
-                                            let is_end_stream = response_body.is_end_stream();
-                                            if send.send_data(data, is_end_stream).is_err() {
-                                                return;
-                                            }
-                                            if is_end_stream {
-                                                return;
+
+                                            while !data.is_empty() {
+                                                let capacity = match wait_for_send_capacity(
+                                                    &mut send,
+                                                    data.len(),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(capacity) => capacity,
+                                                    Err(_) => return,
+                                                };
+                                                let chunk = data.split_to(capacity.min(data.len()));
+                                                let is_end_stream =
+                                                    response_is_end_stream && data.is_empty();
+                                                if send.send_data(chunk, is_end_stream).is_err() {
+                                                    return;
+                                                }
+                                                if is_end_stream {
+                                                    return;
+                                                }
                                             }
                                         }
                                         Err(_) => {
