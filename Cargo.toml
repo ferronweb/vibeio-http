@@ -31,7 +31,7 @@ h3 = { version = "0.0.8", optional = true }
 tokio = { version = "1.50.0", features = ["test-util", "full"] }
 
 [features]
-default = ["h1", "h1-zerocopy", "h2", "h3"]
+default = ["h1", "h1-zerocopy", "h2"]
 h1 = ["httparse", "httpdate", "memchr", "tokio-util", "send_wrapper"]
 h1-zerocopy = ["h1", "vibeio/splice"]
 h2 = ["dep:h2", "httpdate", "tokio-util"]

@@ -1,3 +1,61 @@
+//! # vibeio-http
+//!
+//! High-performance HTTP/1.1, HTTP/2, and experimental HTTP/3 server implementation
+//! for the [`vibeio`] async runtime.
+//!
+//! `vibeio-http` provides protocol-specific connection handlers behind a common
+//! [`HttpProtocol`] trait. Handlers receive an `http::Request<`[`Incoming`]`>`
+//! and return an `http::Response<B>` where `B` implements
+//! [`http_body::Body`] with `bytes::Bytes` chunks.
+//!
+//! ## Feature highlights
+//!
+//! - **Zero-copy static file serving** - supports zero-copy response sending for static file serving on Linux.
+//! - **100 Continue** - Supports automatically sending `100 Continue` before the final response.
+//! - **103 Early Hints** - Supports sending `103 Early Hints` before the final response.
+//!
+//! ## Feature flags
+//!
+//! - `h1`: Enables HTTP/1.x support.
+//! - `h2`: Enables HTTP/2 support.
+//! - `h3`: Enables HTTP/3 support.
+//! - `h1-zerocopy`: Enables Linux-only zero-copy response sending for HTTP/1.x.
+//!
+//! ## Early hints
+//!
+//! Use [`send_early_hints`] from a request handler to send `103 Early Hints`
+//! before the final response.
+//!
+//! ## Example
+//!
+//! ```rust,no_run
+//! # #[cfg(feature = "h1")]
+//! # fn main() -> std::io::Result<()> {
+//! use bytes::Bytes;
+//! use http::Response;
+//! use http_body_util::Full;
+//! use vibeio::net::TcpListener;
+//! use vibeio::RuntimeBuilder;
+//! use vibeio_http::{Http1, Http1Options, HttpProtocol};
+//!
+//! let runtime = RuntimeBuilder::new().enable_timer(true).build()?;
+//!
+//! runtime.block_on(async {
+//!     let listener = TcpListener::bind("127.0.0.1:8080")?;
+//!     let (stream, _) = listener.accept().await?;
+//!     stream.set_nodelay(true)?;
+//!
+//!     Http1::new(stream.into_poll()?, Http1Options::default())
+//!         .handle(|_request| async move {
+//!             let response = Response::new(Full::new(Bytes::from_static(b"Hello World")));
+//!             Ok::<_, std::convert::Infallible>(response)
+//!         })
+//!         .await
+//! })
+//! # }
+//! # #[cfg(not(feature = "h1"))]
+//! # fn main() {}
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod early_hints;
