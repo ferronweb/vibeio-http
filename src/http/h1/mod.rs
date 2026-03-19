@@ -827,7 +827,7 @@ where
         mut zerocopy_fn: Option<ZF>,
     ) -> Result<(), std::io::Error>
     where
-        F: Fn(Request<Incoming>) -> Fut,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
@@ -1085,7 +1085,7 @@ where
         error_fn: EF,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: Fn(Request<Incoming>) -> Fut,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
@@ -1120,7 +1120,7 @@ where
         request_fn: F,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: Fn(Request<Incoming>) -> Fut,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,

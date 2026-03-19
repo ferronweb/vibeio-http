@@ -68,7 +68,7 @@ where
         error_fn: EF,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: Fn(http::Request<super::Incoming>) -> Fut,
+        F: Fn(http::Request<super::Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<http::Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
@@ -97,7 +97,7 @@ where
         request_fn: F,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: Fn(http::Request<super::Incoming>) -> Fut,
+        F: Fn(http::Request<super::Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<http::Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,

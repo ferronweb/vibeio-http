@@ -1,11 +1,15 @@
 mod early_hints;
 #[cfg(feature = "h1")]
 mod h1;
+#[cfg(feature = "h2")]
+mod h2;
 mod incoming;
 
 pub use early_hints::*;
 #[cfg(feature = "h1")]
 pub use h1::*;
+#[cfg(feature = "h2")]
+pub use h2::*;
 pub use incoming::*;
 
 use http::{Request, Response};
@@ -17,7 +21,7 @@ pub trait HttpProtocol: Sized {
         request_fn: F,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: Fn(Request<Incoming>) -> Fut,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
@@ -31,7 +35,7 @@ pub trait HttpProtocol: Sized {
         error_fn: EF,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
-        F: Fn(Request<Incoming>) -> Fut,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
