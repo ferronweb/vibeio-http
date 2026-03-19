@@ -21,6 +21,10 @@ pub use incoming::*;
 use http::{Request, Response};
 use http_body::Body;
 
+/// A trait representing an HTTP protocol (for example, HTTP/1.1, HTTP/2, HTTP/3).
+///
+/// This trait provides a simple, type-erased interface for handling HTTP requests
+/// across different protocol versions.
 pub trait HttpProtocol: Sized {
     fn handle<F, Fut, ResB, ResBE, ResE>(
         self,
