@@ -3,6 +3,8 @@ mod early_hints;
 mod h1;
 #[cfg(feature = "h2")]
 mod h2;
+#[cfg(feature = "h3")]
+mod h3;
 mod incoming;
 
 pub use early_hints::*;
@@ -10,6 +12,8 @@ pub use early_hints::*;
 pub use h1::*;
 #[cfg(feature = "h2")]
 pub use h2::*;
+#[cfg(feature = "h3")]
+pub use h3::*;
 pub use incoming::*;
 
 use http::{Request, Response};
