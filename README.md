@@ -55,16 +55,24 @@ fn main() -> std::io::Result<()> {
 
     runtime.block_on(async {
         let listener = TcpListener::bind("127.0.0.1:8080")?;
-        let (stream, _) = listener.accept().await?;
-        stream.set_nodelay(true)?;
+        loop {
+            let (stream, _) = listener.accept().await?;
+            stream.set_nodelay(true)?;
+            let stream = stream.into_poll()?;
 
-        Http1::new(stream.into_poll()?, Http1Options::default())
-            .handle(|_request| async move {
-                Ok::<_, std::convert::Infallible>(Response::new(
-                    Full::new(Bytes::from_static(b"Hello World")),
-                ))
-            })
-            .await
+            vibeio::spawn(async move {
+                if let Err(e) = Http1::new(stream, Http1Options::default())
+                    .handle(|_request| async move {
+                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                            Bytes::from_static(b"Hello World"),
+                        )))
+                    })
+                    .await
+                {
+                    eprintln!("HTTP error: {:?}", e);
+                }
+            });
+        }
     })
 }
 ```
