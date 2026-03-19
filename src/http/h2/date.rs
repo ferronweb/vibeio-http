@@ -8,6 +8,7 @@ pub(super) struct DateCache {
 }
 
 impl DateCache {
+    #[allow(dead_code)]
     #[inline]
     pub fn new() -> Self {
         Self::default()

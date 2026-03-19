@@ -4,12 +4,17 @@ mod options;
 pub use options::*;
 use tokio_util::sync::CancellationToken;
 
-use std::rc::Rc;
+use std::{
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+    task::{Context, Poll},
+};
 
 use bytes::Bytes;
 use http::{Request, Response};
-use http_body::Frame;
-use http_body_util::{BodyExt, StreamBody};
+use http_body::{Body, Frame};
+use http_body_util::BodyExt;
 
 use crate::http::{h2::date::DateCache, EarlyHints, HttpProtocol, Incoming};
 
@@ -20,6 +25,95 @@ static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::TE,
     http::header::UPGRADE,
 ];
+
+struct H2Body {
+    recv: h2::RecvStream,
+    data_done: bool,
+}
+
+impl H2Body {
+    #[inline]
+    fn new(recv: h2::RecvStream) -> Self {
+        Self {
+            recv,
+            data_done: false,
+        }
+    }
+}
+
+impl Body for H2Body {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    #[inline]
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if !self.data_done {
+            match self.recv.poll_data(cx) {
+                Poll::Ready(Some(Ok(data))) => return Poll::Ready(Some(Ok(Frame::data(data)))),
+                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(h2_error_to_io(err)))),
+                Poll::Ready(None) => self.data_done = true,
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        match self.recv.poll_trailers(cx) {
+            Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+            Poll::Ready(Ok(None)) => Poll::Ready(None),
+            Poll::Ready(Err(err)) => Poll::Ready(Some(Err(h2_error_to_io(err)))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+#[inline]
+fn h2_error_to_io(error: h2::Error) -> std::io::Error {
+    if error.is_io() {
+        error.into_io().unwrap_or(std::io::Error::other("io error"))
+    } else {
+        std::io::Error::other(error)
+    }
+}
+
+#[inline]
+fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
+    std::io::Error::other(h2::Error::from(reason))
+}
+
+async fn wait_for_send_capacity(send: &mut h2::SendStream<Bytes>) -> Result<(), std::io::Error> {
+    send.reserve_capacity(1);
+
+    if send.capacity() == 0 {
+        std::future::poll_fn(|cx| loop {
+            match send.poll_capacity(cx) {
+                Poll::Ready(Some(Ok(0))) => {}
+                Poll::Ready(Some(Ok(_))) => return Poll::Ready(Ok(())),
+                Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(h2_error_to_io(err))),
+                Poll::Ready(None) => {
+                    return Poll::Ready(Err(std::io::Error::other(
+                        "send stream capacity unexpectedly closed",
+                    )))
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        })
+        .await
+    } else {
+        let reset_reason = std::future::poll_fn(|cx| match send.poll_reset(cx) {
+            Poll::Ready(Ok(reason)) => Poll::Ready(Ok(Some(reason))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(h2_error_to_io(err))),
+            Poll::Pending => Poll::Ready(Ok(None)),
+        })
+        .await?;
+        if let Some(reason) = reset_reason {
+            Err(h2_reason_to_io(reason))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 pub struct Http2<Io> {
     io_to_handshake: Option<Io>,
@@ -103,7 +197,7 @@ where
                     let accept_fut =
                         futures_util::future::select(cancel_fut_pin, accept_fut_orig_pin);
 
-                    match if let Some(timeout) = self.options.handshake_timeout {
+                    match if let Some(timeout) = self.options.accept_timeout {
                         vibeio::time::timeout(timeout, accept_fut).await
                     } else {
                         Ok(accept_fut.await)
@@ -112,7 +206,7 @@ where
                             (Some(request), false)
                         }
                         Ok(futures_util::future::Either::Left((_, _))) => {
-                            // Cancelled
+                            // Canceled
                             (None, true)
                         }
                         Err(_) => {
@@ -153,46 +247,7 @@ where
                 let send_continue_response = self.options.send_continue_response;
                 vibeio::spawn(async move {
                     let (request_parts, recv_stream) = request.into_parts();
-                    let request_body_stream = futures_util::stream::unfold(
-                        (recv_stream, false),
-                        |(mut receive, mut is_body_finished)| async move {
-                            loop {
-                                if !is_body_finished {
-                                    match receive.data().await {
-                                        Some(Ok(data)) => {
-                                            return Some((Ok(Frame::data(data)), (receive, false)))
-                                        }
-                                        Some(Err(err)) => {
-                                            return Some((
-                                                Err(std::io::Error::other(err.to_string())),
-                                                (receive, false),
-                                            ))
-                                        }
-                                        None => is_body_finished = true,
-                                    }
-                                } else {
-                                    match receive.trailers().await {
-                                        Ok(Some(trailers)) => {
-                                            return Some((
-                                                Ok(Frame::trailers(trailers)),
-                                                (receive, true),
-                                            ))
-                                        }
-                                        Ok(None) => {
-                                            return None;
-                                        }
-                                        Err(err) => {
-                                            return Some((
-                                                Err(std::io::Error::other(err.to_string())),
-                                                (receive, true),
-                                            ))
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                    );
-                    let request_body = Incoming::new(StreamBody::new(request_body_stream));
+                    let request_body = Incoming::new(H2Body::new(recv_stream));
                     let mut request = Request::from_parts(request_parts, request_body);
 
                     // 100 Continue
@@ -205,13 +260,7 @@ where
                         if is_100_continue {
                             let mut response = Response::new(());
                             *response.status_mut() = http::StatusCode::CONTINUE;
-                            let _ = stream.send_informational(response).map_err(|e| {
-                                if e.is_io() {
-                                    e.into_io().unwrap_or(std::io::Error::other("io error"))
-                                } else {
-                                    std::io::Error::other(e)
-                                }
-                            });
+                            let _ = stream.send_informational(response).map_err(h2_error_to_io);
                         }
                     }
 
@@ -219,35 +268,54 @@ where
                     let early_hints = EarlyHints::new(early_hints_tx);
                     request.extensions_mut().insert(early_hints);
 
-                    let response_result = {
-                        let early_hints_fut = async {
-                            let early_hints_rx = early_hints_rx;
-                            while let Ok((headers, sender)) = early_hints_rx.recv().await {
+                    let mut response_fut = std::pin::pin!(request_fn(request));
+                    let early_hints_rx = early_hints_rx;
+                    let response_result = loop {
+                        let early_hints_recv_fut = early_hints_rx.recv();
+                        let mut early_hints_recv_fut = std::pin::pin!(early_hints_recv_fut);
+                        let next = std::future::poll_fn(|cx| {
+                            match stream.poll_reset(cx) {
+                                Poll::Ready(Ok(reason)) => {
+                                    return Poll::Ready(Err(h2_reason_to_io(reason)));
+                                }
+                                Poll::Ready(Err(err)) => {
+                                    return Poll::Ready(Err(h2_error_to_io(err)));
+                                }
+                                Poll::Pending => {}
+                            }
+
+                            if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
+                                return Poll::Ready(Ok(futures_util::future::Either::Left(res)));
+                            }
+
+                            match early_hints_recv_fut.as_mut().poll(cx) {
+                                Poll::Ready(Ok(msg)) => {
+                                    Poll::Ready(Ok(futures_util::future::Either::Right(msg)))
+                                }
+                                Poll::Ready(Err(_)) => Poll::Pending,
+                                Poll::Pending => Poll::Pending,
+                            }
+                        })
+                        .await;
+
+                        match next {
+                            Ok(futures_util::future::Either::Left(response_result)) => {
+                                break response_result;
+                            }
+                            Ok(futures_util::future::Either::Right((headers, sender))) => {
                                 let mut response = Response::new(());
                                 *response.status_mut() = http::StatusCode::EARLY_HINTS;
                                 *response.headers_mut() = headers;
                                 sender
                                     .into_inner()
-                                    .send(stream.send_informational(response).map_err(|e| {
-                                        if e.is_io() {
-                                            e.into_io().unwrap_or(std::io::Error::other("io error"))
-                                        } else {
-                                            std::io::Error::other(e)
-                                        }
-                                    }))
+                                    .send(
+                                        stream.send_informational(response).map_err(h2_error_to_io),
+                                    )
                                     .ok();
                             }
-                            futures_util::future::pending::<Result<(), std::io::Error>>().await
-                        };
-                        let early_hints_fut_pin = std::pin::pin!(early_hints_fut);
-                        let response_fut = request_fn(request);
-                        let response_fut_pin = std::pin::pin!(response_fut);
-
-                        match futures_util::future::select(early_hints_fut_pin, response_fut_pin)
-                            .await
-                        {
-                            futures_util::future::Either::Left((_, _)) => unreachable!(),
-                            futures_util::future::Either::Right((res, _)) => res,
+                            Err(_) => {
+                                return;
+                            }
                         }
                     };
                     let Ok(mut response) = response_result else {
@@ -255,45 +323,97 @@ where
                         return;
                     };
 
-                    let response_headers = response.headers_mut();
-                    if let Some(http_date) = date_cache.get_date_header_value() {
-                        response_headers
-                            .entry(http::header::DATE)
-                            .or_insert(http_date);
-                    }
-                    if let Some(connection_header) = response_headers
-                        .remove(http::header::CONNECTION)
-                        .as_ref()
-                        .and_then(|v| v.to_str().ok())
                     {
-                        for name in connection_header.split(',') {
-                            response_headers.remove(name.trim());
+                        let response_headers = response.headers_mut();
+                        if let Some(http_date) = date_cache.get_date_header_value() {
+                            response_headers
+                                .entry(http::header::DATE)
+                                .or_insert(http_date);
+                        }
+                        if let Some(connection_header) = response_headers
+                            .remove(http::header::CONNECTION)
+                            .as_ref()
+                            .and_then(|v| v.to_str().ok())
+                        {
+                            for name in connection_header.split(',') {
+                                response_headers.remove(name.trim());
+                            }
+                        }
+                        while response_headers.remove(http::header::CONNECTION).is_some() {}
+                        for header in &HTTP2_INVALID_HEADERS {
+                            while response_headers.remove(header).is_some() {}
                         }
                     }
-                    while response_headers.remove(http::header::CONNECTION).is_some() {}
-                    for header in &HTTP2_INVALID_HEADERS {
-                        while response_headers.remove(header).is_some() {}
+
+                    let response_is_end_stream = response.body().is_end_stream();
+                    if !response_is_end_stream {
+                        if let Some(content_length) = response.body().size_hint().exact() {
+                            if !response
+                                .headers()
+                                .contains_key(http::header::CONTENT_LENGTH)
+                            {
+                                response
+                                    .headers_mut()
+                                    .insert(http::header::CONTENT_LENGTH, content_length.into());
+                            }
+                        }
                     }
 
                     let (response_parts, mut response_body) = response.into_parts();
-                    let mut send = match stream
-                        .send_response(Response::from_parts(response_parts, ()), false)
-                    {
+                    let mut send = match stream.send_response(
+                        Response::from_parts(response_parts, ()),
+                        response_is_end_stream,
+                    ) {
                         Ok(send) => send,
                         Err(_) => {
                             return;
                         }
                     };
-                    let mut had_trailers = false;
-                    while let Some(chunk) = response_body.frame().await {
+
+                    if response_is_end_stream {
+                        return;
+                    }
+
+                    while let Some(chunk) = {
+                        let frame_fut = response_body.frame();
+                        let mut frame_fut = std::pin::pin!(frame_fut);
+                        match std::future::poll_fn(|cx| {
+                            match send.poll_reset(cx) {
+                                Poll::Ready(Ok(reason)) => {
+                                    return Poll::Ready(Err(h2_reason_to_io(reason)));
+                                }
+                                Poll::Ready(Err(err)) => {
+                                    return Poll::Ready(Err(h2_error_to_io(err)));
+                                }
+                                Poll::Pending => {}
+                            }
+
+                            match frame_fut.as_mut().poll(cx) {
+                                Poll::Ready(frame) => Poll::Ready(Ok(frame)),
+                                Poll::Pending => Poll::Pending,
+                            }
+                        })
+                        .await
+                        {
+                            Ok(frame) => frame,
+                            Err(_) => {
+                                return;
+                            }
+                        }
+                    } {
                         match chunk {
                             Ok(frame) => {
                                 if frame.is_data() {
                                     match frame.into_data() {
                                         Ok(data) => {
-                                            send.reserve_capacity(data.len());
-                                            std::future::poll_fn(|cx| send.poll_capacity(cx)).await;
-                                            if send.send_data(data, false).is_err() {
+                                            if wait_for_send_capacity(&mut send).await.is_err() {
+                                                return;
+                                            }
+                                            let is_end_stream = response_body.is_end_stream();
+                                            if send.send_data(data, is_end_stream).is_err() {
+                                                return;
+                                            }
+                                            if is_end_stream {
                                                 return;
                                             }
                                         }
@@ -304,10 +424,10 @@ where
                                 } else if frame.is_trailers() {
                                     match frame.into_trailers() {
                                         Ok(trailers) => {
-                                            had_trailers = true;
                                             if send.send_trailers(trailers).is_err() {
                                                 return;
                                             }
+                                            return;
                                         }
                                         Err(_) => {
                                             return;
@@ -320,9 +440,7 @@ where
                             }
                         }
                     }
-                    if !had_trailers {
-                        if let Err(_err) = send.send_data(Bytes::new(), true) {}
-                    }
+                    let _ = send.send_data(Bytes::new(), true);
                 });
             }
 
