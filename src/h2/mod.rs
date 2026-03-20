@@ -21,9 +21,10 @@ use crate::{
     EarlyHints, HttpProtocol, Incoming,
 };
 
-static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 4] = [
+static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::HeaderName::from_static("keep-alive"),
     http::header::HeaderName::from_static("proxy-connection"),
+    http::header::CONNECTION,
     http::header::TRANSFER_ENCODING,
     http::header::UPGRADE,
 ];
@@ -259,61 +260,7 @@ where
                     let request_body = Incoming::H2(H2Body::new(recv_stream));
                     let mut request = Request::from_parts(request_parts, request_body);
 
-                    // 100 Continue
-                    if self.options.send_continue_response {
-                        let is_100_continue = request
-                            .headers()
-                            .get(http::header::EXPECT)
-                            .and_then(|v| v.to_str().ok())
-                            .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-                        if is_100_continue {
-                            let mut response = Response::new(());
-                            *response.status_mut() = http::StatusCode::CONTINUE;
-                            let _ = stream.send_informational(response).map_err(h2_error_to_io);
-                        }
-                    }
-
-                    let (early_hints_tx, early_hints_rx) = async_channel::unbounded();
-                    let early_hints = EarlyHints::new(early_hints_tx);
-                    request.extensions_mut().insert(early_hints);
-
-                    let mut response_fut = std::pin::pin!(request_fn(request));
-                    let early_hints_rx = early_hints_rx;
-                    let response_result = loop {
-                        let early_hints_recv_fut = early_hints_rx.recv();
-                        let mut early_hints_recv_fut = std::pin::pin!(early_hints_recv_fut);
-                        let next = std::future::poll_fn(|cx| {
-                            if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
-                                return Poll::Ready(futures_util::future::Either::Left(res));
-                            }
-
-                            match early_hints_recv_fut.as_mut().poll(cx) {
-                                Poll::Ready(Ok(msg)) => {
-                                    Poll::Ready(futures_util::future::Either::Right(msg))
-                                }
-                                Poll::Ready(Err(_)) => Poll::Pending,
-                                Poll::Pending => Poll::Pending,
-                            }
-                        })
-                        .await;
-
-                        match next {
-                            futures_util::future::Either::Left(response_result) => {
-                                break response_result;
-                            }
-                            futures_util::future::Either::Right((headers, sender)) => {
-                                let mut response = Response::new(());
-                                *response.status_mut() = http::StatusCode::EARLY_HINTS;
-                                *response.headers_mut() = headers;
-                                sender
-                                    .into_inner()
-                                    .send(
-                                        stream.send_informational(response).map_err(h2_error_to_io),
-                                    )
-                                    .ok();
-                            }
-                        }
-                    };
+                    let response_result = request_fn(request).await;
                     let Ok(mut response) = response_result else {
                         // Return early if the request handler returns an error
                         return;
@@ -337,9 +284,12 @@ where
                                 response_headers.remove(name.trim());
                             }
                         }
-                        while response_headers.remove(http::header::CONNECTION).is_some() {}
                         for header in &HTTP2_INVALID_HEADERS {
-                            while response_headers.remove(header).is_some() {}
+                            if let http::header::Entry::Occupied(entry) =
+                                response_headers.entry(header)
+                            {
+                                entry.remove();
+                            }
                         }
                         if response_headers
                             .get(http::header::TE)

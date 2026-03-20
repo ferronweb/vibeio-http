@@ -19,9 +19,10 @@ use http_body_util::BodyExt;
 
 use crate::{h3::date::DateCache, EarlyHints, HttpProtocol, Incoming};
 
-static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 4] = [
+static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::HeaderName::from_static("keep-alive"),
     http::header::HeaderName::from_static("proxy-connection"),
+    http::header::CONNECTION,
     http::header::TRANSFER_ENCODING,
     http::header::UPGRADE,
 ];
@@ -104,18 +105,10 @@ fn h3_stream_error_to_io(error: h3::error::StreamError) -> std::io::Error {
 
 #[inline]
 fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
-    if let Some(connection_header) = headers
-        .remove(http::header::CONNECTION)
-        .as_ref()
-        .and_then(|v| v.to_str().ok())
-    {
-        for name in connection_header.split(',') {
-            while headers.remove(name.trim()).is_some() {}
-        }
-    }
-    while headers.remove(http::header::CONNECTION).is_some() {}
     for header in &HTTP3_INVALID_HEADERS {
-        while headers.remove(header).is_some() {}
+        if let http::header::Entry::Occupied(entry) = headers.entry(header) {
+            entry.remove();
+        }
     }
     if headers
         .get(http::header::TE)
