@@ -446,7 +446,7 @@ where
             let request_body = Http1Body {
                 inner: Box::pin(body_rx),
             };
-            let mut request = Request::new(Incoming::new(request_body));
+            let mut request = Request::new(Incoming::H1(request_body));
             match req.version {
                 Some(0) => *request.version_mut() = http::Version::HTTP_10,
                 Some(1) => *request.version_mut() = http::Version::HTTP_11,
@@ -1143,7 +1143,7 @@ where
     }
 }
 
-struct Http1Body {
+pub(crate) struct Http1Body {
     #[allow(clippy::type_complexity)]
     inner: Pin<Box<Receiver<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>>>,
 }

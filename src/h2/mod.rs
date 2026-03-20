@@ -26,7 +26,7 @@ static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 4] = [
     http::header::UPGRADE,
 ];
 
-struct H2Body {
+pub(crate) struct H2Body {
     recv: h2::RecvStream,
     data_done: bool,
 }
@@ -289,7 +289,7 @@ where
                 let send_continue_response = self.options.send_continue_response;
                 vibeio::spawn(async move {
                     let (request_parts, recv_stream) = request.into_parts();
-                    let request_body = Incoming::new(H2Body::new(recv_stream));
+                    let request_body = Incoming::H2(H2Body::new(recv_stream));
                     let mut request = Request::from_parts(request_parts, request_body);
 
                     // 100 Continue

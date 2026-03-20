@@ -31,7 +31,7 @@ struct H3BodyState<S, B> {
     data_done: bool,
 }
 
-struct H3Body<S, B> {
+pub(crate) struct H3Body<S, B> {
     inner: futures_util::lock::Mutex<H3BodyState<S, B>>,
 }
 
@@ -305,7 +305,7 @@ where
                         }
                     };
                     let (mut send, receive) = stream.split();
-                    let request_body = Incoming::new(H3Body::new(receive));
+                    let request_body = Incoming::Boxed(Box::pin(H3Body::new(receive)));
                     let (request_parts, _) = request.into_parts();
                     let mut request = Request::from_parts(request_parts, request_body);
 

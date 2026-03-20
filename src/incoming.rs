@@ -5,30 +5,27 @@ use std::{
 
 use http_body::Body;
 
-/// A type-erased, boxed HTTP request body.
+#[cfg(feature = "h2")]
+use crate::H2Body;
+#[cfg(feature = "h1")]
+use crate::Http1Body;
+
+/// An incoming HTTP request body.
 ///
 /// `Incoming` is the concrete body type placed inside every
-/// [`Request`](http::Request) passed to the user-supplied handler. It wraps
-/// any [`Body`] implementation behind a single, heap-allocated trait object,
-/// keeping the handler signature simple regardless of the underlying transport
-/// or encoding (content-length, chunked, etc.).
+/// [`Request`](http::Request) passed to the user-supplied handler.
 ///
 /// Data frames are yielded as [`bytes::Bytes`] chunks. Trailer frames (like
 /// HTTP/1.1 chunked trailers) are forwarded transparently. The stream ends when
 /// [`Body::poll_frame`] returns `Poll::Ready(None)`.
-pub struct Incoming {
-    inner: Pin<Box<dyn Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync>>,
-}
-
-impl Incoming {
-    #[inline]
-    pub(crate) fn new(
-        inner: impl Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            inner: Box::pin(inner),
-        }
-    }
+#[allow(private_interfaces)]
+pub enum Incoming {
+    #[cfg(feature = "h1")]
+    H1(Http1Body),
+    #[cfg(feature = "h2")]
+    H2(H2Body),
+    #[cfg(feature = "h3")]
+    Boxed(Pin<Box<dyn Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync>>),
 }
 
 impl Body for Incoming {
@@ -37,19 +34,40 @@ impl Body for Incoming {
 
     #[inline]
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        self.inner.as_mut().poll_frame(cx)
+        match self.get_mut() {
+            #[cfg(feature = "h1")]
+            Self::H1(ref mut inner) => Pin::new(inner).poll_frame(cx),
+            #[cfg(feature = "h2")]
+            Self::H2(ref mut inner) => Pin::new(inner).poll_frame(cx),
+            #[cfg(feature = "h3")]
+            Self::Boxed(inner) => inner.as_mut().poll_frame(cx),
+        }
     }
 
     #[inline]
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        match self {
+            #[cfg(feature = "h1")]
+            Self::H1(inner) => inner.is_end_stream(),
+            #[cfg(feature = "h2")]
+            Self::H2(inner) => inner.is_end_stream(),
+            #[cfg(feature = "h3")]
+            Self::Boxed(inner) => inner.is_end_stream(),
+        }
     }
 
     #[inline]
     fn size_hint(&self) -> http_body::SizeHint {
-        self.inner.size_hint()
+        match self {
+            #[cfg(feature = "h1")]
+            Self::H1(inner) => inner.size_hint(),
+            #[cfg(feature = "h2")]
+            Self::H2(inner) => inner.size_hint(),
+            #[cfg(feature = "h3")]
+            Self::Boxed(inner) => inner.size_hint(),
+        }
     }
 }
