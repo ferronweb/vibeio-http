@@ -1,6 +1,6 @@
 mod date;
 mod options;
-mod sendbuf;
+mod send;
 
 pub use options::*;
 use tokio_util::sync::CancellationToken;
@@ -15,9 +15,11 @@ use std::{
 use bytes::Bytes;
 use http::{Request, Response};
 use http_body::{Body, Frame};
-use http_body_util::BodyExt;
 
-use crate::{h2::date::DateCache, h2::sendbuf::SendBuf, EarlyHints, HttpProtocol, Incoming};
+use crate::{
+    h2::{date::DateCache, send::PipeToSendStream},
+    EarlyHints, HttpProtocol, Incoming,
+};
 
 static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 4] = [
     http::header::HeaderName::from_static("keep-alive"),
@@ -72,7 +74,7 @@ impl Body for H2Body {
 }
 
 #[inline]
-fn h2_error_to_io(error: h2::Error) -> std::io::Error {
+pub(super) fn h2_error_to_io(error: h2::Error) -> std::io::Error {
     if error.is_io() {
         error.into_io().unwrap_or(std::io::Error::other("io error"))
     } else {
@@ -81,42 +83,8 @@ fn h2_error_to_io(error: h2::Error) -> std::io::Error {
 }
 
 #[inline]
-fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
+pub(super) fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
     std::io::Error::other(h2::Error::from(reason))
-}
-
-#[inline]
-async fn wait_for_send_capacity(send: &mut h2::SendStream<SendBuf>) -> Result<(), std::io::Error> {
-    send.reserve_capacity(1);
-
-    if send.capacity() == 0 {
-        std::future::poll_fn(|cx| loop {
-            match send.poll_capacity(cx) {
-                Poll::Ready(Some(Ok(0))) => {}
-                Poll::Ready(Some(Ok(_))) => return Poll::Ready(Ok(())),
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(h2_error_to_io(err))),
-                Poll::Ready(None) => {
-                    return Poll::Ready(Err(std::io::Error::other(
-                        "send stream capacity unexpectedly closed",
-                    )))
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        })
-        .await
-    } else {
-        let reset_reason = std::future::poll_fn(|cx| match send.poll_reset(cx) {
-            Poll::Ready(Ok(reason)) => Poll::Ready(Ok(Some(reason))),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(h2_error_to_io(err))),
-            Poll::Pending => Poll::Ready(Ok(None)),
-        })
-        .await?;
-        if let Some(reason) = reset_reason {
-            Err(h2_reason_to_io(reason))
-        } else {
-            Ok(())
-        }
-    }
 }
 
 /// An HTTP/2 connection handler.
@@ -410,99 +378,23 @@ where
                     }
 
                     let (response_parts, mut response_body) = response.into_parts();
-                    let mut send = match stream.send_response(
+                    let Ok(send) = stream.send_response(
                         Response::from_parts(response_parts, ()),
                         response_is_end_stream,
-                    ) {
-                        Ok(send) => send,
-                        Err(_) => {
-                            return;
-                        }
+                    ) else {
+                        return;
                     };
 
                     if response_is_end_stream {
                         return;
                     }
 
-                    loop {
-                        match wait_for_send_capacity(&mut send).await {
-                            Ok(capacity) => capacity,
-                            Err(_) => return,
-                        };
-
-                        let Some(chunk) = ({
-                            let frame_fut = response_body.frame();
-                            let mut frame_fut = std::pin::pin!(frame_fut);
-                            match std::future::poll_fn(|cx| {
-                                match send.poll_reset(cx) {
-                                    Poll::Ready(Ok(reason)) => {
-                                        return Poll::Ready(Err(h2_reason_to_io(reason)));
-                                    }
-                                    Poll::Ready(Err(err)) => {
-                                        return Poll::Ready(Err(h2_error_to_io(err)));
-                                    }
-                                    Poll::Pending => {}
-                                }
-
-                                match frame_fut.as_mut().poll(cx) {
-                                    Poll::Ready(frame) => Poll::Ready(Ok(frame)),
-                                    Poll::Pending => Poll::Pending,
-                                }
-                            })
-                            .await
-                            {
-                                Ok(frame) => frame,
-                                Err(_) => {
-                                    return;
-                                }
-                            }
-                        }) else {
-                            break;
-                        };
-                        match chunk {
-                            Ok(frame) => {
-                                if frame.is_data() {
-                                    match frame.into_data() {
-                                        Ok(data) => {
-                                            let response_is_end_stream =
-                                                response_body.is_end_stream();
-                                            if send
-                                                .send_data(
-                                                    SendBuf::Buf(data),
-                                                    response_is_end_stream,
-                                                )
-                                                .is_err()
-                                            {
-                                                return;
-                                            }
-                                            if response_is_end_stream {
-                                                return;
-                                            }
-                                        }
-                                        Err(_) => {
-                                            return;
-                                        }
-                                    }
-                                } else if frame.is_trailers() {
-                                    match frame.into_trailers() {
-                                        Ok(trailers) => {
-                                            if send.send_trailers(trailers).is_err() {
-                                                return;
-                                            }
-                                            return;
-                                        }
-                                        Err(_) => {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                return;
-                            }
-                        }
+                    if PipeToSendStream::new(send, &mut response_body)
+                        .await
+                        .is_err()
+                    {
+                        return;
                     }
-                    let _ = send.send_data(SendBuf::None, true);
                 });
             }
 
