@@ -1,5 +1,6 @@
 mod date;
 mod options;
+mod sendbuf;
 
 pub use options::*;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +17,7 @@ use http::{Request, Response};
 use http_body::{Body, Frame};
 use http_body_util::BodyExt;
 
-use crate::{h2::date::DateCache, EarlyHints, HttpProtocol, Incoming};
+use crate::{h2::date::DateCache, h2::sendbuf::SendBuf, EarlyHints, HttpProtocol, Incoming};
 
 static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 4] = [
     http::header::HeaderName::from_static("keep-alive"),
@@ -85,7 +86,7 @@ fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
 }
 
 #[inline]
-async fn wait_for_send_capacity(send: &mut h2::SendStream<Bytes>) -> Result<(), std::io::Error> {
+async fn wait_for_send_capacity(send: &mut h2::SendStream<SendBuf>) -> Result<(), std::io::Error> {
     send.reserve_capacity(1);
 
     if send.capacity() == 0 {
@@ -463,7 +464,12 @@ where
                                         Ok(data) => {
                                             let response_is_end_stream =
                                                 response_body.is_end_stream();
-                                            if send.send_data(data, response_is_end_stream).is_err()
+                                            if send
+                                                .send_data(
+                                                    SendBuf::Buf(data),
+                                                    response_is_end_stream,
+                                                )
+                                                .is_err()
                                             {
                                                 return;
                                             }
@@ -494,7 +500,7 @@ where
                             }
                         }
                     }
-                    let _ = send.send_data(Bytes::new(), true);
+                    let _ = send.send_data(SendBuf::None, true);
                 });
             }
 
