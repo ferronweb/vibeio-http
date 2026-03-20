@@ -1,8 +1,8 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.1.2
 
-**Not yet released**
+**Released in March 20, 2026**
 
 - Added an option to disable sending `Date` header for HTTP/2 and HTTP/3
 - The default maximum concurrent streams limit for HTTP/2 is now 200
