@@ -119,7 +119,7 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
     }
     if headers
         .get(http::header::TE)
-        .map_or(false, |v| v != "trailers")
+        .is_some_and(|v| v != "trailers")
     {
         headers.remove(http::header::TE);
     }
@@ -235,7 +235,7 @@ where
 
             loop {
                 let resolver = {
-                    match {
+                    let res = {
                         let accept_fut_orig = h3.accept();
                         let accept_fut_orig_pin = std::pin::pin!(accept_fut_orig);
                         let cancel_token = self.cancel_token.clone();
@@ -267,7 +267,8 @@ where
                                 (None, false)
                             }
                         }
-                    } {
+                    };
+                    match res {
                         (Some(resolver), _) => resolver,
                         (None, graceful) => {
                             if let Err(err) = h3.shutdown(0).await {

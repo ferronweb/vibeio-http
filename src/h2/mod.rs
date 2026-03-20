@@ -357,7 +357,7 @@ where
                         }
                         if response_headers
                             .get(http::header::TE)
-                            .map_or(false, |v| v != "trailers")
+                            .is_some_and(|v| v != "trailers")
                         {
                             response_headers.remove(http::header::TE);
                         }
@@ -389,12 +389,7 @@ where
                         return;
                     }
 
-                    if PipeToSendStream::new(send, &mut response_body)
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+                    let _ = PipeToSendStream::new(send, &mut response_body).await;
                 });
             }
 
