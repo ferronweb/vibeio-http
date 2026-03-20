@@ -85,42 +85,37 @@ fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
 }
 
 #[inline]
-async fn wait_for_send_capacity(
-    send: &mut h2::SendStream<Bytes>,
-    desired_capacity: usize,
-) -> Result<usize, std::io::Error> {
-    if desired_capacity == 0 {
-        return Ok(0);
-    }
+async fn wait_for_send_capacity(send: &mut h2::SendStream<Bytes>) -> Result<(), std::io::Error> {
+    send.reserve_capacity(1);
 
-    send.reserve_capacity(desired_capacity);
-
-    if send.capacity() > 0 {
-        return Ok(send.capacity().min(desired_capacity));
-    }
-
-    std::future::poll_fn(|cx| loop {
-        match send.poll_reset(cx) {
-            Poll::Ready(Ok(reason)) => return Poll::Ready(Err(h2_reason_to_io(reason))),
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(h2_error_to_io(err))),
-            Poll::Pending => {}
-        }
-
-        match send.poll_capacity(cx) {
-            Poll::Ready(Some(Ok(0))) => {}
-            Poll::Ready(Some(Ok(capacity))) => {
-                return Poll::Ready(Ok(capacity.min(desired_capacity)));
+    if send.capacity() == 0 {
+        std::future::poll_fn(|cx| loop {
+            match send.poll_capacity(cx) {
+                Poll::Ready(Some(Ok(0))) => {}
+                Poll::Ready(Some(Ok(_))) => return Poll::Ready(Ok(())),
+                Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(h2_error_to_io(err))),
+                Poll::Ready(None) => {
+                    return Poll::Ready(Err(std::io::Error::other(
+                        "send stream capacity unexpectedly closed",
+                    )))
+                }
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(h2_error_to_io(err))),
-            Poll::Ready(None) => {
-                return Poll::Ready(Err(std::io::Error::other(
-                    "send stream capacity unexpectedly closed",
-                )))
-            }
-            Poll::Pending => return Poll::Pending,
+        })
+        .await
+    } else {
+        let reset_reason = std::future::poll_fn(|cx| match send.poll_reset(cx) {
+            Poll::Ready(Ok(reason)) => Poll::Ready(Ok(Some(reason))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(h2_error_to_io(err))),
+            Poll::Pending => Poll::Ready(Ok(None)),
+        })
+        .await?;
+        if let Some(reason) = reset_reason {
+            Err(h2_reason_to_io(reason))
+        } else {
+            Ok(())
         }
-    })
-    .await
+    }
 }
 
 /// An HTTP/2 connection handler.
@@ -426,72 +421,54 @@ where
                         return;
                     }
 
-                    while let Some(chunk) = {
-                        let frame_fut = response_body.frame();
-                        let mut frame_fut = std::pin::pin!(frame_fut);
-                        match std::future::poll_fn(|cx| {
-                            match send.poll_reset(cx) {
-                                Poll::Ready(Ok(reason)) => {
-                                    return Poll::Ready(Err(h2_reason_to_io(reason)));
-                                }
-                                Poll::Ready(Err(err)) => {
-                                    return Poll::Ready(Err(h2_error_to_io(err)));
-                                }
-                                Poll::Pending => {}
-                            }
+                    loop {
+                        match wait_for_send_capacity(&mut send).await {
+                            Ok(capacity) => capacity,
+                            Err(_) => return,
+                        };
 
-                            match frame_fut.as_mut().poll(cx) {
-                                Poll::Ready(frame) => Poll::Ready(Ok(frame)),
-                                Poll::Pending => Poll::Pending,
+                        let Some(chunk) = ({
+                            let frame_fut = response_body.frame();
+                            let mut frame_fut = std::pin::pin!(frame_fut);
+                            match std::future::poll_fn(|cx| {
+                                match send.poll_reset(cx) {
+                                    Poll::Ready(Ok(reason)) => {
+                                        return Poll::Ready(Err(h2_reason_to_io(reason)));
+                                    }
+                                    Poll::Ready(Err(err)) => {
+                                        return Poll::Ready(Err(h2_error_to_io(err)));
+                                    }
+                                    Poll::Pending => {}
+                                }
+
+                                match frame_fut.as_mut().poll(cx) {
+                                    Poll::Ready(frame) => Poll::Ready(Ok(frame)),
+                                    Poll::Pending => Poll::Pending,
+                                }
+                            })
+                            .await
+                            {
+                                Ok(frame) => frame,
+                                Err(_) => {
+                                    return;
+                                }
                             }
-                        })
-                        .await
-                        {
-                            Ok(frame) => frame,
-                            Err(_) => {
-                                return;
-                            }
-                        }
-                    } {
+                        }) else {
+                            break;
+                        };
                         match chunk {
                             Ok(frame) => {
                                 if frame.is_data() {
                                     match frame.into_data() {
-                                        Ok(mut data) => {
+                                        Ok(data) => {
                                             let response_is_end_stream =
                                                 response_body.is_end_stream();
-                                            if data.is_empty() {
-                                                if send
-                                                    .send_data(data, response_is_end_stream)
-                                                    .is_err()
-                                                {
-                                                    return;
-                                                }
-                                                if response_is_end_stream {
-                                                    return;
-                                                }
-                                                continue;
+                                            if send.send_data(data, response_is_end_stream).is_err()
+                                            {
+                                                return;
                                             }
-
-                                            while !data.is_empty() {
-                                                let capacity = match wait_for_send_capacity(
-                                                    &mut send,
-                                                    data.len(),
-                                                )
-                                                .await
-                                                {
-                                                    Ok(capacity) => capacity,
-                                                    Err(_) => return,
-                                                };
-                                                let chunk = data.split_to(capacity.min(data.len()));
-                                                let is_end_stream =
-                                                    response_is_end_stream && data.is_empty();
-                                                if send.send_data(chunk, is_end_stream).is_err() {
-                                                    return;
-                                                }
-                                                if is_end_stream {
-                                                    return;
-                                                }
+                                            if response_is_end_stream {
+                                                return;
                                             }
                                         }
                                         Err(_) => {
