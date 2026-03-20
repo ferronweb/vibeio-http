@@ -284,23 +284,13 @@ where
                         let early_hints_recv_fut = early_hints_rx.recv();
                         let mut early_hints_recv_fut = std::pin::pin!(early_hints_recv_fut);
                         let next = std::future::poll_fn(|cx| {
-                            match stream.poll_reset(cx) {
-                                Poll::Ready(Ok(reason)) => {
-                                    return Poll::Ready(Err(h2_reason_to_io(reason)));
-                                }
-                                Poll::Ready(Err(err)) => {
-                                    return Poll::Ready(Err(h2_error_to_io(err)));
-                                }
-                                Poll::Pending => {}
-                            }
-
                             if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
-                                return Poll::Ready(Ok(futures_util::future::Either::Left(res)));
+                                return Poll::Ready(futures_util::future::Either::Left(res));
                             }
 
                             match early_hints_recv_fut.as_mut().poll(cx) {
                                 Poll::Ready(Ok(msg)) => {
-                                    Poll::Ready(Ok(futures_util::future::Either::Right(msg)))
+                                    Poll::Ready(futures_util::future::Either::Right(msg))
                                 }
                                 Poll::Ready(Err(_)) => Poll::Pending,
                                 Poll::Pending => Poll::Pending,
@@ -309,10 +299,10 @@ where
                         .await;
 
                         match next {
-                            Ok(futures_util::future::Either::Left(response_result)) => {
+                            futures_util::future::Either::Left(response_result) => {
                                 break response_result;
                             }
-                            Ok(futures_util::future::Either::Right((headers, sender))) => {
+                            futures_util::future::Either::Right((headers, sender)) => {
                                 let mut response = Response::new(());
                                 *response.status_mut() = http::StatusCode::EARLY_HINTS;
                                 *response.headers_mut() = headers;
@@ -322,9 +312,6 @@ where
                                         stream.send_informational(response).map_err(h2_error_to_io),
                                     )
                                     .ok();
-                            }
-                            Err(_) => {
-                                return;
                             }
                         }
                     };
