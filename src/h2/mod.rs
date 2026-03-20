@@ -254,14 +254,13 @@ where
 
                 let date_cache = self.date_header_value_cached.clone();
                 let request_fn = request_fn.clone();
-                let send_continue_response = self.options.send_continue_response;
                 vibeio::spawn(async move {
                     let (request_parts, recv_stream) = request.into_parts();
                     let request_body = Incoming::H2(H2Body::new(recv_stream));
                     let mut request = Request::from_parts(request_parts, request_body);
 
                     // 100 Continue
-                    if send_continue_response {
+                    if self.options.send_continue_response {
                         let is_100_continue = request
                             .headers()
                             .get(http::header::EXPECT)
