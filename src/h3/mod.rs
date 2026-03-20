@@ -19,11 +19,10 @@ use http_body_util::BodyExt;
 
 use crate::{h3::date::DateCache, EarlyHints, HttpProtocol, Incoming};
 
-static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
+static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 4] = [
     http::header::HeaderName::from_static("keep-alive"),
     http::header::HeaderName::from_static("proxy-connection"),
     http::header::TRANSFER_ENCODING,
-    http::header::TE,
     http::header::UPGRADE,
 ];
 
@@ -117,6 +116,12 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
     while headers.remove(http::header::CONNECTION).is_some() {}
     for header in &HTTP3_INVALID_HEADERS {
         while headers.remove(header).is_some() {}
+    }
+    if headers
+        .get(http::header::TE)
+        .map_or(false, |v| v != "trailers")
+    {
+        headers.remove(http::header::TE);
     }
 }
 

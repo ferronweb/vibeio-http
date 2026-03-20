@@ -18,11 +18,10 @@ use http_body_util::BodyExt;
 
 use crate::{h2::date::DateCache, EarlyHints, HttpProtocol, Incoming};
 
-static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
+static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 4] = [
     http::header::HeaderName::from_static("keep-alive"),
     http::header::HeaderName::from_static("proxy-connection"),
     http::header::TRANSFER_ENCODING,
-    http::header::TE,
     http::header::UPGRADE,
 ];
 
@@ -389,6 +388,12 @@ where
                         while response_headers.remove(http::header::CONNECTION).is_some() {}
                         for header in &HTTP2_INVALID_HEADERS {
                             while response_headers.remove(header).is_some() {}
+                        }
+                        if response_headers
+                            .get(http::header::TE)
+                            .map_or(false, |v| v != "trailers")
+                        {
+                            response_headers.remove(http::header::TE);
                         }
                     }
 
