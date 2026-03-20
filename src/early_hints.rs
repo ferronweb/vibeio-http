@@ -13,10 +13,12 @@ pub(super) struct EarlyHints {
 }
 
 impl EarlyHints {
+    #[inline]
     pub(super) fn new(inner: async_channel::Sender<EarlyHintsMessage>) -> Self {
         Self { inner }
     }
 
+    #[inline]
     async fn send(&self, headers: HeaderMap) -> EarlyHintsResult {
         let (tx, rx) = oneshot::async_channel();
         self.inner
@@ -63,6 +65,7 @@ impl EarlyHints {
 /// );
 /// send_early_hints(&mut request, link_headers).await?;
 /// ```
+#[inline]
 pub async fn send_early_hints(
     req: &mut Request<impl Body>,
     headers: HeaderMap,

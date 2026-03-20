@@ -186,6 +186,7 @@ impl Future for OnUpgrade {
 /// # Panics
 ///
 /// Does not panic; returns `None` instead of panicking on missing state.
+#[inline]
 pub fn prepare_upgrade(req: &mut Request<impl Body>) -> Option<OnUpgrade> {
     req.extensions_mut().remove::<Upgrade>().map(|inner| {
         inner
