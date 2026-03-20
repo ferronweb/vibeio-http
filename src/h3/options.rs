@@ -19,6 +19,7 @@ pub struct Http3Options {
     pub(super) accept_timeout: Option<std::time::Duration>,
     pub(super) handshake_timeout: Option<std::time::Duration>,
     pub(super) send_continue_response: bool,
+    pub(super) send_date_header: bool,
 }
 
 impl Http3Options {
@@ -30,6 +31,7 @@ impl Http3Options {
     /// | `accept_timeout` | 30 seconds |
     /// | `handshake_timeout` | 30 seconds |
     /// | `send_continue_response` | `true` |
+    /// | `send_date_header` | `true` |
     ///
     /// The `h3` builder is used as-is and is not modified by this method.
     pub fn new(h3: h3::server::Builder) -> Self {
@@ -38,6 +40,7 @@ impl Http3Options {
             accept_timeout: Some(std::time::Duration::from_secs(30)),
             handshake_timeout: Some(std::time::Duration::from_secs(30)),
             send_continue_response: true,
+            send_date_header: true,
         }
     }
 
@@ -79,6 +82,16 @@ impl Http3Options {
     /// Defaults to **`true`**.
     pub fn send_continue_response(mut self, send: bool) -> Self {
         self.send_continue_response = send;
+        self
+    }
+
+    /// Controls whether a `Date` header is automatically added to every
+    /// response.
+    ///
+    /// The value is cached and refreshed at most once per second.
+    /// Defaults to **`true`**.
+    pub fn send_date_header(mut self, send: bool) -> Self {
+        self.send_date_header = send;
         self
     }
 }

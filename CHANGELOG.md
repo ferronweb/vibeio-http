@@ -4,8 +4,9 @@
 
 **Not yet released**
 
+- Added an option to disable sending `Date` header for HTTP/2 and HTTP/3
 - The default maximum concurrent streams limit for HTTP/2 is now 200
-- Fixed TE header being always removed for HTTP/2 and hTTP/3
+- Fixed TE header being always removed for HTTP/2 and HTTP/3
 
 ## `vibeio-http` 0.1.1
 

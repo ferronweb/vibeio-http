@@ -367,10 +367,12 @@ where
 
                     {
                         let response_headers = response.headers_mut();
-                        if let Some(http_date) = date_cache.get_date_header_value() {
-                            response_headers
-                                .entry(http::header::DATE)
-                                .or_insert(http_date);
+                        if self.options.send_date_header {
+                            if let Some(http_date) = date_cache.get_date_header_value() {
+                                response_headers
+                                    .entry(http::header::DATE)
+                                    .or_insert(http_date);
+                            }
                         }
                         if let Some(connection_header) = response_headers
                             .remove(http::header::CONNECTION)

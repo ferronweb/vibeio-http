@@ -382,10 +382,12 @@ where
 
                     {
                         let response_headers = response.headers_mut();
-                        if let Some(http_date) = date_cache.get_date_header_value() {
-                            response_headers
-                                .entry(http::header::DATE)
-                                .or_insert(http_date);
+                        if self.options.send_date_header {
+                            if let Some(http_date) = date_cache.get_date_header_value() {
+                                response_headers
+                                    .entry(http::header::DATE)
+                                    .or_insert(http_date);
+                            }
                         }
                         remove_invalid_http3_headers(response_headers);
                     }
