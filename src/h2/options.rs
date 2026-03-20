@@ -3,6 +3,7 @@ const DEFAULT_STREAM_WINDOW: u32 = 1024 * 1024;
 const DEFAULT_MAX_FRAME_SIZE: u32 = 1024 * 16;
 const DEFAULT_MAX_SEND_BUF_SIZE: usize = 1024 * 400;
 const DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE: u32 = 1024 * 16;
+const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 200;
 
 /// Configuration options for the HTTP/2 connection handler.
 ///
@@ -90,7 +91,8 @@ impl Default for Http2Options {
             .initial_connection_window_size(DEFAULT_CONN_WINDOW)
             .max_frame_size(DEFAULT_MAX_FRAME_SIZE)
             .max_send_buffer_size(DEFAULT_MAX_SEND_BUF_SIZE)
-            .max_header_list_size(DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE);
+            .max_header_list_size(DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE)
+            .max_concurrent_streams(DEFAULT_MAX_CONCURRENT_STREAMS);
         Self::new(builder)
     }
 }
