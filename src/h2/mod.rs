@@ -329,15 +329,6 @@ where
                                     .or_insert(http_date);
                             }
                         }
-                        if let Some(connection_header) = response_headers
-                            .remove(http::header::CONNECTION)
-                            .as_ref()
-                            .and_then(|v| v.to_str().ok())
-                        {
-                            for name in connection_header.split(',') {
-                                response_headers.remove(name.trim());
-                            }
-                        }
                         for header in &HTTP2_INVALID_HEADERS {
                             if let http::header::Entry::Occupied(entry) =
                                 response_headers.entry(header)
