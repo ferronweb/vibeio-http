@@ -193,7 +193,7 @@ where
     #[inline]
     async fn read_body_fn(
         &mut self,
-        body_tx: &kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+        body_tx: kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         content_length: u64,
     ) -> Result<(), std::io::Error> {
         let mut remaining = content_length;
@@ -219,7 +219,6 @@ where
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
-        let _ = body_tx.close(); // Close the body_tx channel to signal EOF
         Ok(())
     }
 
@@ -384,7 +383,7 @@ where
     #[inline]
     async fn read_chunked_body_fn(
         &mut self,
-        body_tx: &kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+        body_tx: kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         would_have_trailers: bool,
     ) -> Result<(), std::io::Error> {
         loop {
@@ -402,7 +401,6 @@ where
                 let _ = body_tx.send(Ok(http_body::Frame::trailers(trailers))).await;
             }
         }
-        let _ = body_tx.close(); // Close the body_tx channel to signal EOF
         Ok(())
     }
 
@@ -979,9 +977,9 @@ where
             let mut response = {
                 let read_body_fut = async {
                     if chunked {
-                        self.read_chunked_body_fn(&body_tx, has_trailers).await
+                        self.read_chunked_body_fn(body_tx, has_trailers).await
                     } else {
-                        self.read_body_fn(&body_tx, content_length).await
+                        self.read_body_fn(body_tx, content_length).await
                     }
                 };
                 let read_body_fut_pin = std::pin::pin!(read_body_fut);
