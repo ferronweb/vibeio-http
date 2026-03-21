@@ -3,6 +3,7 @@
 mod date;
 mod options;
 mod send;
+mod upgrade;
 
 pub use options::*;
 use tokio_util::sync::CancellationToken;
@@ -20,7 +21,7 @@ use http_body::{Body, Frame};
 
 use crate::{
     h2::{date::DateCache, send::PipeToSendStream},
-    EarlyHints, HttpProtocol, Incoming,
+    EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
 };
 
 static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
@@ -259,7 +260,11 @@ where
                 let request_fn = request_fn.clone();
                 vibeio::spawn(async move {
                     let (request_parts, recv_stream) = request.into_parts();
-                    let request_body = Incoming::H2(H2Body::new(recv_stream));
+                    let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
+                        (Incoming::Empty, Some(recv_stream))
+                    } else {
+                        (Incoming::H2(H2Body::new(recv_stream)), None)
+                    };
                     let mut request = Request::from_parts(request_parts, request_body);
 
                     // 100 Continue
@@ -276,9 +281,21 @@ where
                         }
                     }
 
+                    // Install early hints
                     let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
                     let early_hints = EarlyHints::new(early_hints_tx);
                     request.extensions_mut().insert(early_hints);
+
+                    // Install HTTP upgrade
+                    let upgrade = if let Some(recv_stream) = upgrade {
+                        let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
+                        let upgrade = Upgrade::new(upgrade_rx);
+                        let upgraded = upgrade.upgraded.clone();
+                        request.extensions_mut().insert(upgrade);
+                        Some((upgrade_tx, upgraded, recv_stream))
+                    } else {
+                        None
+                    };
 
                     let mut response_fut = std::pin::pin!(request_fn(request));
                     let early_hints_rx = early_hints_rx;
@@ -385,6 +402,16 @@ where
                         return;
                     }
 
+                    if let Some((upgrade_tx, upgraded, recv_stream)) = upgrade {
+                        if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
+                            let (upgraded, task) = self::upgrade::pair(send, recv_stream);
+                            let _ = upgrade_tx.send(Upgraded::new(upgraded, None));
+                            vibeio::spawn(task);
+                            return;
+                        }
+                    }
+
+                    // No upgrade, send the body directly
                     let _ = PipeToSendStream::new(send, &mut response_body).await;
                 });
             }

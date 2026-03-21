@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    io::Cursor,
     pin::Pin,
     task::{ready, Context, Poll},
 };
@@ -119,6 +120,7 @@ where
 #[repr(usize)]
 pub(super) enum SendBuf<B> {
     Buf(B),
+    Cursor(Cursor<Box<[u8]>>),
     None,
 }
 
@@ -127,6 +129,7 @@ impl<B: bytes::Buf> bytes::Buf for SendBuf<B> {
     fn remaining(&self) -> usize {
         match self {
             Self::Buf(b) => b.remaining(),
+            Self::Cursor(c) => c.remaining(),
             Self::None => 0,
         }
     }
@@ -135,6 +138,7 @@ impl<B: bytes::Buf> bytes::Buf for SendBuf<B> {
     fn chunk(&self) -> &[u8] {
         match self {
             Self::Buf(b) => b.chunk(),
+            Self::Cursor(c) => c.get_ref(),
             Self::None => &[],
         }
     }
@@ -143,6 +147,7 @@ impl<B: bytes::Buf> bytes::Buf for SendBuf<B> {
     fn advance(&mut self, cnt: usize) {
         match self {
             Self::Buf(b) => b.advance(cnt),
+            Self::Cursor(c) => c.advance(cnt),
             Self::None => {}
         }
     }
@@ -151,6 +156,7 @@ impl<B: bytes::Buf> bytes::Buf for SendBuf<B> {
     fn chunks_vectored<'a>(&'a self, dst: &mut [std::io::IoSlice<'a>]) -> usize {
         match self {
             Self::Buf(b) => b.chunks_vectored(dst),
+            Self::Cursor(c) => c.chunks_vectored(dst),
             Self::None => 0,
         }
     }
