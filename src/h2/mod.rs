@@ -11,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 use std::{
     future::Future,
     pin::Pin,
-    rc::Rc,
     task::{Context, Poll},
 };
 
@@ -20,7 +19,6 @@ use http::{Request, Response};
 use http_body::{Body, Frame};
 
 use crate::{
-    early_hints,
     h2::{date::DateCache, send::PipeToSendStream},
     EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
 };
