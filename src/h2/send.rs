@@ -15,6 +15,7 @@ where
 {
     body_tx: SendStream<SendBuf<S::Data>>,
     stream: Pin<&'a mut S>,
+    capacity_reserving: bool,
 }
 
 impl<'a, S> PipeToSendStream<'a, S>
@@ -26,6 +27,7 @@ where
         Self {
             body_tx,
             stream: Pin::new(stream),
+            capacity_reserving: false,
         }
     }
 }
@@ -41,7 +43,11 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         loop {
-            this.body_tx.reserve_capacity(1);
+            if !this.capacity_reserving {
+                this.body_tx.reserve_capacity(1);
+                // Set a flag to avoid unnecessary reserve calls
+                this.capacity_reserving = true;
+            }
 
             if this.body_tx.capacity() == 0 {
                 // Wait for capacity to become available
@@ -60,6 +66,8 @@ where
                     }
                 }
             }
+
+            this.capacity_reserving = false;
 
             match this.body_tx.poll_reset(cx) {
                 Poll::Ready(Ok(reason)) => {
