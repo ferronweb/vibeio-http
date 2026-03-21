@@ -394,14 +394,10 @@ where
                     let (response_parts, mut response_body) = response.into_parts();
                     let Ok(send) = stream.send_response(
                         Response::from_parts(response_parts, ()),
-                        response_is_end_stream,
+                        response_is_end_stream && upgrade.is_none(),
                     ) else {
                         return;
                     };
-
-                    if response_is_end_stream {
-                        return;
-                    }
 
                     if let Some((upgrade_tx, upgraded, recv_stream)) = upgrade {
                         if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
@@ -410,6 +406,10 @@ where
                             task.await;
                             return;
                         }
+                    }
+
+                    if response_is_end_stream {
+                        return;
                     }
 
                     // No upgrade, send the body directly
