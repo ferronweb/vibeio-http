@@ -258,44 +258,45 @@ where
 
                 let date_cache = self.date_header_value_cached.clone();
                 let request_fn = request_fn.clone();
+
+                let (request_parts, recv_stream) = request.into_parts();
+                let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
+                    (Incoming::Empty, Some(recv_stream))
+                } else {
+                    (Incoming::H2(H2Body::new(recv_stream)), None)
+                };
+                let mut request = Request::from_parts(request_parts, request_body);
+
+                // 100 Continue
+                let is_100_continue = self.options.send_continue_response
+                    && request
+                        .headers()
+                        .get(http::header::EXPECT)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+
+                // Install early hints
+                let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
+                let early_hints = EarlyHints::new(early_hints_tx);
+                request.extensions_mut().insert(early_hints);
+
+                // Install HTTP upgrade
+                let upgrade = if let Some(recv_stream) = upgrade {
+                    let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
+                    let upgrade = Upgrade::new(upgrade_rx);
+                    let upgraded = upgrade.upgraded.clone();
+                    request.extensions_mut().insert(upgrade);
+                    Some((upgrade_tx, upgraded, recv_stream))
+                } else {
+                    None
+                };
+
                 vibeio::spawn(async move {
-                    let (request_parts, recv_stream) = request.into_parts();
-                    let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
-                        (Incoming::Empty, Some(recv_stream))
-                    } else {
-                        (Incoming::H2(H2Body::new(recv_stream)), None)
-                    };
-                    let mut request = Request::from_parts(request_parts, request_body);
-
-                    // 100 Continue
-                    if self.options.send_continue_response {
-                        let is_100_continue = request
-                            .headers()
-                            .get(http::header::EXPECT)
-                            .and_then(|v| v.to_str().ok())
-                            .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-                        if is_100_continue {
-                            let mut response = Response::new(());
-                            *response.status_mut() = http::StatusCode::CONTINUE;
-                            let _ = stream.send_informational(response).map_err(h2_error_to_io);
-                        }
+                    if is_100_continue {
+                        let mut response = Response::new(());
+                        *response.status_mut() = http::StatusCode::CONTINUE;
+                        let _ = stream.send_informational(response).map_err(h2_error_to_io);
                     }
-
-                    // Install early hints
-                    let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
-                    let early_hints = EarlyHints::new(early_hints_tx);
-                    request.extensions_mut().insert(early_hints);
-
-                    // Install HTTP upgrade
-                    let upgrade = if let Some(recv_stream) = upgrade {
-                        let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
-                        let upgrade = Upgrade::new(upgrade_rx);
-                        let upgraded = upgrade.upgraded.clone();
-                        request.extensions_mut().insert(upgrade);
-                        Some((upgrade_tx, upgraded, recv_stream))
-                    } else {
-                        None
-                    };
 
                     let mut response_fut = std::pin::pin!(request_fn(request));
                     let early_hints_rx = early_hints_rx;
@@ -406,7 +407,7 @@ where
                         if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
                             let (upgraded, task) = self::upgrade::pair(send, recv_stream);
                             let _ = upgrade_tx.send(Upgraded::new(upgraded, None));
-                            vibeio::spawn(task);
+                            task.await;
                             return;
                         }
                     }
