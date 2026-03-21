@@ -138,7 +138,15 @@ impl<B: bytes::Buf> bytes::Buf for SendBuf<B> {
     fn chunk(&self) -> &[u8] {
         match self {
             Self::Buf(b) => b.chunk(),
-            Self::Cursor(c) => c.get_ref(),
+            Self::Cursor(c) => {
+                let pos = c.position() as usize;
+                let slice = c.get_ref();
+                if pos < slice.len() {
+                    &slice[pos..]
+                } else {
+                    &[]
+                }
+            }
             Self::None => &[],
         }
     }
