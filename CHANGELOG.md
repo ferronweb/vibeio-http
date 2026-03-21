@@ -1,5 +1,12 @@
 # `vibeio-http` change log
 
+## `vibeio-http` 0.2.0
+
+**Released in March 21, 2026**
+
+- Added support for extended CONNECT for HTTP/2 and HTTP/3
+- Performed some performance optimizations for HTTP/2
+
 ## `vibeio-http` 0.1.2
 
 **Released in March 20, 2026**
