@@ -20,6 +20,7 @@ use http::{Request, Response};
 use http_body::{Body, Frame};
 
 use crate::{
+    early_hints,
     h2::{date::DateCache, send::PipeToSendStream},
     EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
 };
@@ -168,13 +169,12 @@ where
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
         F: Fn(Request<super::Incoming>) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: http_body::Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,
     {
         async move {
-            let request_fn = Rc::new(request_fn);
             let handshake_fut = self.options.h2.handshake(
                 self.io_to_handshake
                     .take()
@@ -257,8 +257,6 @@ where
                 };
 
                 let date_cache = self.date_header_value_cached.clone();
-                let request_fn = request_fn.clone();
-
                 let (request_parts, recv_stream) = request.into_parts();
                 let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
                     (Incoming::Empty, Some(recv_stream))
@@ -291,6 +289,8 @@ where
                     None
                 };
 
+                let response_fut = Box::new(request_fn(request));
+
                 vibeio::spawn(async move {
                     if is_100_continue {
                         let mut response = Response::new(());
@@ -298,7 +298,7 @@ where
                         let _ = stream.send_informational(response).map_err(h2_error_to_io);
                     }
 
-                    let mut response_fut = std::pin::pin!(request_fn(request));
+                    let mut response_fut = Box::into_pin(response_fut);
                     let early_hints_rx = early_hints_rx;
                     let response_result = loop {
                         let early_hints_recv_fut = early_hints_rx.recv();

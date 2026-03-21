@@ -831,7 +831,7 @@ where
     ) -> Result<(), std::io::Error>
     where
         F: Fn(Request<Incoming>) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,
@@ -1089,7 +1089,7 @@ where
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
         F: Fn(Request<Incoming>) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,
@@ -1124,7 +1124,7 @@ where
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
         F: Fn(Request<Incoming>) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
+        Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
         ResE: std::error::Error,
         ResBE: std::error::Error,
