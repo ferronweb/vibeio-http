@@ -106,9 +106,7 @@ impl<SR> AsyncWrite for H3Upgraded<SR> {
             }
         };
         match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
-            Poll::Ready(Ok(reason)) => {
-                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, reason)))
-            }
+            Poll::Ready(Ok(reason)) => Poll::Ready(Err(std::io::Error::other(reason))),
             Poll::Ready(Err(_task_dropped)) => {
                 Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
             }
@@ -128,9 +126,7 @@ impl<SR> AsyncWrite for H3Upgraded<SR> {
     ) -> Poll<Result<(), std::io::Error>> {
         let _ = self.send_stream.tx.close();
         match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
-            Poll::Ready(Ok(reason)) => {
-                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, reason)))
-            }
+            Poll::Ready(Ok(reason)) => Poll::Ready(Err(std::io::Error::other(reason))),
             Poll::Ready(Err(_task_dropped)) => Poll::Ready(Ok(())),
             Poll::Pending => Poll::Pending,
         }
@@ -144,6 +140,7 @@ struct UpgradedSendStreamBridge {
 
 pub struct UpgradedSendStreamTask<S> {
     h3_tx: RequestStream<S, bytes::Bytes>,
+    #[allow(clippy::type_complexity)]
     h3_tx_fut: Option<Pin<Box<dyn Future<Output = Result<(), h3::error::StreamError>>>>>,
     rx: kanal::AsyncReceiver<Box<[u8]>>,
     error_tx: Option<oneshot::Sender<std::io::Error>>,

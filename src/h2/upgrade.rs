@@ -89,8 +89,7 @@ where
                         Poll::Ready(Some(Ok(0))) => {}
                         Poll::Ready(Some(Ok(_))) => break,
                         Poll::Ready(Some(Err(e))) => {
-                            return Poll::Ready(Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
+                            return Poll::Ready(Err(std::io::Error::other(
                                 e,
                             )))
                         }
@@ -98,8 +97,7 @@ where
                             // None means the stream is no longer in a
                             // streaming state, we either finished it
                             // somehow, or the remote reset us.
-                            return Poll::Ready(Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
+                            return Poll::Ready(Err(std::io::Error::other(
                                 "send stream capacity unexpectedly closed",
                             )));
                         }
@@ -217,7 +215,7 @@ impl AsyncWrite for H2Upgraded {
         };
         match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
             Poll::Ready(Ok(reason)) => {
-                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, reason)))
+                Poll::Ready(Err(std::io::Error::other(reason)))
             }
             Poll::Ready(Err(_task_dropped)) => {
                 Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
@@ -239,7 +237,7 @@ impl AsyncWrite for H2Upgraded {
         let _ = self.send_stream.tx.close();
         match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
             Poll::Ready(Ok(reason)) => {
-                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, reason)))
+                Poll::Ready(Err(std::io::Error::other(reason)))
             }
             Poll::Ready(Err(_task_dropped)) => Poll::Ready(Ok(())),
             Poll::Pending => Poll::Pending,
