@@ -274,7 +274,7 @@ where
                         }
                     }
 
-                    let (early_hints_tx, early_hints_rx) = async_channel::unbounded();
+                    let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
                     let early_hints = EarlyHints::new(early_hints_tx);
                     request.extensions_mut().insert(early_hints);
 

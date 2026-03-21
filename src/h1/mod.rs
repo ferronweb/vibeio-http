@@ -14,6 +14,7 @@ pub(crate) type RawHandle = std::os::fd::RawFd;
 pub(crate) type RawHandle = std::os::windows::io::RawHandle;
 
 use std::{
+    future::Future,
     io::IoSlice,
     mem::MaybeUninit,
     pin::Pin,
@@ -22,12 +23,11 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use async_channel::Receiver;
 use bytes::{Buf, Bytes, BytesMut};
-use futures_util::stream::Stream;
 use http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, Version};
 use http_body::Body;
 use http_body_util::{BodyExt, Empty};
+use kanal::AsyncReceiver;
 use memchr::{memchr3_iter, memmem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -195,7 +195,7 @@ where
     #[inline]
     async fn read_body_fn(
         &mut self,
-        body_tx: &async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+        body_tx: &kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         content_length: u64,
     ) -> Result<(), std::io::Error> {
         let mut remaining = content_length;
@@ -221,7 +221,7 @@ where
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
-        body_tx.close(); // Close the body_tx channel to signal EOF
+        let _ = body_tx.close(); // Close the body_tx channel to signal EOF
         Ok(())
     }
 
@@ -386,7 +386,7 @@ where
     #[inline]
     async fn read_chunked_body_fn(
         &mut self,
-        body_tx: &async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+        body_tx: &kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         would_have_trailers: bool,
     ) -> Result<(), std::io::Error> {
         loop {
@@ -404,7 +404,7 @@ where
                 let _ = body_tx.send(Ok(http_body::Frame::trailers(trailers))).await;
             }
         }
-        body_tx.close(); // Close the body_tx channel to signal EOF
+        let _ = body_tx.close(); // Close the body_tx channel to signal EOF
         Ok(())
     }
 
@@ -414,7 +414,7 @@ where
     ) -> Result<
         Option<(
             Request<Incoming>,
-            async_channel::Sender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+            kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         )>,
         std::io::Error,
     > {
@@ -442,7 +442,7 @@ where
             }
 
             // Convert httparse HTTP request to `http` one
-            let (body_tx, body_rx) = async_channel::bounded(2);
+            let (body_tx, body_rx) = kanal::bounded_async(2);
             let request_body = Http1Body {
                 inner: Box::pin(body_rx),
             };
@@ -920,7 +920,7 @@ where
 
             // 103 Early Hints
             let early_hints_fut = if self.options.enable_early_hints {
-                let (early_hints_tx, early_hints_rx) = async_channel::unbounded();
+                let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
                 let early_hints = EarlyHints::new(early_hints_tx);
                 request.extensions_mut().insert(early_hints);
                 // Safety: the function below is used only in futures_util::future::select
@@ -1145,7 +1145,7 @@ where
 
 pub(crate) struct Http1Body {
     #[allow(clippy::type_complexity)]
-    inner: Pin<Box<Receiver<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>>>,
+    inner: Pin<Box<AsyncReceiver<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>>>,
 }
 
 impl Body for Http1Body {
@@ -1154,13 +1154,13 @@ impl Body for Http1Body {
 
     #[inline]
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        match self.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
+        match std::pin::pin!(self.inner.recv()).poll(cx) {
+            Poll::Ready(Ok(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+            Poll::Ready(Ok(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Err(_)) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
     }

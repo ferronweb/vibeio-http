@@ -9,12 +9,12 @@ pub(super) type EarlyHintsMessage = (
 
 #[derive(Clone)]
 pub(super) struct EarlyHints {
-    inner: async_channel::Sender<EarlyHintsMessage>,
+    inner: kanal::AsyncSender<EarlyHintsMessage>,
 }
 
 impl EarlyHints {
     #[inline]
-    pub(super) fn new(inner: async_channel::Sender<EarlyHintsMessage>) -> Self {
+    pub(super) fn new(inner: kanal::AsyncSender<EarlyHintsMessage>) -> Self {
         Self { inner }
     }
 
