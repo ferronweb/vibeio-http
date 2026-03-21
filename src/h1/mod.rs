@@ -1,11 +1,9 @@
 mod options;
 mod tests;
-mod upgrade;
 mod writebuf;
 mod zerocopy;
 
 pub use options::*;
-pub use upgrade::*;
 pub use zerocopy::*;
 
 #[cfg(unix)]
@@ -32,7 +30,7 @@ use memchr::{memchr3_iter, memmem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming};
+use crate::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 const WRITE_BUF_BATCH_THRESHOLD: usize = 16384;

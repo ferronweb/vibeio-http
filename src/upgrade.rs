@@ -12,7 +12,7 @@ use http_body::Body;
 use send_wrapper::SendWrapper;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// Represents a successfully upgraded HTTP/1.x connection.
+/// Represents a successfully upgraded HTTP connection.
 ///
 /// After a successful HTTP upgrade handshake (e.g. WebSocket or HTTP/2
 /// cleartext), the original TCP stream is handed off as an [`Upgraded`] value.

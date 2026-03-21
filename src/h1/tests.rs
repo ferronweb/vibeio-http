@@ -9,8 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     early_hints,
-    h1::{prepare_upgrade, Http1, Http1Options},
-    HttpProtocol,
+    h1::{Http1, Http1Options},
+    prepare_upgrade, HttpProtocol,
 };
 
 #[tokio::test]

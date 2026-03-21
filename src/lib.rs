@@ -66,6 +66,7 @@ mod h2;
 #[cfg(feature = "h3")]
 mod h3;
 mod incoming;
+mod upgrade;
 
 pub use early_hints::*;
 #[cfg(feature = "h1")]
@@ -75,6 +76,7 @@ pub use h2::*;
 #[cfg(feature = "h3")]
 pub use h3::*;
 pub use incoming::*;
+pub use upgrade::*;
 
 use http::{Request, Response};
 use http_body::Body;

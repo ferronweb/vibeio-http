@@ -1,3 +1,5 @@
+// TODO: add support for extended CONNECT
+
 mod date;
 mod options;
 mod send;
