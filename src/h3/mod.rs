@@ -1,5 +1,6 @@
 mod date;
 mod options;
+mod upgrade;
 
 use futures_util::FutureExt;
 pub use options::*;
@@ -17,7 +18,7 @@ use http::{Request, Response};
 use http_body::{Body, Frame};
 use http_body_util::BodyExt;
 
-use crate::{h3::date::DateCache, EarlyHints, HttpProtocol, Incoming};
+use crate::{h3::date::DateCache, EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded};
 
 static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::HeaderName::from_static("keep-alive"),
@@ -299,8 +300,12 @@ where
                         }
                     };
                     let (mut send, receive) = stream.split();
-                    let request_body = Incoming::Boxed(Box::pin(H3Body::new(receive)));
                     let (request_parts, _) = request.into_parts();
+                    let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
+                        (Incoming::Empty, Some(receive))
+                    } else {
+                        (Incoming::Boxed(Box::pin(H3Body::new(receive))), None)
+                    };
                     let mut request = Request::from_parts(request_parts, request_body);
 
                     // 100 Continue
@@ -319,9 +324,21 @@ where
                         }
                     }
 
+                    // Install early hints
                     let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
                     let early_hints = EarlyHints::new(early_hints_tx);
                     request.extensions_mut().insert(early_hints);
+
+                    // Install HTTP upgrade
+                    let upgrade = if let Some(recv_stream) = upgrade {
+                        let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
+                        let upgrade = Upgrade::new(upgrade_rx);
+                        let upgraded = upgrade.upgraded.clone();
+                        request.extensions_mut().insert(upgrade);
+                        Some((upgrade_tx, upgraded, recv_stream))
+                    } else {
+                        None
+                    };
 
                     let mut response_fut = std::pin::pin!(request_fn(request));
                     let mut early_hints_open = true;
@@ -407,6 +424,15 @@ where
                         .is_err()
                     {
                         return;
+                    }
+
+                    if let Some((upgrade_tx, upgraded, recv_stream)) = upgrade {
+                        if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
+                            let (upgraded, task) = self::upgrade::pair(send, recv_stream);
+                            let _ = upgrade_tx.send(Upgraded::new(upgraded, None));
+                            task.await;
+                            return;
+                        }
                     }
 
                     if !response_is_end_stream {

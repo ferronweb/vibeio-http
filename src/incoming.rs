@@ -26,7 +26,7 @@ pub enum Incoming {
     H2(H2Body),
     #[cfg(feature = "h3")]
     Boxed(Pin<Box<dyn Body<Data = bytes::Bytes, Error = std::io::Error> + Send + Sync>>),
-    #[cfg(feature = "h2")]
+    #[cfg(any(feature = "h2", feature = "h3"))]
     Empty,
 }
 
@@ -46,7 +46,7 @@ impl Body for Incoming {
             Self::H2(ref mut inner) => Pin::new(inner).poll_frame(cx),
             #[cfg(feature = "h3")]
             Self::Boxed(inner) => inner.as_mut().poll_frame(cx),
-            #[cfg(feature = "h2")]
+            #[cfg(any(feature = "h2", feature = "h3"))]
             Self::Empty => Poll::Ready(None),
         }
     }
@@ -60,7 +60,7 @@ impl Body for Incoming {
             Self::H2(inner) => inner.is_end_stream(),
             #[cfg(feature = "h3")]
             Self::Boxed(inner) => inner.is_end_stream(),
-            #[cfg(feature = "h2")]
+            #[cfg(any(feature = "h2", feature = "h3"))]
             Self::Empty => true,
         }
     }
@@ -74,7 +74,7 @@ impl Body for Incoming {
             Self::H2(inner) => inner.size_hint(),
             #[cfg(feature = "h3")]
             Self::Boxed(inner) => inner.size_hint(),
-            #[cfg(feature = "h2")]
+            #[cfg(any(feature = "h2", feature = "h3"))]
             Self::Empty => http_body::SizeHint::default(),
         }
     }
