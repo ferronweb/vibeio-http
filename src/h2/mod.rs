@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use std::{
     future::Future,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 
 use bytes::Bytes;
@@ -137,11 +137,6 @@ pin_project! {
         ResB: Body<Data = bytes::Bytes>,
     {
         stream: h2::server::SendResponse<SendBuf<ResB::Data>>,
-        early_hints_rx: EarlyHintsReceiver,
-        date_cache: DateCache,
-        send_date_header: bool,
-        upgrade: Option<PendingUpgrade>,
-        send_continue: bool,
         #[pin]
         state: H2StreamState<Fut, ResB>,
     }
@@ -157,17 +152,17 @@ pin_project! {
         Service {
             #[pin]
             response_fut: Fut,
+            early_hints_rx: EarlyHintsReceiver,
+            date_cache: DateCache,
+            send_date_header: bool,
+            upgrade: Option<PendingUpgrade>,
+            send_continue: bool,
             early_hints_open: bool,
         },
         Body {
             #[pin]
             pipe: PipeToSendStream<ResB>,
         },
-        Upgrade {
-            #[pin]
-            task: self::upgrade::UpgradedSendStreamTask<ResB::Data>,
-        },
-        Done,
     }
 }
 
@@ -188,13 +183,13 @@ where
     ) -> Self {
         Self {
             stream,
-            early_hints_rx,
-            date_cache,
-            send_date_header,
-            upgrade,
-            send_continue,
             state: H2StreamState::Service {
-                response_fut: response_fut,
+                response_fut,
+                early_hints_rx,
+                date_cache,
+                send_date_header,
+                upgrade,
+                send_continue,
                 early_hints_open: true,
             },
         }
@@ -210,28 +205,29 @@ where
 {
     type Output = ();
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
-
-        if *this.send_continue {
-            let mut response = Response::new(());
-            *response.status_mut() = http::StatusCode::CONTINUE;
-            let _ = this
-                .stream
-                .send_informational(response)
-                .map_err(h2_error_to_io);
-            *this.send_continue = false;
-        }
 
         loop {
             match this.state.as_mut().project() {
                 H2StreamStateProj::Service {
                     response_fut,
+                    early_hints_rx,
+                    date_cache,
+                    send_date_header,
+                    upgrade,
+                    send_continue,
                     early_hints_open,
                 } => {
-                    match this.stream.poll_reset(cx) {
-                        Poll::Ready(Ok(_)) | Poll::Ready(Err(_)) => return Poll::Ready(()),
-                        Poll::Pending => {}
+                    if *send_continue {
+                        let mut response = Response::new(());
+                        *response.status_mut() = http::StatusCode::CONTINUE;
+                        let _ = this
+                            .stream
+                            .send_informational(response)
+                            .map_err(h2_error_to_io);
+                        *send_continue = false;
                     }
 
                     if let Poll::Ready(response_result) = response_fut.poll(cx) {
@@ -239,7 +235,7 @@ where
                             return Poll::Ready(());
                         };
 
-                        sanitize_response(&mut response, *this.send_date_header, this.date_cache);
+                        sanitize_response(&mut response, *send_date_header, date_cache);
 
                         let response_is_end_stream = response.body().is_end_stream();
                         if !response_is_end_stream {
@@ -259,7 +255,7 @@ where
                         let (response_parts, response_body) = response.into_parts();
                         let Ok(send) = this.stream.send_response(
                             Response::from_parts(response_parts, ()),
-                            response_is_end_stream && this.upgrade.is_none(),
+                            response_is_end_stream && upgrade.is_none(),
                         ) else {
                             return Poll::Ready(());
                         };
@@ -268,18 +264,17 @@ where
                             tx,
                             upgraded,
                             recv_stream,
-                        }) = this.upgrade.take()
+                        }) = upgrade.take()
                         {
                             if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
                                 let (upgraded, task) = self::upgrade::pair(send, recv_stream);
                                 let _ = tx.send(Upgraded::new(upgraded, None));
-                                this.state.set(H2StreamState::Upgrade { task });
-                                continue;
+                                vibeio::spawn(task);
+                                return Poll::Ready(());
                             }
                         }
 
                         if response_is_end_stream {
-                            this.state.set(H2StreamState::Done);
                             return Poll::Ready(());
                         }
 
@@ -289,8 +284,13 @@ where
                         continue;
                     }
 
+                    match this.stream.poll_reset(cx) {
+                        Poll::Ready(Ok(_)) | Poll::Ready(Err(_)) => return Poll::Ready(()),
+                        Poll::Pending => {}
+                    }
+
                     if *early_hints_open {
-                        match this.early_hints_rx.poll_recv(cx) {
+                        match early_hints_rx.poll_recv(cx) {
                             Poll::Ready(Some((headers, sender))) => {
                                 let mut response = Response::new(());
                                 *response.status_mut() = http::StatusCode::EARLY_HINTS;
@@ -316,17 +316,7 @@ where
                     return Poll::Pending;
                 }
                 H2StreamStateProj::Body { pipe } => {
-                    let _ = ready!(pipe.poll(cx));
-                    this.state.set(H2StreamState::Done);
-                    return Poll::Ready(());
-                }
-                H2StreamStateProj::Upgrade { task } => {
-                    ready!(task.poll(cx));
-                    this.state.set(H2StreamState::Done);
-                    return Poll::Ready(());
-                }
-                H2StreamStateProj::Done => {
-                    return Poll::Ready(());
+                    return pipe.poll(cx).map(|_| ());
                 }
             }
         }
