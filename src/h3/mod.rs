@@ -7,7 +7,6 @@ pub use options::*;
 use tokio_util::sync::CancellationToken;
 
 use std::{
-    future::Future,
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
@@ -325,8 +324,7 @@ where
                     }
 
                     // Install early hints
-                    let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
-                    let early_hints = EarlyHints::new(early_hints_tx);
+                    let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
                     request.extensions_mut().insert(early_hints);
 
                     // Install HTTP upgrade
@@ -347,16 +345,17 @@ where
                             break response_fut.as_mut().await;
                         }
 
-                        let early_hints_recv_fut = early_hints_rx.recv();
-                        let mut early_hints_recv_fut = std::pin::pin!(early_hints_recv_fut);
                         let next = std::future::poll_fn(|cx| {
                             if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
                                 return Poll::Ready(futures_util::future::Either::Left(res));
                             }
 
-                            match early_hints_recv_fut.as_mut().poll(cx) {
-                                Poll::Ready(msg) => {
-                                    Poll::Ready(futures_util::future::Either::Right(msg))
+                            match early_hints_rx.poll_recv(cx) {
+                                Poll::Ready(Some(msg)) => {
+                                    Poll::Ready(futures_util::future::Either::Right(Ok(msg)))
+                                }
+                                Poll::Ready(None) => {
+                                    Poll::Ready(futures_util::future::Either::Right(Err(())))
                                 }
                                 Poll::Pending => Poll::Pending,
                             }
@@ -380,7 +379,7 @@ where
                                     )
                                     .ok();
                             }
-                            futures_util::future::Either::Right(Err(_)) => {
+                            futures_util::future::Either::Right(Err(())) => {
                                 early_hints_open = false;
                             }
                         }

@@ -9,7 +9,6 @@ pub use options::*;
 use tokio_util::sync::CancellationToken;
 
 use std::{
-    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -272,8 +271,7 @@ where
                         .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
 
                 // Install early hints
-                let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
-                let early_hints = EarlyHints::new(early_hints_tx);
+                let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
                 request.extensions_mut().insert(early_hints);
 
                 // Install HTTP upgrade
@@ -288,6 +286,7 @@ where
                 };
 
                 let response_fut = Box::new(request_fn(request));
+                let send_date_header = self.options.send_date_header;
 
                 vibeio::spawn(async move {
                     if is_100_continue {
@@ -297,10 +296,8 @@ where
                     }
 
                     let mut response_fut = Box::into_pin(response_fut);
-                    let early_hints_rx = early_hints_rx;
+                    let mut early_hints_open = true;
                     let response_result = loop {
-                        let early_hints_recv_fut = early_hints_rx.recv();
-                        let mut early_hints_recv_fut = std::pin::pin!(early_hints_recv_fut);
                         let next = std::future::poll_fn(|cx| {
                             match stream.poll_reset(cx) {
                                 Poll::Ready(Ok(reason)) => {
@@ -316,13 +313,21 @@ where
                                 return Poll::Ready(Ok(futures_util::future::Either::Left(res)));
                             }
 
-                            match early_hints_recv_fut.as_mut().poll(cx) {
-                                Poll::Ready(Ok(msg)) => {
-                                    Poll::Ready(Ok(futures_util::future::Either::Right(msg)))
+                            if early_hints_open {
+                                match early_hints_rx.poll_recv(cx) {
+                                    Poll::Ready(Some(msg)) => {
+                                        return Poll::Ready(Ok(
+                                            futures_util::future::Either::Right(msg),
+                                        ));
+                                    }
+                                    Poll::Ready(None) => {
+                                        early_hints_open = false;
+                                    }
+                                    Poll::Pending => {}
                                 }
-                                Poll::Ready(Err(_)) => Poll::Pending,
-                                Poll::Pending => Poll::Pending,
                             }
+
+                            Poll::Pending
                         })
                         .await;
 
@@ -353,7 +358,7 @@ where
 
                     {
                         let response_headers = response.headers_mut();
-                        if self.options.send_date_header {
+                        if send_date_header {
                             if let Some(http_date) = date_cache.get_date_header_value() {
                                 response_headers
                                     .entry(http::header::DATE)

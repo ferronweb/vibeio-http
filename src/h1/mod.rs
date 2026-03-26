@@ -916,16 +916,16 @@ where
 
             // 103 Early Hints
             let early_hints_fut = if self.options.enable_early_hints {
-                let (early_hints_tx, early_hints_rx) = kanal::unbounded_async();
-                let early_hints = EarlyHints::new(early_hints_tx);
+                let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
                 request.extensions_mut().insert(early_hints);
                 // Safety: the function below is used only in futures_util::future::select
                 // Also, another function that would borrow self would read data,
                 // while this function would write data
                 let mut_self = unsafe { std::mem::transmute::<&mut Self, &mut Self>(&mut self) };
-                Some(async {
-                    let early_hints_rx = early_hints_rx;
-                    while let Ok((headers, sender)) = early_hints_rx.recv().await {
+                futures_util::future::Either::Left(async move {
+                    while let Some((headers, sender)) =
+                        std::future::poll_fn(|cx| early_hints_rx.poll_recv(cx)).await
+                    {
                         sender
                             .into_inner()
                             .send(mut_self.write_early_hints(version, headers).await)
@@ -934,7 +934,9 @@ where
                     futures_util::future::pending::<Result<(), std::io::Error>>().await
                 })
             } else {
-                None
+                futures_util::future::Either::Right(futures_util::future::pending::<
+                    Result<(), std::io::Error>,
+                >())
             };
 
             // Content-Length header
@@ -985,16 +987,10 @@ where
                 let read_body_fut_pin = std::pin::pin!(read_body_fut);
                 let request_fut = request_fn(request);
                 let request_fut_pin = std::pin::pin!(request_fut);
-                let early_hints_fut: Pin<
-                    Box<dyn std::future::Future<Output = Result<(), std::io::Error>>>,
-                > = if let Some(early_hints) = early_hints_fut {
-                    Box::pin(early_hints)
-                } else {
-                    Box::pin(futures_util::future::pending::<Result<(), std::io::Error>>())
-                };
+                let early_hints_fut_pin = std::pin::pin!(early_hints_fut);
 
                 let select_read_body_either =
-                    futures_util::future::select(request_fut_pin, early_hints_fut);
+                    futures_util::future::select(request_fut_pin, early_hints_fut_pin);
                 let select_either =
                     futures_util::future::select(read_body_fut_pin, select_read_body_either).await;
 
