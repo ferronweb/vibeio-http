@@ -207,7 +207,7 @@ where
     where
         F: Fn(Request<super::Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
-        ResB: http_body::Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
+        ResB: http_body::Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error,
         ResBE: std::error::Error,
     {

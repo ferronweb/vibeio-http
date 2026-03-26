@@ -19,6 +19,7 @@ http-body = "1.0.1"
 http-body-util = "0.1.3"
 kanal = "0.1.1"
 oneshot = { version = "0.2.1", features = ["async", "std"] }
+pin-project-lite = { version = "0.2.16", optional = true }
 send_wrapper = "0.6.0"
 tokio = "1.50.0"
 vibeio = { version = "0.2.3", default-features = false, features = ["time"] }
@@ -42,5 +43,5 @@ tokio = { version = "1.50.0", features = ["test-util", "full"] }
 default = ["h1", "h1-zerocopy", "h2"]
 h1 = ["httparse", "httpdate", "memchr", "tokio-util"]
 h1-zerocopy = ["h1", "vibeio/splice"]
-h2 = ["dep:h2", "httpdate", "tokio-util"]
+h2 = ["dep:h2", "httpdate", "tokio-util", "pin-project-lite"]
 h3 = ["dep:h3", "httpdate", "tokio-util"]

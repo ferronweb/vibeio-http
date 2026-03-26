@@ -6,11 +6,13 @@ mod send;
 mod upgrade;
 
 pub use options::*;
+use pin_project_lite::pin_project;
 use tokio_util::sync::CancellationToken;
 
 use std::{
+    future::Future,
     pin::Pin,
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
 };
 
 use bytes::Bytes;
@@ -18,7 +20,11 @@ use http::{Request, Response};
 use http_body::{Body, Frame};
 
 use crate::{
-    h2::{date::DateCache, send::PipeToSendStream},
+    early_hints::EarlyHintsReceiver,
+    h2::{
+        date::DateCache,
+        send::{PipeToSendStream, SendBuf},
+    },
     EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
 };
 
@@ -87,6 +93,244 @@ pub(super) fn h2_error_to_io(error: h2::Error) -> std::io::Error {
 #[inline]
 pub(super) fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
     std::io::Error::other(h2::Error::from(reason))
+}
+
+#[inline]
+fn sanitize_response<ResB>(
+    response: &mut Response<ResB>,
+    send_date_header: bool,
+    date_cache: &DateCache,
+) where
+    ResB: Body<Data = bytes::Bytes>,
+{
+    let response_headers = response.headers_mut();
+    if send_date_header {
+        if let Some(http_date) = date_cache.get_date_header_value() {
+            response_headers
+                .entry(http::header::DATE)
+                .or_insert(http_date);
+        }
+    }
+    for header in &HTTP2_INVALID_HEADERS {
+        if let http::header::Entry::Occupied(entry) = response_headers.entry(header) {
+            entry.remove();
+        }
+    }
+    if response_headers
+        .get(http::header::TE)
+        .is_some_and(|v| v != "trailers")
+    {
+        response_headers.remove(http::header::TE);
+    }
+}
+
+struct PendingUpgrade {
+    tx: oneshot::Sender<Upgraded>,
+    upgraded: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    recv_stream: h2::RecvStream,
+}
+
+pin_project! {
+    struct H2Stream<Fut, ResB>
+    where
+        Fut: Future,
+        ResB: Body<Data = bytes::Bytes>,
+    {
+        stream: h2::server::SendResponse<SendBuf<ResB::Data>>,
+        early_hints_rx: EarlyHintsReceiver,
+        date_cache: DateCache,
+        send_date_header: bool,
+        upgrade: Option<PendingUpgrade>,
+        send_continue: bool,
+        #[pin]
+        state: H2StreamState<Fut, ResB>,
+    }
+}
+
+pin_project! {
+    #[project = H2StreamStateProj]
+    enum H2StreamState<Fut, ResB>
+    where
+        Fut: Future,
+        ResB: Body<Data = bytes::Bytes>,
+    {
+        Service {
+            #[pin]
+            response_fut: Fut,
+            early_hints_open: bool,
+        },
+        Body {
+            #[pin]
+            pipe: PipeToSendStream<ResB>,
+        },
+        Upgrade {
+            #[pin]
+            task: self::upgrade::UpgradedSendStreamTask<ResB::Data>,
+        },
+        Done,
+    }
+}
+
+impl<Fut, ResB> H2Stream<Fut, ResB>
+where
+    Fut: Future,
+    ResB: Body<Data = bytes::Bytes>,
+{
+    #[inline]
+    const fn new(
+        stream: h2::server::SendResponse<SendBuf<ResB::Data>>,
+        response_fut: Fut,
+        early_hints_rx: EarlyHintsReceiver,
+        date_cache: DateCache,
+        send_date_header: bool,
+        upgrade: Option<PendingUpgrade>,
+        send_continue: bool,
+    ) -> Self {
+        Self {
+            stream,
+            early_hints_rx,
+            date_cache,
+            send_date_header,
+            upgrade,
+            send_continue,
+            state: H2StreamState::Service {
+                response_fut: response_fut,
+                early_hints_open: true,
+            },
+        }
+    }
+}
+
+impl<Fut, ResB, ResBE, ResE> Future for H2Stream<Fut, ResB>
+where
+    Fut: Future<Output = Result<Response<ResB>, ResE>>,
+    ResB: Body<Data = bytes::Bytes, Error = ResBE>,
+    ResE: std::error::Error,
+    ResBE: std::error::Error,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+
+        if *this.send_continue {
+            let mut response = Response::new(());
+            *response.status_mut() = http::StatusCode::CONTINUE;
+            let _ = this
+                .stream
+                .send_informational(response)
+                .map_err(h2_error_to_io);
+            *this.send_continue = false;
+        }
+
+        loop {
+            match this.state.as_mut().project() {
+                H2StreamStateProj::Service {
+                    response_fut,
+                    early_hints_open,
+                } => {
+                    match this.stream.poll_reset(cx) {
+                        Poll::Ready(Ok(_)) | Poll::Ready(Err(_)) => return Poll::Ready(()),
+                        Poll::Pending => {}
+                    }
+
+                    if let Poll::Ready(response_result) = response_fut.poll(cx) {
+                        let Ok(mut response) = response_result else {
+                            return Poll::Ready(());
+                        };
+
+                        sanitize_response(&mut response, *this.send_date_header, this.date_cache);
+
+                        let response_is_end_stream = response.body().is_end_stream();
+                        if !response_is_end_stream {
+                            if let Some(content_length) = response.body().size_hint().exact() {
+                                if !response
+                                    .headers()
+                                    .contains_key(http::header::CONTENT_LENGTH)
+                                {
+                                    response.headers_mut().insert(
+                                        http::header::CONTENT_LENGTH,
+                                        content_length.into(),
+                                    );
+                                }
+                            }
+                        }
+
+                        let (response_parts, response_body) = response.into_parts();
+                        let Ok(send) = this.stream.send_response(
+                            Response::from_parts(response_parts, ()),
+                            response_is_end_stream && this.upgrade.is_none(),
+                        ) else {
+                            return Poll::Ready(());
+                        };
+
+                        if let Some(PendingUpgrade {
+                            tx,
+                            upgraded,
+                            recv_stream,
+                        }) = this.upgrade.take()
+                        {
+                            if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
+                                let (upgraded, task) = self::upgrade::pair(send, recv_stream);
+                                let _ = tx.send(Upgraded::new(upgraded, None));
+                                this.state.set(H2StreamState::Upgrade { task });
+                                continue;
+                            }
+                        }
+
+                        if response_is_end_stream {
+                            this.state.set(H2StreamState::Done);
+                            return Poll::Ready(());
+                        }
+
+                        this.state.set(H2StreamState::Body {
+                            pipe: PipeToSendStream::new(send, response_body),
+                        });
+                        continue;
+                    }
+
+                    if *early_hints_open {
+                        match this.early_hints_rx.poll_recv(cx) {
+                            Poll::Ready(Some((headers, sender))) => {
+                                let mut response = Response::new(());
+                                *response.status_mut() = http::StatusCode::EARLY_HINTS;
+                                *response.headers_mut() = headers;
+                                sender
+                                    .into_inner()
+                                    .send(
+                                        this.stream
+                                            .send_informational(response)
+                                            .map_err(h2_error_to_io),
+                                    )
+                                    .ok();
+                                continue;
+                            }
+                            Poll::Ready(None) => {
+                                *early_hints_open = false;
+                                continue;
+                            }
+                            Poll::Pending => {}
+                        }
+                    }
+
+                    return Poll::Pending;
+                }
+                H2StreamStateProj::Body { pipe } => {
+                    let _ = ready!(pipe.poll(cx));
+                    this.state.set(H2StreamState::Done);
+                    return Poll::Ready(());
+                }
+                H2StreamStateProj::Upgrade { task } => {
+                    ready!(task.poll(cx));
+                    this.state.set(H2StreamState::Done);
+                    return Poll::Ready(());
+                }
+                H2StreamStateProj::Done => {
+                    return Poll::Ready(());
+                }
+            }
+        }
+    }
 }
 
 /// An HTTP/2 connection handler.
@@ -167,7 +411,7 @@ where
     where
         F: Fn(Request<super::Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
-        ResB: http_body::Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
+        ResB: http_body::Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error,
         ResBE: std::error::Error,
     {
@@ -240,7 +484,7 @@ where
                     }
                 }
             } {
-                let (request, mut stream) = match request {
+                let (request, stream) = match request {
                     Ok(d) => d,
                     Err(e) if e.is_go_away() => {
                         continue;
@@ -271,7 +515,7 @@ where
                         .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
 
                 // Install early hints
-                let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
+                let (early_hints, early_hints_rx) = EarlyHints::new_lazy();
                 request.extensions_mut().insert(early_hints);
 
                 // Install HTTP upgrade
@@ -280,144 +524,24 @@ where
                     let upgrade = Upgrade::new(upgrade_rx);
                     let upgraded = upgrade.upgraded.clone();
                     request.extensions_mut().insert(upgrade);
-                    Some((upgrade_tx, upgraded, recv_stream))
+                    Some(PendingUpgrade {
+                        tx: upgrade_tx,
+                        upgraded,
+                        recv_stream,
+                    })
                 } else {
                     None
                 };
 
-                let response_fut = Box::new(request_fn(request));
-                let send_date_header = self.options.send_date_header;
-
-                vibeio::spawn(async move {
-                    if is_100_continue {
-                        let mut response = Response::new(());
-                        *response.status_mut() = http::StatusCode::CONTINUE;
-                        let _ = stream.send_informational(response).map_err(h2_error_to_io);
-                    }
-
-                    let mut response_fut = Box::into_pin(response_fut);
-                    let mut early_hints_open = true;
-                    let response_result = loop {
-                        let next = std::future::poll_fn(|cx| {
-                            match stream.poll_reset(cx) {
-                                Poll::Ready(Ok(reason)) => {
-                                    return Poll::Ready(Err(h2_reason_to_io(reason)));
-                                }
-                                Poll::Ready(Err(err)) => {
-                                    return Poll::Ready(Err(h2_error_to_io(err)));
-                                }
-                                Poll::Pending => {}
-                            }
-
-                            if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
-                                return Poll::Ready(Ok(futures_util::future::Either::Left(res)));
-                            }
-
-                            if early_hints_open {
-                                match early_hints_rx.poll_recv(cx) {
-                                    Poll::Ready(Some(msg)) => {
-                                        return Poll::Ready(Ok(
-                                            futures_util::future::Either::Right(msg),
-                                        ));
-                                    }
-                                    Poll::Ready(None) => {
-                                        early_hints_open = false;
-                                    }
-                                    Poll::Pending => {}
-                                }
-                            }
-
-                            Poll::Pending
-                        })
-                        .await;
-
-                        match next {
-                            Ok(futures_util::future::Either::Left(response_result)) => {
-                                break response_result;
-                            }
-                            Ok(futures_util::future::Either::Right((headers, sender))) => {
-                                let mut response = Response::new(());
-                                *response.status_mut() = http::StatusCode::EARLY_HINTS;
-                                *response.headers_mut() = headers;
-                                sender
-                                    .into_inner()
-                                    .send(
-                                        stream.send_informational(response).map_err(h2_error_to_io),
-                                    )
-                                    .ok();
-                            }
-                            Err(_) => {
-                                return;
-                            }
-                        }
-                    };
-                    let Ok(mut response) = response_result else {
-                        // Return early if the request handler returns an error
-                        return;
-                    };
-
-                    {
-                        let response_headers = response.headers_mut();
-                        if send_date_header {
-                            if let Some(http_date) = date_cache.get_date_header_value() {
-                                response_headers
-                                    .entry(http::header::DATE)
-                                    .or_insert(http_date);
-                            }
-                        }
-                        for header in &HTTP2_INVALID_HEADERS {
-                            if let http::header::Entry::Occupied(entry) =
-                                response_headers.entry(header)
-                            {
-                                entry.remove();
-                            }
-                        }
-                        if response_headers
-                            .get(http::header::TE)
-                            .is_some_and(|v| v != "trailers")
-                        {
-                            response_headers.remove(http::header::TE);
-                        }
-                    }
-
-                    let response_is_end_stream = response.body().is_end_stream();
-                    if !response_is_end_stream {
-                        if let Some(content_length) = response.body().size_hint().exact() {
-                            if !response
-                                .headers()
-                                .contains_key(http::header::CONTENT_LENGTH)
-                            {
-                                response
-                                    .headers_mut()
-                                    .insert(http::header::CONTENT_LENGTH, content_length.into());
-                            }
-                        }
-                    }
-
-                    let (response_parts, mut response_body) = response.into_parts();
-                    let Ok(send) = stream.send_response(
-                        Response::from_parts(response_parts, ()),
-                        response_is_end_stream && upgrade.is_none(),
-                    ) else {
-                        return;
-                    };
-
-                    if let Some((upgrade_tx, upgraded, recv_stream)) = upgrade {
-                        if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
-                            let (upgraded, task) = self::upgrade::pair(send, recv_stream);
-                            let _ = upgrade_tx.send(Upgraded::new(upgraded, None));
-                            task.await;
-                            return;
-                        }
-                    }
-
-                    if response_is_end_stream {
-                        return;
-                    }
-
-                    // No upgrade, send the body directly
-                    let _ = PipeToSendStream::new(send, &mut response_body).await;
-                });
+                vibeio::spawn(H2Stream::new(
+                    stream,
+                    request_fn(request),
+                    early_hints_rx,
+                    date_cache,
+                    self.options.send_date_header,
+                    upgrade,
+                    is_100_continue,
+                ));
             }
 
             Ok(())

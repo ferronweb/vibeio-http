@@ -7,47 +7,51 @@ use std::{
 
 use h2::SendStream;
 use http_body::Body;
+use pin_project_lite::pin_project;
 
 use crate::{h2_error_to_io, h2_reason_to_io};
 
-pub(crate) struct PipeToSendStream<'a, S>
+pin_project! {
+    pub(crate) struct PipeToSendStream<S>
+    where
+        S: Body,
+    {
+        body_tx: SendStream<SendBuf<S::Data>>,
+        capacity_reserving: bool,
+        #[pin]
+        stream: S,
+    }
+}
+
+impl<S> PipeToSendStream<S>
 where
     S: Body,
 {
-    body_tx: SendStream<SendBuf<S::Data>>,
-    stream: Pin<&'a mut S>,
-    capacity_reserving: bool,
-}
-
-impl<'a, S> PipeToSendStream<'a, S>
-where
-    S: Body + Unpin,
-{
     #[inline]
-    pub fn new(body_tx: SendStream<SendBuf<S::Data>>, stream: &'a mut S) -> Self {
+    pub fn new(body_tx: SendStream<SendBuf<S::Data>>, stream: S) -> Self {
         Self {
             body_tx,
-            stream: Pin::new(stream),
             capacity_reserving: false,
+            stream,
         }
     }
 }
 
-impl<'a, S> Future for PipeToSendStream<'a, S>
+impl<S> Future for PipeToSendStream<S>
 where
-    S: Body + Unpin,
+    S: Body,
     S::Error: std::error::Error,
 {
     type Output = Result<(), std::io::Error>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
+        let mut this = self.project();
         loop {
-            if !this.capacity_reserving {
+            if !*this.capacity_reserving {
                 this.body_tx.reserve_capacity(1);
                 // Set a flag to avoid unnecessary reserve calls
-                this.capacity_reserving = true;
+                *this.capacity_reserving = true;
             }
 
             if this.body_tx.capacity() == 0 {
@@ -68,7 +72,7 @@ where
                 }
             }
 
-            this.capacity_reserving = false;
+            *this.capacity_reserving = false;
 
             match this.body_tx.poll_reset(cx) {
                 Poll::Ready(Ok(reason)) => {

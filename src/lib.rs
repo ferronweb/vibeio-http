@@ -93,7 +93,7 @@ pub trait HttpProtocol: Sized {
     where
         F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
-        ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
+        ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error,
         ResBE: std::error::Error;
 
@@ -107,12 +107,12 @@ pub trait HttpProtocol: Sized {
     where
         F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
-        ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin,
+        ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error,
         ResBE: std::error::Error,
         EF: FnOnce(bool) -> EFut,
         EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
-        EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin,
+        EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
         EResE: std::error::Error,
         EResBE: std::error::Error,
     {

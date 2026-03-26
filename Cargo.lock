@@ -516,6 +516,7 @@ dependencies = [
  "kanal",
  "memchr",
  "oneshot",
+ "pin-project-lite",
  "send_wrapper",
  "tokio",
  "tokio-util",
