@@ -1,6 +1,6 @@
 [package]
 name = "vibeio-http"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Dorian Niemiec <dorian@ferron.sh>"]
 description = "High-performance HTTP server primitives for the `vibeio` runtime"

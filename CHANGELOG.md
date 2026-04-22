@@ -1,8 +1,8 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.3.1
 
-**Not yet released**
+**Released in April 22, 2026**
 
 - Improved graceful shutdown for HTTP/1.x
 
