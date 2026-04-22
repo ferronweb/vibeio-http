@@ -847,15 +847,22 @@ where
             let (mut request, body_tx) = match if let Some(timeout) =
                 self.options.header_read_timeout
             {
-                vibeio::time::timeout(timeout, self.read_request()).await
+                vibeio::time::timeout(timeout, async {
+                    if let Some(token) = self.cancel_token.clone() {
+                        token.run_until_cancelled(self.read_request()).await
+                    } else {
+                        Some(self.read_request().await)
+                    }
+                })
+                .await
             } else {
-                Ok(self.read_request().await)
+                Ok(Some(self.read_request().await))
             } {
-                Ok(Ok(Some(d))) => d,
-                Ok(Ok(None)) => {
+                Ok(Some(Ok(Some(d)))) => d,
+                Ok(Some(Ok(None))) => {
                     return Ok(());
                 }
-                Ok(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     // Parse error
                     if let Ok(mut response) = error_fn(false).await {
                         response
@@ -867,6 +874,10 @@ where
                             .await;
                     }
                     return Err(e);
+                }
+                Ok(None) => {
+                    // Graceful shutdown
+                    return Ok(());
                 }
                 Err(_) => {
                     // Timeout error
