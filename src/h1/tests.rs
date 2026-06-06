@@ -741,6 +741,41 @@ async fn test_chunked_overrides_content_length() {
         .await
 }
 
+#[tokio::test]
+async fn test_chunked_encoding_very_large() {
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let (client_io, server_io) = tokio::io::duplex(4096);
+
+            let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
+            let server_task = tokio::task::spawn_local(server.handle(|req| async {
+                let body = req.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(&*body, b"Hello, World!");
+                Ok::<_, http::Error>(http::Response::new(Full::new(bytes::Bytes::from_static(
+                    b"",
+                ))))
+            }));
+
+            let (_client_reader, mut client_writer) = tokio::io::split(client_io);
+
+            // Write a POST request
+            client_writer
+                .write_all(
+                    format!(
+                        "POST / HTTP/1.0\r\nHost: localhost\r\nTransfer-Encoding: chunked\
+                        \r\n\r\n{:X}\r\ntest",
+                        usize::MAX
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            server_task.await.unwrap().unwrap_err();
+        })
+        .await;
+}
+
 #[test]
 fn test_slowloris() {
     // A "vibeio" runtime has to be built, since this test depends on the timer,
