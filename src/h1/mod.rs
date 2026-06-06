@@ -259,14 +259,13 @@ where
                 if let Some(pos) =
                     memmem::find(&self.read_buf[begin_search..len_buf_pos.min(48)], b"\r\n")
                 {
-                    let numbers =
-                        std::str::from_utf8(&self.read_buf[begin_search..begin_search + pos])
-                            .map_err(|_| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "invalid chunk length",
-                                )
-                            })?;
+                    let numbers = std::str::from_utf8(&self.read_buf[..begin_search + pos])
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "invalid chunk length",
+                            )
+                        })?;
                     let len = usize::from_str_radix(numbers, 16).map_err(|_| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk length")
                     })?;
