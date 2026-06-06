@@ -1,8 +1,8 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.3.2
 
-**Not released yet**
+**Released in June 6, 2026**
 
 - Fixed chunk length parsing range in HTTP/1.x decoder
 - Fixed DoS vulnerability in HTTP/1.x chunked encoding parser (triggered by maliciously crafted chunk lengths)
