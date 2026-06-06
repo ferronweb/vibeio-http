@@ -328,7 +328,7 @@ where
                     (old_bytes_read + self.read_buf.len()).min(self.options.max_header_size)
             }
 
-            if bytes_read > 2 && self.read_buf[0] == b'\r' && self.read_buf[1] == b'\n' {
+            if bytes_read >= 2 && self.read_buf[0] == b'\r' && self.read_buf[1] == b'\n' {
                 // No trailers, return None
                 return Ok(None);
             }

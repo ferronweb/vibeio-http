@@ -4,6 +4,7 @@
 
 **Not released yet**
 
+- Fixed off-by-one error in HTTP/1.x trailer header check
 - Fixed chunk length parsing range in HTTP/1.x decoder
 - The HTTP/1.x server logic now properly handles write-zero error when writing to the socket instead of infinitely looping
 
