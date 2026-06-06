@@ -715,10 +715,13 @@ where
                         self.write_buf.push_bytes(data);
                     }
                     while self.write_buf.len() >= WRITE_BUF_BATCH_THRESHOLD {
-                        unsafe {
+                        let bytes_written = unsafe {
                             self.write_buf
                                 .write(&mut self.io, self.options.enable_vectored_write)
-                                .await?;
+                                .await?
+                        };
+                        if bytes_written == 0 {
+                            return Err(std::io::ErrorKind::WriteZero.into());
                         }
                     }
                 }

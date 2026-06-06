@@ -1,5 +1,11 @@
 # `vibeio-http` change log
 
+## `vibeio-http` UNRELEASED
+
+**Not released yet**
+
+- The HTTP/1.x server logic now properly handles write-zero error when writing to the socket instead of infinitely looping
+
 ## `vibeio-http` 0.3.1
 
 **Released in April 22, 2026**
