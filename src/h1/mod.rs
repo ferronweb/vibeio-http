@@ -282,7 +282,13 @@ where
         }
         let mut just_started = true;
         // + 2, because we need to read the trailing CRLF
-        while read < len + 2 {
+        let Some(len_plus_two) = len.checked_add(2) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunk length too large",
+            ));
+        };
+        while read < len_plus_two {
             let have_to_read_buf = !just_started || self.read_buf.is_empty();
             just_started = false;
             if have_to_read_buf {
