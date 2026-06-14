@@ -1,10 +1,10 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.3.3
 
-**Not yet released**
+**Released in June 14, 2026**
 
-- Improved support for `Expect: 100-continue` handling
+- Improved `Expect: 100-continue` handling
 
 ## `vibeio-http` 0.3.2
 
