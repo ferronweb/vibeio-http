@@ -186,6 +186,7 @@ where
     Fut: Future,
     ResB: Body<Data = bytes::Bytes>,
 {
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     const fn new(
         stream: h2::server::SendResponse<SendBuf<ResB::Data>>,
