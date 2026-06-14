@@ -17,6 +17,10 @@ use std::{
     mem::MaybeUninit,
     pin::Pin,
     str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::UNIX_EPOCH,
 };
@@ -195,10 +199,22 @@ where
         &mut self,
         body_tx: kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         content_length: u64,
+        send_continue_body: &Option<Arc<AtomicBool>>,
+        continue_sent: &mut bool,
+        version: Version,
     ) -> Result<(), std::io::Error> {
         let mut remaining = content_length;
         let mut just_started = true;
         while remaining > 0 {
+            if !*continue_sent
+                && send_continue_body
+                    .as_ref()
+                    .is_some_and(|b| b.load(Ordering::Relaxed))
+            {
+                *continue_sent = true;
+                self.write_100_continue(version).await?;
+            }
+
             let have_to_read_buf = !just_started || self.read_buf.is_empty();
             just_started = false;
             if have_to_read_buf {
@@ -226,6 +242,9 @@ where
     async fn read_body_chunk(
         &mut self,
         would_have_trailers: bool,
+        send_continue_body: &Option<Arc<AtomicBool>>,
+        continue_sent: &mut bool,
+        version: Version,
     ) -> Result<bytes::Bytes, std::io::Error> {
         let len = {
             // Safety: u8 is a primitive type, so we can safely assume initialization
@@ -244,6 +263,14 @@ where
                 let have_to_read_buf = !just_started || self.read_buf.is_empty();
                 just_started = false;
                 if have_to_read_buf {
+                    if !*continue_sent
+                        && send_continue_body
+                            .as_ref()
+                            .is_some_and(|b| b.load(Ordering::Relaxed))
+                    {
+                        *continue_sent = true;
+                        self.write_100_continue(version).await?;
+                    }
                     let n = self.fill_buf().await?;
                     if n == 0 {
                         return Err(std::io::Error::new(
@@ -292,6 +319,14 @@ where
             let have_to_read_buf = !just_started || self.read_buf.is_empty();
             just_started = false;
             if have_to_read_buf {
+                if !*continue_sent
+                    && send_continue_body
+                        .as_ref()
+                        .is_some_and(|b| b.load(Ordering::Relaxed))
+                {
+                    *continue_sent = true;
+                    self.write_100_continue(version).await?;
+                }
                 let n = self.fill_buf().await?;
                 if n == 0 {
                     return Err(std::io::Error::new(
@@ -390,9 +425,14 @@ where
         &mut self,
         body_tx: kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         would_have_trailers: bool,
+        send_continue_body: &Option<Arc<AtomicBool>>,
+        continue_sent: &mut bool,
+        version: Version,
     ) -> Result<(), std::io::Error> {
         loop {
-            let chunk = self.read_body_chunk(would_have_trailers).await?;
+            let chunk = self
+                .read_body_chunk(would_have_trailers, send_continue_body, continue_sent, version)
+                .await?;
             if chunk.is_empty() {
                 break;
             }
@@ -416,11 +456,12 @@ where
         Option<(
             Request<Incoming>,
             kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+            Option<Arc<AtomicBool>>,
         )>,
         std::io::Error,
     > {
         // Parse HTTP request using httparse
-        let (request, body_tx) = {
+        let (request, body_tx, send_continue_body) = {
             let Some((head, headers)) = self.get_head().await? else {
                 return Ok(None);
             };
@@ -444,8 +485,19 @@ where
 
             // Convert httparse HTTP request to `http` one
             let (body_tx, body_rx) = kanal::bounded_async(2);
+
+            // Detect 100-continue and create flag before building the body
+            let is_100_continue = self.options.send_continue_response
+                && req.headers.iter().any(|h| {
+                    h.name.eq_ignore_ascii_case("expect")
+                        && h.value.eq_ignore_ascii_case(b"100-continue")
+                });
+            let send_continue_body =
+                is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
+
             let request_body = Http1Body {
                 inner: Box::pin(body_rx),
+                send_continue_body: send_continue_body.clone(),
             };
             let mut request = Request::new(Incoming::H1(request_body));
             match req.version {
@@ -486,9 +538,9 @@ where
             }
             *request.headers_mut() = header_map;
 
-            (request, body_tx)
+            (request, body_tx, send_continue_body)
         };
-        Ok(Some((request, body_tx)))
+        Ok(Some((request, body_tx, send_continue_body)))
     }
 
     #[inline]
@@ -852,7 +904,7 @@ where
         let mut keep_alive = true;
 
         while keep_alive {
-            let (mut request, body_tx) = match if let Some(timeout) =
+            let (mut request, body_tx, send_continue_body) = match if let Some(timeout) =
                 self.options.header_read_timeout
             {
                 vibeio::time::timeout(timeout, async {
@@ -920,18 +972,7 @@ where
                 && (is_connection_keep_alive || request.version() == http::Version::HTTP_11);
 
             let version = request.version();
-
-            // 100 Continue
-            if self.options.send_continue_response {
-                let is_100_continue = request
-                    .headers()
-                    .get(header::EXPECT)
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-                if is_100_continue {
-                    self.write_100_continue(version).await?;
-                }
-            }
+            let is_100_continue = send_continue_body.is_some();
 
             // 103 Early Hints
             let early_hints_fut = if self.options.enable_early_hints {
@@ -995,12 +1036,13 @@ where
             request.extensions_mut().insert(upgrade);
 
             // Get HTTP response
+            let mut continue_sent = false;
             let mut response = {
                 let read_body_fut = async {
                     if chunked {
-                        self.read_chunked_body_fn(body_tx, has_trailers).await
+                        self.read_chunked_body_fn(body_tx, has_trailers, &send_continue_body, &mut continue_sent, version).await
                     } else {
-                        self.read_body_fn(body_tx, content_length).await
+                        self.read_body_fn(body_tx, content_length, &send_continue_body, &mut continue_sent, version).await
                     }
                 };
                 let read_body_fut_pin = std::pin::pin!(read_body_fut);
@@ -1040,6 +1082,15 @@ where
 
                 response.map_err(|e| std::io::Error::other(e.to_string()))?
             };
+
+            // Response-triggered 100 Continue
+            if !continue_sent
+                && is_100_continue
+                && !response.status().is_client_error()
+                && !response.status().is_server_error()
+            {
+                self.write_100_continue(version).await?;
+            }
 
             let mut was_upgraded = false;
             if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1157,6 +1208,7 @@ where
 pub(crate) struct Http1Body {
     #[allow(clippy::type_complexity)]
     inner: Pin<Box<AsyncReceiver<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>>>,
+    send_continue_body: Option<Arc<AtomicBool>>,
 }
 
 impl Body for Http1Body {
@@ -1172,7 +1224,12 @@ impl Body for Http1Body {
             Poll::Ready(Ok(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
             Poll::Ready(Ok(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(Err(_)) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if let Some(scb) = self.send_continue_body.as_ref() {
+                    scb.store(true, Ordering::Relaxed);
+                }
+                Poll::Pending
+            }
         }
     }
 }

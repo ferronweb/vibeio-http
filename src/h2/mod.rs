@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use std::{
     future::Future,
     pin::Pin,
+    sync::{atomic::AtomicBool, Arc},
     task::{Context, Poll},
 };
 
@@ -39,14 +40,16 @@ static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
 pub(crate) struct H2Body {
     recv: h2::RecvStream,
     data_done: bool,
+    send_continue_body: Option<Arc<AtomicBool>>,
 }
 
 impl H2Body {
     #[inline]
-    fn new(recv: h2::RecvStream) -> Self {
+    fn new(recv: h2::RecvStream, send_continue_body: Option<Arc<AtomicBool>>) -> Self {
         Self {
             recv,
             data_done: false,
+            send_continue_body,
         }
     }
 }
@@ -68,7 +71,12 @@ impl Body for H2Body {
                 }
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(h2_error_to_io(err)))),
                 Poll::Ready(None) => self.data_done = true,
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if let Some(scb) = self.send_continue_body.as_ref() {
+                        scb.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Poll::Pending;
+                }
             }
         }
 
@@ -76,7 +84,12 @@ impl Body for H2Body {
             Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
             Poll::Ready(Ok(None)) => Poll::Ready(None),
             Poll::Ready(Err(err)) => Poll::Ready(Some(Err(h2_error_to_io(err)))),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if let Some(scb) = self.send_continue_body.as_ref() {
+                    scb.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Poll::Pending
+            }
         }
     }
 }
@@ -158,6 +171,8 @@ pin_project! {
             upgrade: Option<PendingUpgrade>,
             send_continue: bool,
             early_hints_open: bool,
+            send_continue_body: Option<Arc<AtomicBool>>,
+            continue_sent: bool
         },
         Body {
             #[pin]
@@ -180,6 +195,7 @@ where
         send_date_header: bool,
         upgrade: Option<PendingUpgrade>,
         send_continue: bool,
+        send_continue_body: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
             stream,
@@ -191,6 +207,8 @@ where
                 upgrade,
                 send_continue,
                 early_hints_open: true,
+                send_continue_body,
+                continue_sent: false,
             },
         }
     }
@@ -219,17 +237,9 @@ where
                     upgrade,
                     send_continue,
                     early_hints_open,
+                    send_continue_body,
+                    continue_sent,
                 } => {
-                    if *send_continue {
-                        let mut response = Response::new(());
-                        *response.status_mut() = http::StatusCode::CONTINUE;
-                        let _ = this
-                            .stream
-                            .send_informational(response)
-                            .map_err(h2_error_to_io);
-                        *send_continue = false;
-                    }
-
                     if let Poll::Ready(response_result) = response_fut.poll(cx) {
                         let Ok(mut response) = response_result else {
                             return Poll::Ready(());
@@ -250,6 +260,20 @@ where
                                     );
                                 }
                             }
+                        }
+
+                        if *send_continue && !*continue_sent {
+                            if !response.status().is_client_error()
+                                && !response.status().is_server_error()
+                            {
+                                let mut response = Response::new(());
+                                *response.status_mut() = http::StatusCode::CONTINUE;
+                                let _ = this
+                                    .stream
+                                    .send_informational(response)
+                                    .map_err(h2_error_to_io);
+                            }
+                            *continue_sent = true;
                         }
 
                         let (response_parts, response_body) = response.into_parts();
@@ -287,6 +311,21 @@ where
                     match this.stream.poll_reset(cx) {
                         Poll::Ready(Ok(_)) | Poll::Ready(Err(_)) => return Poll::Ready(()),
                         Poll::Pending => {}
+                    }
+
+                    if *send_continue
+                        && !*continue_sent
+                        && send_continue_body
+                            .as_ref()
+                            .is_some_and(|scb| scb.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        let mut response = Response::new(());
+                        *response.status_mut() = http::StatusCode::CONTINUE;
+                        let _ = this
+                            .stream
+                            .send_informational(response)
+                            .map_err(h2_error_to_io);
+                        *continue_sent = true;
                     }
 
                     if *early_hints_open {
@@ -487,15 +526,6 @@ where
                     }
                 };
 
-                let date_cache = self.date_header_value_cached.clone();
-                let (request_parts, recv_stream) = request.into_parts();
-                let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
-                    (Incoming::Empty, Some(recv_stream))
-                } else {
-                    (Incoming::H2(H2Body::new(recv_stream)), None)
-                };
-                let mut request = Request::from_parts(request_parts, request_body);
-
                 // 100 Continue
                 let is_100_continue = self.options.send_continue_response
                     && request
@@ -503,6 +533,19 @@ where
                         .get(http::header::EXPECT)
                         .and_then(|v| v.to_str().ok())
                         .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+
+                let date_cache = self.date_header_value_cached.clone();
+                let send_continue_body = is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
+                let (request_parts, recv_stream) = request.into_parts();
+                let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
+                    (Incoming::Empty, Some(recv_stream))
+                } else {
+                    (
+                        Incoming::H2(H2Body::new(recv_stream, send_continue_body.clone())),
+                        None,
+                    )
+                };
+                let mut request = Request::from_parts(request_parts, request_body);
 
                 // Install early hints
                 let (early_hints, early_hints_rx) = EarlyHints::new_lazy();
@@ -531,6 +574,7 @@ where
                     self.options.send_date_header,
                     upgrade,
                     is_100_continue,
+                    send_continue_body,
                 ));
             }
 

@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use std::{
     pin::Pin,
     rc::Rc,
+    sync::{atomic::AtomicBool, Arc},
     task::{Context, Poll},
 };
 
@@ -30,6 +31,7 @@ static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
 struct H3BodyState<S, B> {
     recv: h3::server::RequestStream<S, B>,
     data_done: bool,
+    send_continue_body: Option<Arc<AtomicBool>>,
 }
 
 pub(crate) struct H3Body<S, B> {
@@ -38,11 +40,15 @@ pub(crate) struct H3Body<S, B> {
 
 impl<S, B> H3Body<S, B> {
     #[inline]
-    fn new(recv: h3::server::RequestStream<S, B>) -> Self {
+    fn new(
+        recv: h3::server::RequestStream<S, B>,
+        send_continue_body: Option<Arc<AtomicBool>>,
+    ) -> Self {
         Self {
             inner: futures_util::lock::Mutex::new(H3BodyState {
                 recv,
                 data_done: false,
+                send_continue_body,
             }),
         }
     }
@@ -76,7 +82,12 @@ where
                 Poll::Ready(Err(err)) => {
                     return Poll::Ready(Some(Err(h3_stream_error_to_io(err))));
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if let Some(scb) = inner.send_continue_body.as_ref() {
+                        scb.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Poll::Pending;
+                }
             }
         }
 
@@ -84,7 +95,12 @@ where
             Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
             Poll::Ready(Ok(None)) => Poll::Ready(None),
             Poll::Ready(Err(err)) => Poll::Ready(Some(Err(h3_stream_error_to_io(err)))),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if let Some(scb) = inner.send_continue_body.as_ref() {
+                    scb.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Poll::Pending
+            }
         }
     }
 }
@@ -299,29 +315,30 @@ where
                         }
                     };
                     let (mut send, receive) = stream.split();
-                    let (request_parts, _) = request.into_parts();
-                    let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
-                        (Incoming::Empty, Some(receive))
-                    } else {
-                        (Incoming::Boxed(Box::pin(H3Body::new(receive))), None)
-                    };
-                    let mut request = Request::from_parts(request_parts, request_body);
 
                     // 100 Continue
-                    if send_continue_response {
-                        let is_100_continue = request
+                    let is_100_continue = send_continue_response
+                        && request
                             .headers()
                             .get(http::header::EXPECT)
                             .and_then(|v| v.to_str().ok())
                             .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-                        if is_100_continue {
-                            let mut response = Response::new(());
-                            *response.status_mut() = http::StatusCode::CONTINUE;
-                            if send.send_response(response).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
+
+                    let send_continue_body =
+                        is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
+                    let (request_parts, _) = request.into_parts();
+                    let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
+                        (Incoming::Empty, Some(receive))
+                    } else {
+                        (
+                            Incoming::Boxed(Box::pin(H3Body::new(
+                                receive,
+                                send_continue_body.clone(),
+                            ))),
+                            None,
+                        )
+                    };
+                    let mut request = Request::from_parts(request_parts, request_body);
 
                     // Install early hints
                     let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
@@ -340,6 +357,7 @@ where
 
                     let mut response_fut = std::pin::pin!(request_fn(request));
                     let mut early_hints_open = true;
+                    let mut continue_sent = false;
                     let response_result = loop {
                         if !early_hints_open {
                             break response_fut.as_mut().await;
@@ -347,26 +365,44 @@ where
 
                         let next = std::future::poll_fn(|cx| {
                             if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
-                                return Poll::Ready(futures_util::future::Either::Left(res));
+                                return Poll::Ready(Some(futures_util::future::Either::Left(res)));
                             }
 
                             match early_hints_rx.poll_recv(cx) {
                                 Poll::Ready(Some(msg)) => {
-                                    Poll::Ready(futures_util::future::Either::Right(Ok(msg)))
+                                    return Poll::Ready(Some(futures_util::future::Either::Right(
+                                        Ok(msg),
+                                    )))
                                 }
                                 Poll::Ready(None) => {
-                                    Poll::Ready(futures_util::future::Either::Right(Err(())))
+                                    return Poll::Ready(Some(futures_util::future::Either::Right(
+                                        Err(()),
+                                    )))
                                 }
-                                Poll::Pending => Poll::Pending,
+                                Poll::Pending => {}
                             }
+
+                            if !continue_sent
+                                && is_100_continue
+                                && send_continue_body
+                                    .as_ref()
+                                    .map_or(false, |b| b.load(std::sync::atomic::Ordering::Relaxed))
+                            {
+                                continue_sent = true;
+                                return Poll::Ready(None);
+                            }
+
+                            Poll::Pending
                         })
                         .await;
 
                         match next {
-                            futures_util::future::Either::Left(response_result) => {
+                            // HTTP response
+                            Some(futures_util::future::Either::Left(response_result)) => {
                                 break response_result;
                             }
-                            futures_util::future::Either::Right(Ok((headers, sender))) => {
+                            // 103 Early Hints
+                            Some(futures_util::future::Either::Right(Ok((headers, sender)))) => {
                                 let mut response = Response::new(());
                                 *response.status_mut() = http::StatusCode::EARLY_HINTS;
                                 *response.headers_mut() = headers;
@@ -379,8 +415,16 @@ where
                                     )
                                     .ok();
                             }
-                            futures_util::future::Either::Right(Err(())) => {
+                            Some(futures_util::future::Either::Right(Err(()))) => {
                                 early_hints_open = false;
+                            }
+                            // 100 Continue
+                            None => {
+                                let mut response = Response::new(());
+                                *response.status_mut() = http::StatusCode::CONTINUE;
+                                if send.send_response(response).await.is_err() {
+                                    return;
+                                }
                             }
                         }
                     };
@@ -413,6 +457,22 @@ where
                                     .headers_mut()
                                     .insert(http::header::CONTENT_LENGTH, content_length.into());
                             }
+                        }
+                    }
+
+                    if is_100_continue && !continue_sent {
+                        if !response.status().is_client_error()
+                            && !response.status().is_server_error()
+                        {
+                            let mut response = Response::new(());
+                            *response.status_mut() = http::StatusCode::CONTINUE;
+                            if send.send_response(response).await.is_err() {
+                                return;
+                            }
+                        }
+                        #[allow(unused)]
+                        {
+                            continue_sent = true;
                         }
                     }
 
