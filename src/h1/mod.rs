@@ -431,7 +431,12 @@ where
     ) -> Result<(), std::io::Error> {
         loop {
             let chunk = self
-                .read_body_chunk(would_have_trailers, send_continue_body, continue_sent, version)
+                .read_body_chunk(
+                    would_have_trailers,
+                    send_continue_body,
+                    continue_sent,
+                    version,
+                )
                 .await?;
             if chunk.is_empty() {
                 break;
@@ -492,8 +497,7 @@ where
                     h.name.eq_ignore_ascii_case("expect")
                         && h.value.eq_ignore_ascii_case(b"100-continue")
                 });
-            let send_continue_body =
-                is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
+            let send_continue_body = is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
 
             let request_body = Http1Body {
                 inner: Box::pin(body_rx),
@@ -1040,9 +1044,23 @@ where
             let mut response = {
                 let read_body_fut = async {
                     if chunked {
-                        self.read_chunked_body_fn(body_tx, has_trailers, &send_continue_body, &mut continue_sent, version).await
+                        self.read_chunked_body_fn(
+                            body_tx,
+                            has_trailers,
+                            &send_continue_body,
+                            &mut continue_sent,
+                            version,
+                        )
+                        .await
                     } else {
-                        self.read_body_fn(body_tx, content_length, &send_continue_body, &mut continue_sent, version).await
+                        self.read_body_fn(
+                            body_tx,
+                            content_length,
+                            &send_continue_body,
+                            &mut continue_sent,
+                            version,
+                        )
+                        .await
                     }
                 };
                 let read_body_fut_pin = std::pin::pin!(read_body_fut);
