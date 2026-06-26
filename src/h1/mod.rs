@@ -80,6 +80,7 @@ pub struct Http1<Io> {
     read_buf: BytesMut,
     response_head_buf: Vec<u8>,
     write_buf: WriteBuf,
+    connection_idle: bool,
 }
 
 #[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
@@ -137,6 +138,7 @@ where
             read_buf,
             response_head_buf: Vec::with_capacity(1024),
             write_buf: WriteBuf::new(),
+            connection_idle: false,
         }
     }
 
@@ -572,6 +574,8 @@ where
                         std::io::ErrorKind::UnexpectedEof,
                         "unexpected EOF",
                     ));
+                } else {
+                    self.connection_idle = false;
                 }
                 bytes_read = (old_bytes_read + n).min(self.options.max_header_size);
             } else {
@@ -943,6 +947,10 @@ where
                     // Graceful shutdown
                     return Ok(());
                 }
+                Err(_) if self.connection_idle => {
+                    // Idle connection
+                    return Ok(());
+                }
                 Err(_) => {
                     // Timeout error
                     if let Ok(mut response) = error_fn(true).await {
@@ -1154,6 +1162,8 @@ where
                 // Graceful shutdown requested, break out of loop
                 break;
             }
+
+            self.connection_idle = true;
         }
         Ok(())
     }

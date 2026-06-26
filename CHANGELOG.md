@@ -1,5 +1,11 @@
 # `vibeio-http` change log
 
+## `vibeio-http` UNRELEASED
+
+**Not yet released**
+
+- Reduced spurious timeouts when kept-alive HTTP/1.x connection is idle
+
 ## `vibeio-http` 0.3.3
 
 **Released in June 14, 2026**
