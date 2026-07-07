@@ -2,6 +2,7 @@
 
 use std::{io::Cursor, time::Duration};
 
+use http_body_util::BodyExt;
 use libfuzzer_sys::fuzz_target;
 use tokio::io::AsyncWrite;
 use vibeio_http::HttpProtocol;
@@ -52,7 +53,9 @@ fuzz_target!(|data: &[u8]| {
             vibeio_http::Http1Options::default()
                 .header_read_timeout(Some(Duration::from_millis(2))),
         )
-        .handle(|_| async move {
+        .handle(|req| async move {
+            let (_parts, mut body) = req.into_parts();
+            while body.frame().await.is_some() {}
             http::Response::builder()
                 .status(200)
                 .body(http_body_util::Empty::<bytes::Bytes>::new())
