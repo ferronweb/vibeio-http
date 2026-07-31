@@ -228,135 +228,165 @@ where
 
         loop {
             match this.state.as_mut().project() {
-                H2StreamStateProj::Service {
-                    response_fut,
-                    early_hints_rx,
-                    date_cache,
-                    send_date_header,
-                    upgrade,
-                    send_continue,
-                    early_hints_open,
-                    send_continue_body,
-                    continue_sent,
-                } => {
-                    if let Poll::Ready(response_result) = response_fut.poll(cx) {
-                        let Ok(mut response) = response_result else {
-                            return Poll::Ready(());
-                        };
-
-                        sanitize_response(&mut response, *send_date_header, date_cache);
-
-                        let response_is_end_stream = response.body().is_end_stream();
-                        if !response_is_end_stream {
-                            if let Some(content_length) = response.body().size_hint().exact() {
-                                if !response
-                                    .headers()
-                                    .contains_key(http::header::CONTENT_LENGTH)
-                                {
-                                    response.headers_mut().insert(
-                                        http::header::CONTENT_LENGTH,
-                                        content_length.into(),
-                                    );
-                                }
-                            }
+                H2StreamStateProj::Service { .. } => {
+                    match Self::poll_service(this.stream, this.state.as_mut(), cx) {
+                        ServicePoll::Done => return Poll::Ready(()),
+                        ServicePoll::Pending => return Poll::Pending,
+                        ServicePoll::Body(pipe) => {
+                            this.state.set(H2StreamState::Body { pipe });
+                            continue;
                         }
+                    }
+                }
+                H2StreamStateProj::Body { pipe } => return pipe.poll(cx).map(|_| ()),
+            }
+        }
+    }
+}
 
-                        if *send_continue && !*continue_sent {
-                            if !response.status().is_client_error()
-                                && !response.status().is_server_error()
-                            {
-                                let mut response = Response::new(());
-                                *response.status_mut() = http::StatusCode::CONTINUE;
-                                let _ = this
-                                    .stream
-                                    .send_informational(response)
-                                    .map_err(h2_error_to_io);
-                            }
-                            *continue_sent = true;
-                        }
+/// The outcome of polling the `H2Stream` service state.
+enum ServicePoll<ResB>
+where
+    ResB: Body<Data = bytes::Bytes>,
+{
+    /// The stream has finished.
+    Done,
+    /// The stream is not ready to make progress yet.
+    Pending,
+    /// The response body is ready to be piped to the send stream.
+    Body(PipeToSendStream<ResB>),
+}
 
-                        let (response_parts, response_body) = response.into_parts();
-                        let Ok(send) = this.stream.send_response(
-                            Response::from_parts(response_parts, ()),
-                            response_is_end_stream && upgrade.is_none(),
-                        ) else {
-                            return Poll::Ready(());
-                        };
+impl<Fut, ResB, ResBE, ResE> H2Stream<Fut, ResB>
+where
+    Fut: Future<Output = Result<Response<ResB>, ResE>>,
+    ResB: Body<Data = bytes::Bytes, Error = ResBE>,
+    ResE: std::error::Error,
+    ResBE: std::error::Error,
+{
+    /// Polls the `H2StreamState::Service` state until the response future
+    /// resolves, interim responses are sent, or the stream would block.
+    #[inline]
+    fn poll_service(
+        stream: &mut h2::server::SendResponse<SendBuf<ResB::Data>>,
+        state: Pin<&mut H2StreamState<Fut, ResB>>,
+        cx: &mut Context<'_>,
+    ) -> ServicePoll<ResB> {
+        let mut state = state;
+        loop {
+            let H2StreamStateProj::Service {
+                response_fut,
+                early_hints_rx,
+                date_cache,
+                send_date_header,
+                upgrade,
+                send_continue,
+                early_hints_open,
+                send_continue_body,
+                continue_sent,
+            } = state.as_mut().project()
+            else {
+                unreachable!("poll_service called for non-Service state");
+            };
 
-                        if let Some(PendingUpgrade {
-                            tx,
-                            upgraded,
-                            recv_stream,
-                        }) = upgrade.take()
+            if let Poll::Ready(response_result) = response_fut.poll(cx) {
+                let Ok(mut response) = response_result else {
+                    return ServicePoll::Done;
+                };
+
+                sanitize_response(&mut response, *send_date_header, date_cache);
+
+                let response_is_end_stream = response.body().is_end_stream();
+                if !response_is_end_stream {
+                    if let Some(content_length) = response.body().size_hint().exact() {
+                        if !response
+                            .headers()
+                            .contains_key(http::header::CONTENT_LENGTH)
                         {
-                            if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
-                                let (upgraded, task) = self::upgrade::pair(send, recv_stream);
-                                let _ = tx.send(Upgraded::new(upgraded, None));
-                                vibeio::spawn(task);
-                                return Poll::Ready(());
-                            }
+                            response
+                                .headers_mut()
+                                .insert(http::header::CONTENT_LENGTH, content_length.into());
                         }
-
-                        if response_is_end_stream {
-                            return Poll::Ready(());
-                        }
-
-                        this.state.set(H2StreamState::Body {
-                            pipe: PipeToSendStream::new(send, response_body),
-                        });
-                        continue;
                     }
+                }
 
-                    match this.stream.poll_reset(cx) {
-                        Poll::Ready(Ok(_)) | Poll::Ready(Err(_)) => return Poll::Ready(()),
-                        Poll::Pending => {}
-                    }
-
-                    if *send_continue
-                        && !*continue_sent
-                        && send_continue_body
-                            .as_ref()
-                            .is_some_and(|scb| scb.load(std::sync::atomic::Ordering::Relaxed))
+                if *send_continue && !*continue_sent {
+                    if !response.status().is_client_error() && !response.status().is_server_error()
                     {
                         let mut response = Response::new(());
                         *response.status_mut() = http::StatusCode::CONTINUE;
-                        let _ = this
-                            .stream
-                            .send_informational(response)
-                            .map_err(h2_error_to_io);
-                        *continue_sent = true;
+                        let _ = stream.send_informational(response).map_err(h2_error_to_io);
                     }
-
-                    if *early_hints_open {
-                        match early_hints_rx.poll_recv(cx) {
-                            Poll::Ready(Some((headers, sender))) => {
-                                let mut response = Response::new(());
-                                *response.status_mut() = http::StatusCode::EARLY_HINTS;
-                                *response.headers_mut() = headers;
-                                sender
-                                    .into_inner()
-                                    .send(
-                                        this.stream
-                                            .send_informational(response)
-                                            .map_err(h2_error_to_io),
-                                    )
-                                    .ok();
-                                continue;
-                            }
-                            Poll::Ready(None) => {
-                                *early_hints_open = false;
-                                continue;
-                            }
-                            Poll::Pending => {}
-                        }
-                    }
-
-                    return Poll::Pending;
+                    *continue_sent = true;
                 }
-                H2StreamStateProj::Body { pipe } => {
-                    return pipe.poll(cx).map(|_| ());
+
+                let (response_parts, response_body) = response.into_parts();
+                let Ok(send) = stream.send_response(
+                    Response::from_parts(response_parts, ()),
+                    response_is_end_stream && upgrade.is_none(),
+                ) else {
+                    return ServicePoll::Done;
+                };
+
+                if let Some(PendingUpgrade {
+                    tx,
+                    upgraded,
+                    recv_stream,
+                }) = upgrade.take()
+                {
+                    if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
+                        let (upgraded, task) = self::upgrade::pair(send, recv_stream);
+                        let _ = tx.send(Upgraded::new(upgraded, None));
+                        vibeio::spawn(task);
+                        return ServicePoll::Done;
+                    }
+                }
+
+                if response_is_end_stream {
+                    return ServicePoll::Done;
+                }
+
+                return ServicePoll::Body(PipeToSendStream::new(send, response_body));
+            }
+
+            match stream.poll_reset(cx) {
+                Poll::Ready(Ok(_)) | Poll::Ready(Err(_)) => return ServicePoll::Done,
+                Poll::Pending => {}
+            }
+
+            if *send_continue
+                && !*continue_sent
+                && send_continue_body
+                    .as_ref()
+                    .is_some_and(|scb| scb.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                let mut response = Response::new(());
+                *response.status_mut() = http::StatusCode::CONTINUE;
+                let _ = stream.send_informational(response).map_err(h2_error_to_io);
+                *continue_sent = true;
+            }
+
+            if *early_hints_open {
+                match early_hints_rx.poll_recv(cx) {
+                    Poll::Ready(Some((headers, sender))) => {
+                        let mut response = Response::new(());
+                        *response.status_mut() = http::StatusCode::EARLY_HINTS;
+                        *response.headers_mut() = headers;
+                        sender
+                            .into_inner()
+                            .send(stream.send_informational(response).map_err(h2_error_to_io))
+                            .ok();
+                        continue;
+                    }
+                    Poll::Ready(None) => {
+                        *early_hints_open = false;
+                        continue;
+                    }
+                    Poll::Pending => {}
                 }
             }
+
+            return ServicePoll::Pending;
         }
     }
 }
