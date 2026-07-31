@@ -62,8 +62,6 @@ pub struct UpgradedSendStreamTask<B> {
     error_tx: Option<oneshot::Sender<std::io::Error>>,
 }
 
-// ===== impl UpgradedSendStreamTask =====
-
 impl<B> UpgradedSendStreamTask<B>
 where
     B: Buf,
@@ -152,8 +150,6 @@ where
         }
     }
 }
-
-// ===== impl H2Upgraded =====
 
 impl AsyncRead for H2Upgraded {
     #[inline]

@@ -31,7 +31,6 @@ async fn test_get_request() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a GET request
             client_writer
                 .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
                 .await
@@ -69,7 +68,6 @@ async fn test_post_request() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a POST request
             client_writer
         .write_all(
             b"POST / HTTP/1.0\r\nHost: localhost\r\nContent-Length: 14\r\n\r\nHello, vibeio!",
@@ -108,7 +106,6 @@ async fn test_keep_alive() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write first request
             client_writer
                 .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .await
@@ -121,7 +118,6 @@ async fn test_keep_alive() {
             assert!(response_buf.starts_with(b"HTTP/1.1 200 OK\r\n"));
             assert!(response_buf.ends_with(b"\r\n\r\nHello"));
 
-            // Write second request
             let _ = client_writer
                 .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .await;
@@ -159,7 +155,6 @@ async fn test_connection_close() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a request with "Connection: close"
             client_writer
                 .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .await
@@ -203,7 +198,6 @@ async fn test_fragmented() {
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
             tokio::task::spawn_local(async move {
-                // Write a GET request
                 client_writer
                     .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
                     .await
@@ -251,7 +245,6 @@ async fn test_fragmented_non_vectored() {
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
             tokio::task::spawn_local(async move {
-                // Write a GET request
                 client_writer
                     .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
                     .await
@@ -294,7 +287,6 @@ async fn test_chunked_response() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a GET request
             client_writer
                 .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
                 .await
@@ -346,7 +338,6 @@ async fn test_chunked_response_trailers() {
             }));
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a GET request
             client_writer
                 .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\nTE: trailers\r\n\r\n")
                 .await
@@ -383,7 +374,6 @@ async fn test_chunked_request() {
 
     let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-    // Write a POST request
     client_writer
         .write_all(b"POST / HTTP/1.0\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nD\r\nHello, World!\r\n0\r\n\r\n")
         .await
@@ -425,7 +415,6 @@ async fn test_chunked_request_trailers() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a POST request
             client_writer
                 .write_all(
                     b"POST / HTTP/1.0\r\nHost: localhost\
@@ -473,7 +462,6 @@ async fn test_upgrade_request() {
 
     let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-    // Write a GET request
     client_writer
         .write_all(
             b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade\r\nUpgrade: echo\r\n\r\nHello, World!",
@@ -512,7 +500,6 @@ async fn test_invalid_request_line() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a malformed request line
             client_writer
                 .write_all(b"GET / HTTP?/1.1\r\nHost: localhost\r\n\r\n")
                 .await
@@ -548,7 +535,6 @@ async fn test_invalid_headers() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a request with invalid headers
             client_writer
                 .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nHeader without colon\r\n\r\n")
                 .await
@@ -585,7 +571,6 @@ async fn test_header_size_limit_exceeded() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a request with a large header
             let large_header = "Header: ".to_string() + "x".repeat(1024 * 1024).as_str();
             let _ = client_writer
                 .write_all(
@@ -628,7 +613,6 @@ async fn test_http_pipelining() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write multiple requests in a single write
             let requests = vec![
                 "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
                 "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -719,7 +703,6 @@ async fn test_chunked_overrides_content_length() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a POST request
             client_writer
                 .write_all(
                     b"POST / HTTP/1.1\r\nHost: localhost\r\nConnection: close\
@@ -758,7 +741,6 @@ async fn test_chunked_encoding_very_large() {
 
             let (_client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a POST request
             client_writer
                 .write_all(
                     format!(
@@ -879,7 +861,6 @@ async fn test_100_continue_response_triggered() {
 
             let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
             let server_task = tokio::task::spawn_local(server.handle(|_req| async {
-                // Return 200 without reading body
                 Ok::<_, http::Error>(http::Response::new(Full::new(bytes::Bytes::from_static(
                     b"OK",
                 ))))
@@ -925,7 +906,6 @@ async fn test_100_continue_not_sent_on_error() {
 
             let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
             let server_task = tokio::task::spawn_local(server.handle(|_req| async {
-                // Return 400 Bad Request without reading body
                 Ok::<_, http::Error>(http::Response::builder()
                     .status(400)
                     .body(Empty::<bytes::Bytes>::new())
@@ -978,7 +958,6 @@ async fn test_100_continue_disabled() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a POST request with Expect: 100-continue
             client_writer
                 .write_all(
                     b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\nExpect: 100-continue\r\nConnection: close\r\n\r\nHello, World!",
@@ -1017,7 +996,6 @@ async fn test_100_continue_no_duplicate() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            // Write a POST request with Expect: 100-continue
             client_writer
                 .write_all(
                     b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\nExpect: 100-continue\r\nConnection: close\r\n\r\nHello, World!",

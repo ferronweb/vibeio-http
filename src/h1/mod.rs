@@ -382,7 +382,6 @@ where
                 let to_parse_length = begin_search + separator_index + 4;
                 let buf_ro = self.read_buf.split_to(to_parse_length).freeze();
 
-                // Parse trailers using `httparse` crate's header parsing
                 let mut httparse_trailers =
                     vec![httparse::EMPTY_HEADER; self.options.max_header_count].into_boxed_slice();
                 let status = httparse::parse_headers(&buf_ro, &mut httparse_trailers)
@@ -467,7 +466,6 @@ where
         )>,
         std::io::Error,
     > {
-        // Parse HTTP request using httparse
         let (request, body_tx, send_continue_body) = {
             let Some((head, headers)) = self.get_head().await? else {
                 return Ok(None);
@@ -931,7 +929,6 @@ where
                     return Ok(());
                 }
                 Ok(Some(Err(e))) => {
-                    // Parse error
                     if let Ok(mut response) = error_fn(false).await {
                         response
                             .headers_mut()
@@ -1047,7 +1044,6 @@ where
             let upgraded = upgrade.upgraded.clone();
             request.extensions_mut().insert(upgrade);
 
-            // Get HTTP response
             let mut continue_sent = false;
             let mut response = {
                 let read_body_fut = async {
@@ -1140,7 +1136,6 @@ where
                     .insert(header::CONNECTION, HeaderValue::from_static("close"));
             }
 
-            // Write response to IO
             self.write_response(response, version, write_trailers, zerocopy_fn.as_mut())
                 .await?;
 
