@@ -67,7 +67,7 @@ impl AsyncRead for Upgraded {
                 if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof) =>
             {
                 self.has_ended = true;
-                return std::task::Poll::Ready(Ok(()));
+                std::task::Poll::Ready(Ok(()))
             }
             poll => {
                 if poll.is_ready() && buf.remaining() == orig_buf_len {
@@ -94,7 +94,7 @@ impl AsyncWrite for Upgraded {
             std::task::Poll::Ready(Err(e))
                 if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
             {
-                return std::task::Poll::Ready(Ok(0));
+                std::task::Poll::Ready(Ok(0))
             }
             poll => poll,
         }
@@ -109,7 +109,7 @@ impl AsyncWrite for Upgraded {
             std::task::Poll::Ready(Err(e))
                 if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
             {
-                return std::task::Poll::Ready(Ok(()));
+                std::task::Poll::Ready(Ok(()))
             }
             poll => poll,
         }
@@ -124,7 +124,7 @@ impl AsyncWrite for Upgraded {
             std::task::Poll::Ready(Err(e))
                 if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
             {
-                return std::task::Poll::Ready(Ok(()));
+                std::task::Poll::Ready(Ok(()))
             }
             poll => poll,
         }
