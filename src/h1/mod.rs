@@ -39,7 +39,7 @@ const WRITE_BUF_BATCH_THRESHOLD: usize = 16384;
 /// - Chunked response encoding and trailer support
 /// - `100 Continue` and `103 Early Hints` interim responses
 /// - HTTP connection upgrades (e.g. WebSocket)
-/// - Optional zero-copy response sending on Linux (see `Http1::zerocopy`)
+/// - Optional zero-copy response sending on Linux or FreeBSD (see `Http1::zerocopy`)
 /// - Keep-alive connection reuse
 /// - Graceful shutdown via a [`CancellationToken`]
 ///
@@ -73,7 +73,10 @@ pub struct Http1<Io> {
     connection_idle: bool,
 }
 
-#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
 impl<Io> Http1<Io>
 where
     for<'a> Io: tokio::io::AsyncRead
@@ -90,7 +93,7 @@ where
     /// (via [`install_zerocopy`]) containing the file descriptor to send from.
     /// Responses without that extension are sent normally.
     ///
-    /// Only available on Linux (`target_os = "linux"`), and only when `Io`
+    /// Only available on Linux and FreeBSD, and only when `Io`
     /// implements [`vibeio::io::AsInnerRawHandle`].
     #[inline]
     pub fn zerocopy(self) -> Http1Zerocopy<Io> {

@@ -10,7 +10,7 @@
 //!
 //! ## Feature highlights
 //!
-//! - **Zero-copy static file serving** - supports zero-copy response sending for static file serving on Linux.
+//! - **Zero-copy static file serving** - supports zero-copy response sending for static file serving on Linux and FreeBSD.
 //! - **100 Continue** - Supports automatically sending `100 Continue` before the final response.
 //! - **103 Early Hints** - Supports sending `103 Early Hints` before the final response.
 //!
@@ -19,7 +19,7 @@
 //! - `h1`: Enables HTTP/1.x support.
 //! - `h2`: Enables HTTP/2 support.
 //! - `h3`: Enables HTTP/3 support.
-//! - `h1-zerocopy`: Enables Linux-only zero-copy response sending for HTTP/1.x.
+//! - `h1-zerocopy`: Enables Linux and FreeBSD-only zero-copy response sending for HTTP/1.x.
 //!
 //! ## Early hints
 //!

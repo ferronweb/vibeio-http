@@ -22,7 +22,7 @@ oneshot = { version = "0.2.1", features = ["async", "std"] }
 pin-project-lite = { version = "0.2.16", optional = true }
 send_wrapper = "0.6.0"
 tokio = "1.50.0"
-vibeio = { version = "0.2.3", default-features = false, features = ["time"] }
+vibeio = { version = "0.2.19", default-features = false, features = ["time"] }
 
 # HTTP/1.x
 httparse = { version = "1.10.1", optional = true }

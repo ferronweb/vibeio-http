@@ -4,6 +4,7 @@
 
 **Not yet released**
 
+- Added support for zerocopy file serving on FreeBSD.
 - Reduced spurious errors when HTTP/1.x and HTTP/2 are abruptly closed while idle (accepting or upgraded)
 
 ## `vibeio-http` 0.3.4

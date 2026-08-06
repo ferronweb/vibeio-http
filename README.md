@@ -14,7 +14,7 @@ an `http::Request<Incoming>` and returns an `http::Response<B>`, where
 - Automatic `100 Continue` support
 - `103 Early Hints` support via `send_early_hints`
 - HTTP/1 upgrade support (`prepare_upgrade` / `OnUpgrade`)
-- Linux zero-copy response sending for HTTP/1.x (`h1-zerocopy` feature)
+- Linux and FreeBSD zero-copy response sending for HTTP/1.x (`h1-zerocopy` feature)
 - Graceful shutdown support for all protocol handlers via `CancellationToken`
 
 ## Installation
@@ -31,7 +31,7 @@ By default, this crate enables: `h1`, `h1-zerocopy`, and `h2`.
 - `h1`: HTTP/1.x support
 - `h2`: HTTP/2 support
 - `h3`: HTTP/3 support (experimental, based on the `h3` crate)
-- `h1-zerocopy`: Linux-only zero-copy HTTP/1.x response sending (`splice`-based)
+- `h1-zerocopy`: Linux and FreeBSD-only zero-copy HTTP/1.x response sending (`splice`-based)
 
 For a smaller build, disable default features and opt in explicitly:
 
@@ -82,6 +82,7 @@ fn main() -> std::io::Result<()> {
 Use `send_early_hints` from your handler before returning the final response.
 
 Notes:
+
 - HTTP/2 and HTTP/3: available by default
 - HTTP/1.x: requires `Http1Options::enable_early_hints(true)`
 
@@ -105,6 +106,7 @@ let handler = |mut req| async move {
 ## HTTP/1 options
 
 `Http1Options` supports:
+
 - request head size and header count limits
 - request head read timeout
 - automatic `Date` header injection
@@ -113,6 +115,7 @@ let handler = |mut req| async move {
 - vectored write toggle
 
 `Http2Options` and `Http3Options` similarly expose:
+
 - handshake/accept timeouts
 - automatic `100 Continue`
 - direct access to underlying protocol builders (`h2_builder`, `h3_builder`)
@@ -125,9 +128,9 @@ For upgrade workflows (for example WebSocket-style handoff), call
 
 The resolved `Upgraded` type implements `tokio::io::AsyncRead + AsyncWrite`.
 
-## Linux zero-copy (HTTP/1.x)
+## Linux/FreeBSD zero-copy (HTTP/1.x)
 
-When built with `h1-zerocopy` on Linux:
+When built with `h1-zerocopy` on Linux or FreeBSD:
 
 1. Convert your handler with `.zerocopy()`
 2. Mark responses with `unsafe install_zerocopy(response, raw_fd)`

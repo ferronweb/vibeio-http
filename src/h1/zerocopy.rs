@@ -1,10 +1,19 @@
-#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
 use http::Response;
 use http_body::Body;
-#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
 use http_body_util::Empty;
 
-#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
 use super::{Http1, HttpProtocol};
 
 #[derive(Clone)]
@@ -16,7 +25,8 @@ unsafe impl Send for ZerocopyResponse {}
 unsafe impl Sync for ZerocopyResponse {}
 
 /// Installs a zero-copy hint on an HTTP response, directing the connection
-/// handler to use emulated sendfile (Linux only) to transmit the body.
+/// handler to use emulated sendfile (Linux and FreeBSD only) to transmit
+/// the body.
 ///
 /// # Parameters
 ///
@@ -36,24 +46,30 @@ pub unsafe fn install_zerocopy(response: &mut http::Response<impl Body>, handle:
 }
 
 /// An HTTP/1.x connection handler that uses emulated sendfile for zero-copy
-/// response body transmission on Linux.
+/// response body transmission on Linux and FreeBSD.
 ///
 /// Obtain an instance via [`Http1::zerocopy`]. When a response has a
 /// `ZerocopyResponse` extension installed (see [`install_zerocopy`]), the
-/// handler will use emulated sendfile (utilizing the Linux `splice(2)` syscall
-/// and Unix pipes) to stream the file from the kernel page cache
-/// to the socket, bypassing user-space copies.
+/// handler will use an approach dependent on the runtime environment
+/// to stream the file from the kernel page cache to the socket,
+/// bypassing user-space copies.
 ///
 /// For responses without that extension the behaviour is identical to the
 /// regular [`Http1`] handler.
 ///
-/// Only available on Linux (`target_os = "linux"`).
-#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
+/// Only available on Linux and FreeBSD.
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
 pub struct Http1Zerocopy<Io> {
     pub(super) inner: Http1<Io>,
 }
 
-#[cfg(all(target_os = "linux", feature = "h1-zerocopy"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
 impl<Io> HttpProtocol for Http1Zerocopy<Io>
 where
     for<'a> Io: tokio::io::AsyncRead
