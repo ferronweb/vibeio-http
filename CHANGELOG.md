@@ -1,5 +1,11 @@
 # `vibeio-http` change log
 
+## `vibeio-http` UNRELEASED
+
+**Not yet released**
+
+- Reduced spurious errors when HTTP/1.x and HTTP/2 are abruptly closed while idle (accepting or upgraded)
+
 ## `vibeio-http` 0.3.4
 
 **Released in June 26, 2026**

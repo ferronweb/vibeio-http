@@ -332,6 +332,19 @@ where
                 Ok(Some(Ok(None))) => {
                     return Ok(());
                 }
+                Ok(Some(Err(e)))
+                    if self.connection_idle
+                        && matches!(
+                            e.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::UnexpectedEof
+                        ) =>
+                {
+                    // HTTP/1.x abruptly closed when idle
+                    return Ok(());
+                }
                 Ok(Some(Err(e))) => {
                     if let Ok(mut response) = error_fn(false).await {
                         response

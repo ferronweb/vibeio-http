@@ -532,7 +532,7 @@ where
                     (None, graceful) => {
                         h2.graceful_shutdown();
                         let _ = h2.accept().await;
-                        if graceful {
+                        if graceful || !h2.has_streams() {
                             return Ok(());
                         }
                         return Err(std::io::Error::new(
@@ -548,7 +548,20 @@ where
                         continue;
                     }
                     Err(e) if e.is_io() => {
-                        return Err(e.into_io().unwrap_or(std::io::Error::other("io error")));
+                        let e_io = e.into_io().unwrap_or(std::io::Error::other("io error"));
+                        if h2.has_streams()
+                            && matches!(
+                                e_io.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::UnexpectedEof
+                            )
+                        {
+                            // HTTP/2 abruptly closed when idle
+                            return Ok(());
+                        }
+                        return Err(e_io);
                     }
                     Err(e) => {
                         return Err(std::io::Error::other(e));

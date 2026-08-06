@@ -26,6 +26,7 @@ pub struct Upgraded {
     reader: SendWrapper<Pin<Box<dyn AsyncRead + Unpin>>>,
     writer: SendWrapper<Pin<Box<dyn AsyncWrite + Unpin>>>,
     leftover: Option<bytes::Bytes>,
+    has_ended: bool,
 }
 
 impl Upgraded {
@@ -39,6 +40,7 @@ impl Upgraded {
             reader: SendWrapper::new(Box::pin(reader)),
             writer: SendWrapper::new(Box::pin(writer)),
             leftover,
+            has_ended: false,
         }
     }
 }
@@ -50,6 +52,7 @@ impl AsyncRead for Upgraded {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
+        let orig_buf_len = buf.remaining();
         if let Some(leftover) = &mut self.leftover {
             let slice_len = leftover.len().min(buf.remaining());
             let leftover_to_write = leftover.split_to(slice_len);
@@ -59,7 +62,24 @@ impl AsyncRead for Upgraded {
             }
             return std::task::Poll::Ready(Ok(()));
         }
-        (*self.reader).as_mut().poll_read(cx, buf)
+        match (*self.reader).as_mut().poll_read(cx, buf) {
+            std::task::Poll::Ready(Err(e))
+                if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof) =>
+            {
+                self.has_ended = true;
+                return std::task::Poll::Ready(Ok(()));
+            }
+            poll => {
+                if poll.is_ready() && buf.remaining() == orig_buf_len {
+                    // No data has been read, mark the I/O as "ended".
+                    //
+                    // If there was no data where more data would be expected,
+                    // this would be Poll::Pending (pending I/O op)...
+                    self.has_ended = true;
+                }
+                poll
+            }
+        }
     }
 }
 
@@ -70,7 +90,14 @@ impl AsyncWrite for Upgraded {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        (*self.writer).as_mut().poll_write(cx, buf)
+        match (*self.writer).as_mut().poll_write(cx, buf) {
+            std::task::Poll::Ready(Err(e))
+                if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
+            {
+                return std::task::Poll::Ready(Ok(0));
+            }
+            poll => poll,
+        }
     }
 
     #[inline]
@@ -78,7 +105,14 @@ impl AsyncWrite for Upgraded {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        (*self.writer).as_mut().poll_flush(cx)
+        match (*self.writer).as_mut().poll_flush(cx) {
+            std::task::Poll::Ready(Err(e))
+                if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
+            {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            poll => poll,
+        }
     }
 
     #[inline]
@@ -86,7 +120,14 @@ impl AsyncWrite for Upgraded {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        (*self.writer).as_mut().poll_shutdown(cx)
+        match (*self.writer).as_mut().poll_shutdown(cx) {
+            std::task::Poll::Ready(Err(e))
+                if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
+            {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            poll => poll,
+        }
     }
 
     #[inline]
