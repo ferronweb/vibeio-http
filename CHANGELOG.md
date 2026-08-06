@@ -1,6 +1,6 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.3.5
 
 **Not yet released**
 
