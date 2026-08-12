@@ -1,4 +1,6 @@
+pub mod codec;
 mod date;
+pub mod error;
 pub mod hpack;
 mod options;
 mod send;
