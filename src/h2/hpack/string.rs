@@ -6,11 +6,13 @@ use super::{huffman, integer, HpackError};
 const HUFFMAN_FLAG: u8 = 0x80;
 
 /// Whether Huffman encoding shortens `value` enough to be worthwhile.
+#[inline]
 pub(crate) fn should_huffman(value: &[u8]) -> bool {
     !value.is_empty() && huffman::encoded_len(value) < value.len() * 8
 }
 
 /// Encodes a string literal (raw or Huffman-coded) into `out`.
+#[inline]
 pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman: bool) {
     if huffman {
         integer::encode(
@@ -28,6 +30,7 @@ pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman: bool) {
 
 /// Decodes a string literal from `buf` at `off`, enforcing a maximum
 /// decoded length. Returns whether the literal was Huffman-coded.
+#[inline]
 pub(crate) fn decode(
     buf: &[u8],
     off: &mut usize,

@@ -86,6 +86,7 @@ impl Header {
     /// Creates a header field from raw name/value bytes. Names are used
     /// verbatim (no case normalization), which allows HTTP/2 pseudo
     /// headers (`:method`, `:status`, ...).
+    #[inline]
     pub fn new(name: impl Into<Bytes>, value: impl Into<Bytes>) -> Self {
         Header {
             name: name.into(),
@@ -95,14 +96,17 @@ impl Header {
 
     /// Size in octets as defined in RFC 7541 Section 4.1: the sum of the
     /// name and value lengths (without Huffman encoding) plus 32.
+    #[inline]
     pub(crate) fn size(&self) -> usize {
         ENTRY_OVERHEAD + self.name.len() + self.value.len()
     }
 
+    #[inline]
     pub fn name(&self) -> &[u8] {
         &self.name
     }
 
+    #[inline]
     pub fn value(&self) -> &[u8] {
         &self.value
     }
@@ -122,12 +126,14 @@ pub(crate) struct Table {
 }
 
 impl Table {
+    #[inline]
     pub(crate) fn new() -> Self {
         Table::with_max_size(DEFAULT_MAX_SIZE)
     }
 
     /// The default dynamic-table size when no SETTINGS_HEADER_TABLE_SIZE
     /// has been exchanged (RFC 7541 Section 4.2).
+    #[inline]
     pub(crate) fn with_max_size(max_size: usize) -> Self {
         Table {
             entries: VecDeque::new(),
@@ -138,6 +144,7 @@ impl Table {
 
     /// Returns the entry at 1-based `index`: 1..=61 addresses the static
     /// table, 62.. the dynamic table (newest first).
+    #[inline]
     pub(crate) fn get(&self, index: usize) -> Option<Header> {
         if index == 0 {
             return None;
@@ -155,6 +162,7 @@ impl Table {
 
     /// Number of dynamic entries.
     #[cfg(test)]
+    #[inline]
     pub(crate) fn dynamic_len(&self) -> usize {
         self.entries.len()
     }
@@ -162,6 +170,7 @@ impl Table {
     /// 1-based index of the exact `(name, value)` entry if present:
     /// the static table is searched first, then the dynamic table
     /// (newest first).
+    #[inline]
     pub(crate) fn find(&self, name: &[u8], value: &[u8]) -> Option<usize> {
         for (i, (n, v)) in STATIC_TABLE.iter().enumerate() {
             if *n == name && *v == value {
@@ -179,6 +188,7 @@ impl Table {
     /// 1-based index of an entry with the given `name` if present: the
     /// static table is searched first, then the dynamic table (newest
     /// first).
+    #[inline]
     pub(crate) fn find_name(&self, name: &[u8]) -> Option<usize> {
         for (i, (n, _)) in STATIC_TABLE.iter().enumerate() {
             if *n == name {
@@ -195,17 +205,20 @@ impl Table {
 
     /// Number of static and dynamic entries combined.
     #[cfg(test)]
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         STATIC_LEN + self.entries.len()
     }
 
     /// Current combined size of the dynamic entries.
     #[cfg(test)]
+    #[inline]
     pub(crate) fn size(&self) -> usize {
         self.size
     }
 
     #[cfg(test)]
+    #[inline]
     pub(crate) fn max_size(&self) -> usize {
         self.max_size
     }
@@ -213,6 +226,7 @@ impl Table {
     /// Changes the maximum table size, evicting entries from the end of
     /// the dynamic table until its size is within the new limit
     /// (RFC 7541 Section 4.3).
+    #[inline]
     pub(crate) fn set_max_size(&mut self, max_size: usize) {
         self.max_size = max_size;
         while self.size > self.max_size {
@@ -226,6 +240,7 @@ impl Table {
     /// Adds an entry to the front of the dynamic table, evicting entries
     /// from the end as needed (RFC 7541 Section 4.4). An entry larger
     /// than the maximum size empties the table and is not added.
+    #[inline]
     pub(crate) fn add(&mut self, header: Header) {
         if header.size() > self.max_size {
             self.entries.clear();
@@ -244,6 +259,7 @@ impl Table {
 }
 
 impl Default for Table {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }

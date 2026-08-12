@@ -42,6 +42,7 @@ impl Encoder {
     /// Creates an encoder whose table allows `max_table_size` octets
     /// (RFC 7541 Section 4.2: 4096 by default). This must match the
     /// peer's initial `SETTINGS_HEADER_TABLE_SIZE`.
+    #[inline]
     pub fn new(max_table_size: usize) -> Self {
         Encoder {
             table: Table::with_max_size(max_table_size),
@@ -52,6 +53,7 @@ impl Encoder {
 
     /// Queues a protocol-level table size update (from SETTINGS) to be
     /// applied and emitted at the start of the next header block.
+    #[inline]
     pub fn queue_size_update(&mut self, size: usize) {
         self.queued_size_update = Some(match self.queued_size_update {
             Some(current) => current.max(size),
@@ -61,12 +63,14 @@ impl Encoder {
 
     /// Controls Huffman-coded string literals. Enabled by default, in
     /// which case a literal is Huffman-coded when that is shorter.
+    #[inline]
     pub fn set_use_huffman(&mut self, use_huffman: bool) {
         self.use_huffman = use_huffman;
     }
 
     /// The current table, for inspection by in-crate tests.
     #[cfg(test)]
+    #[inline]
     pub(crate) fn table(&self) -> &Table {
         &self.table
     }
@@ -78,6 +82,7 @@ impl Encoder {
     /// matches use the indexed representation (Section 6.1). Sensitive
     /// headers ([`NEVER_INDEXED`]) are encoded never-indexed (Section
     /// 6.2.3) and never added to the table.
+    #[inline]
     pub fn encode(&mut self, headers: &[Header], out: &mut Vec<u8>) {
         if let Some(size) = self.queued_size_update.take() {
             self.table.set_max_size(size);
@@ -118,6 +123,7 @@ impl Encoder {
         }
     }
 
+    #[inline]
     fn encode_string(&self, out: &mut Vec<u8>, value: &[u8]) {
         let huffman = self.use_huffman && string::should_huffman(value);
         string::encode(out, value, huffman);
@@ -130,12 +136,14 @@ mod tests {
     use crate::h2::hpack::decode::Decoder;
 
     /// Builds a `Header` list from string tuples.
+    #[inline]
     fn headers(list: &[(&str, &str)]) -> Vec<Header> {
         list.iter()
             .map(|(name, value)| Header::new(name.as_bytes().to_vec(), value.as_bytes().to_vec()))
             .collect()
     }
 
+    #[inline]
     fn encode(encoder: &mut Encoder, list: &[(&str, &str)]) -> Vec<u8> {
         let list = headers(list);
         let mut out = Vec::new();
@@ -143,6 +151,7 @@ mod tests {
         out
     }
 
+    #[inline]
     fn decode(encoder: &Encoder, wire: &[u8]) -> Vec<(String, String)> {
         let mut decoder = Decoder::new(encoder.table().max_size());
         decoder
@@ -158,6 +167,7 @@ mod tests {
             .collect()
     }
 
+    #[inline]
     fn hex_to_bytes(hex: &str) -> Vec<u8> {
         hex.as_bytes()
             .chunks_exact(2)

@@ -142,6 +142,7 @@ pub struct FrameDecoder {
 impl FrameDecoder {
     /// Creates a decoder enforcing the given maximum frame payload
     /// size.
+    #[inline]
     pub fn new(max_frame_size: usize) -> FrameDecoder {
         FrameDecoder {
             buf: BytesMut::new(),
@@ -151,27 +152,32 @@ impl FrameDecoder {
     }
 
     /// Appends bytes to the decode buffer.
+    #[inline]
     pub fn extend(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
     }
 
     /// The maximum frame payload size the peer may send.
+    #[inline]
     pub fn max_frame_size(&self) -> usize {
         self.max_frame_size
     }
 
     /// Adjusts the frame-size limit after SETTINGS_MAX_FRAME_SIZE.
+    #[inline]
     pub fn set_max_frame_size(&mut self, max_frame_size: usize) {
         self.max_frame_size = max_frame_size;
     }
 
     /// The stream with an open field block, if any.
+    #[inline]
     pub fn block_stream(&self) -> Option<u32> {
         self.block_stream
     }
 
     /// Parses the next complete frame. Returns `Ok(None)` when more
     /// bytes are needed.
+    #[inline]
     pub fn next_frame(&mut self) -> Result<Option<Frame>, H2Error> {
         if self.buf.len() < FRAME_HEADER_LEN {
             return Ok(None);
@@ -208,6 +214,7 @@ impl FrameDecoder {
 }
 
 /// Parses one complete frame payload (after the 9-octet header).
+#[inline]
 fn parse_frame(
     typ: u8,
     flags: u8,
@@ -430,6 +437,7 @@ fn parse_frame(
 ///
 /// The padding must be strictly shorter than the payload (RFC 9113
 /// Section 6.1).
+#[inline]
 fn take_padding(body: &mut &[u8], padded: bool) -> Result<usize, H2Error> {
     if !padded {
         return Ok(0);
@@ -449,6 +457,7 @@ fn take_padding(body: &mut &[u8], padded: bool) -> Result<usize, H2Error> {
 
 /// Reads the 5-octet priority fields (Exclusive + Stream Dependency +
 /// Weight).
+#[inline]
 fn read_priority(body: &mut &[u8], stream_id: u32) -> Result<Priority, H2Error> {
     if body.len() < 5 {
         return Err(H2Error::frame_size(
@@ -471,6 +480,7 @@ fn read_priority(body: &mut &[u8], stream_id: u32) -> Result<Priority, H2Error> 
     })
 }
 
+#[inline]
 fn require_stream(stream_id: u32) -> Result<(), H2Error> {
     if stream_id == 0 {
         Err(H2Error::new(
@@ -485,6 +495,7 @@ fn require_stream(stream_id: u32) -> Result<(), H2Error> {
 /// Validates the value of a known SETTINGS parameter (RFC 9113
 /// Section 6.5.2). Unknown identifiers are accepted and ignored by the
 /// caller.
+#[inline]
 fn validate_setting(id: u16, value: u32) -> Result<(), H2Error> {
     match id {
         0x02 => {
@@ -533,6 +544,7 @@ impl FrameWriter {
         FrameWriter { max_frame_size }
     }
 
+    #[inline]
     fn header(out: &mut Vec<u8>, payload_len: usize, typ: u8, flags: u8, stream_id: u32) {
         out.push(((payload_len >> 16) & 0xff) as u8);
         out.push(((payload_len >> 8) & 0xff) as u8);
@@ -545,6 +557,7 @@ impl FrameWriter {
         out.push((stream_id & 0xff) as u8);
     }
 
+    #[inline]
     pub fn write_data(&self, out: &mut Vec<u8>, stream_id: u32, end_stream: bool, data: &[u8]) {
         let flags = if end_stream { FLAG_END_STREAM } else { 0 };
         FrameWriter::header(out, data.len(), DATA_TYPE, flags, stream_id);
@@ -552,6 +565,7 @@ impl FrameWriter {
     }
 
     /// Writes a HEADERS frame (single frame, no field-block splitting).
+    #[inline]
     pub fn write_headers(
         &self,
         out: &mut Vec<u8>,
@@ -583,6 +597,7 @@ impl FrameWriter {
     /// Writes a field block as a HEADERS frame (optionally with
     /// END_STREAM) followed by as many CONTINUATION frames as needed to
     /// stay within the peer's frame-size limit.
+    #[inline]
     pub fn write_field_block(
         &self,
         out: &mut Vec<u8>,
@@ -605,6 +620,7 @@ impl FrameWriter {
         self.write_continuation(out, stream_id, true, rest);
     }
 
+    #[inline]
     pub fn write_priority(&self, out: &mut Vec<u8>, stream_id: u32, priority: Priority) {
         let mut payload = Vec::with_capacity(5);
         let dep =
@@ -615,11 +631,13 @@ impl FrameWriter {
         out.extend_from_slice(&payload);
     }
 
+    #[inline]
     pub fn write_reset(&self, out: &mut Vec<u8>, stream_id: u32, error_code: u32) {
         FrameWriter::header(out, 4, RST_STREAM_TYPE, 0, stream_id);
         out.extend_from_slice(&error_code.to_be_bytes());
     }
 
+    #[inline]
     pub fn write_settings(&self, out: &mut Vec<u8>, settings: &[Setting]) {
         let mut payload = Vec::with_capacity(settings.len() * 6);
         for setting in settings {
@@ -630,10 +648,12 @@ impl FrameWriter {
         out.extend_from_slice(&payload);
     }
 
+    #[inline]
     pub fn write_settings_ack(&self, out: &mut Vec<u8>) {
         FrameWriter::header(out, 0, SETTINGS_TYPE, FLAG_ACK, 0);
     }
 
+    #[inline]
     pub fn write_push_promise(
         &self,
         out: &mut Vec<u8>,
@@ -654,16 +674,19 @@ impl FrameWriter {
         out.extend_from_slice(&payload);
     }
 
+    #[inline]
     pub fn write_ping(&self, out: &mut Vec<u8>, payload: &[u8; 8]) {
         FrameWriter::header(out, 8, PING_TYPE, 0, 0);
         out.extend_from_slice(payload);
     }
 
+    #[inline]
     pub fn write_ping_ack(&self, out: &mut Vec<u8>, payload: &[u8; 8]) {
         FrameWriter::header(out, 8, PING_TYPE, FLAG_ACK, 0);
         out.extend_from_slice(payload);
     }
 
+    #[inline]
     pub fn write_goaway(
         &self,
         out: &mut Vec<u8>,
@@ -679,11 +702,13 @@ impl FrameWriter {
         out.extend_from_slice(&payload);
     }
 
+    #[inline]
     pub fn write_window_update(&self, out: &mut Vec<u8>, stream_id: u32, increment: u32) {
         FrameWriter::header(out, 4, WINDOW_UPDATE_TYPE, 0, stream_id);
         out.extend_from_slice(&(increment & 0x7fff_ffff).to_be_bytes());
     }
 
+    #[inline]
     pub fn write_continuation(
         &self,
         out: &mut Vec<u8>,
@@ -701,6 +726,7 @@ impl FrameWriter {
 mod tests {
     use super::*;
 
+    #[inline]
     fn hex_to_bytes(hex: impl AsRef<str>) -> Vec<u8> {
         hex.as_ref()
             .as_bytes()
@@ -713,6 +739,7 @@ mod tests {
             .collect()
     }
 
+    #[inline]
     fn decode_all(wire: &[u8]) -> Result<Vec<Frame>, H2Error> {
         let mut decoder = FrameDecoder::new(DEFAULT_MAX_FRAME_SIZE);
         decoder.extend(wire);
@@ -723,6 +750,7 @@ mod tests {
         Ok(frames)
     }
 
+    #[inline]
     fn decode_one(wire: &[u8]) -> Result<Frame, H2Error> {
         let mut frames = decode_all(wire)?;
         assert_eq!(frames.len(), 1);

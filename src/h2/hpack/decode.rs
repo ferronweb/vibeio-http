@@ -38,6 +38,7 @@ pub struct Decoder {
 impl Decoder {
     /// Creates a decoder with the given protocol maximum table size
     /// (RFC 7541 Section 4.2: 4096 by default).
+    #[inline]
     pub fn new(max_table_size: usize) -> Self {
         Decoder {
             table: Table::with_max_size(max_table_size),
@@ -49,6 +50,7 @@ impl Decoder {
 
     /// Queues a protocol-level table size update (from SETTINGS) to be
     /// applied at the start of the next header block.
+    #[inline]
     pub fn queue_size_update(&mut self, size: usize) {
         self.queued_size_update = Some(match self.queued_size_update {
             Some(current) => current.max(size),
@@ -58,17 +60,20 @@ impl Decoder {
 
     /// Sets the maximum size of a decoded header list. Headers blocks
     /// whose cumulative name+value octets exceed this are rejected.
+    #[inline]
     pub fn set_max_header_list_size(&mut self, size: usize) {
         self.max_header_list_size = size;
     }
 
     #[cfg(test)]
+    #[inline]
     pub(crate) fn table(&self) -> &Table {
         &self.table
     }
 
     /// Decodes a complete header block. The dynamic table is updated
     /// across calls.
+    #[inline]
     pub fn decode(&mut self, buf: &[u8]) -> Result<Vec<Header>, HpackError> {
         if let Some(size) = self.queued_size_update.take() {
             self.max_table_size = size;
@@ -153,6 +158,7 @@ impl Decoder {
 }
 
 impl Default for Decoder {
+    #[inline]
     fn default() -> Self {
         Decoder::new(4096)
     }
@@ -168,6 +174,7 @@ enum Representation {
 }
 
 impl Representation {
+    #[inline]
     fn load(byte: u8) -> Result<Representation, HpackError> {
         if byte & INDEXED == INDEXED {
             Ok(Representation::Indexed)
@@ -189,6 +196,7 @@ impl Representation {
 mod tests {
     use super::*;
 
+    #[inline]
     fn decode_one(wire: &[u8]) -> Vec<(String, String)> {
         let mut decoder = Decoder::new(4096);
         decoder

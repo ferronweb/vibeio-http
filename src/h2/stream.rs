@@ -33,7 +33,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_util::FutureExt;
 use http::{HeaderMap, Method, Response, StatusCode, Uri};
 use http_body::{Body, Frame};
 use pin_project_lite::pin_project;
@@ -132,6 +131,7 @@ pub(crate) struct StreamEntry {
 }
 
 impl StreamEntry {
+    #[inline]
     pub(crate) fn new(
         body_tx: kanal::AsyncSender<BodyMsg>,
         reset_tx: kanal::AsyncSender<u32>,
@@ -162,21 +162,25 @@ impl StreamEntry {
 
     /// Extends the in-flight field block with one fragment (HEADERS or
     /// CONTINUATION payload).
+    #[inline]
     pub(crate) fn extend_block(&mut self, block: &[u8]) {
         self.field_block.extend_from_slice(block);
     }
 
     /// Takes and clears the accumulated field block.
+    #[inline]
     pub(crate) fn take_block(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.field_block)
     }
 
     /// Forwards a request body message to the task; `Ok(false)` when the
     /// task has gone away.
+    #[inline]
     pub(crate) async fn send_body(&mut self, msg: BodyMsg) -> bool {
         self.body_tx.send(msg).await.is_ok()
     }
 
+    #[inline]
     pub(crate) fn send_reset(&self, code: u32) {
         let _ = self.reset_tx.try_send(code);
     }
@@ -195,6 +199,7 @@ pub(crate) struct H2Body {
 }
 
 impl H2Body {
+    #[inline]
     pub(crate) fn new(
         rx: kanal::AsyncReceiver<BodyMsg>,
         send_continue_body: Option<Arc<AtomicBool>>,
@@ -272,6 +277,7 @@ const CONNECTION_SPECIFIC: &[&[u8]] = &[
     b"upgrade",
 ];
 
+#[inline]
 pub(crate) fn is_connection_specific(name: &[u8]) -> bool {
     CONNECTION_SPECIFIC
         .iter()
@@ -286,6 +292,7 @@ pub(crate) fn is_connection_specific(name: &[u8]) -> bool {
 /// and unique request pseudo-headers (Section 8.1.2.3),
 /// connection-specific header fields (Section 8.1.2.2) and
 /// `content-length` syntax (Section 8.1.2.6).
+#[inline]
 pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, MalformedRequest> {
     let mut method: Option<Bytes> = None;
     let mut scheme: Option<Bytes> = None;
@@ -442,6 +449,7 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
 
 /// The TE field is only legal with the single value "trailers"
 /// (RFC 9113 Section 8.1.2.2).
+#[inline]
 pub(crate) fn te_is_trailers(value: &[u8]) -> bool {
     std::str::from_utf8(value)
         .ok()
@@ -450,6 +458,7 @@ pub(crate) fn te_is_trailers(value: &[u8]) -> bool {
 
 /// Multiple content-length fields must be identical (RFC 9110
 /// Section 8.6); any non-digit value is malformed.
+#[inline]
 fn parse_content_lengths(values: &[u64]) -> Result<Option<u64>, MalformedRequest> {
     match values {
         [] => Ok(None),
@@ -466,6 +475,7 @@ fn parse_content_lengths(values: &[u64]) -> Result<Option<u64>, MalformedRequest
 
 /// Validates a trailer field block (RFC 9113 Section 8.1.2.1):
 /// pseudo-header fields are not allowed in trailers.
+#[inline]
 pub(crate) fn parse_trailers(headers: &[Header]) -> Result<HeaderMap, MalformedRequest> {
     let mut trailers = HeaderMap::new();
     for header in headers {
@@ -488,6 +498,7 @@ pub(crate) fn parse_trailers(headers: &[Header]) -> Result<HeaderMap, MalformedR
 /// bare digits is malformed.
 ///
 /// Callers fold the result into [`parse_content_lengths`].
+#[inline]
 pub(crate) fn parse_content_length(value: &[u8]) -> Result<u64, MalformedRequest> {
     let value = value
         .iter()
@@ -575,6 +586,7 @@ pin_project! {
 
 impl<Fut, ResB> StreamDriver<Fut, ResB> {
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     pub(crate) fn new(
         response_fut: Fut,
         reset_rx: kanal::AsyncReceiver<u32>,
@@ -614,6 +626,7 @@ where
 {
     type Output = ();
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
         loop {
@@ -721,6 +734,7 @@ where
     /// `100 Continue` trigger and early hints. Returns only with the
     /// outbound channel drained.
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     fn poll_service(
         msg_tx: &mut kanal::AsyncSender<StreamMsg>,
         wake_tx: &kanal::AsyncSender<()>,
@@ -853,6 +867,7 @@ where
     /// room. `Pending` means the sender is parked (by `poll_ready` it
     /// will be woken when the connection task drains); `Ready(())`
     /// means the message was delivered or the connection is gone.
+    #[inline]
     fn send(
         msg_tx: &mut kanal::AsyncSender<StreamMsg>,
         mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
@@ -912,6 +927,7 @@ where
     /// Pipes the response body to the connection: DATA frames, then an
     /// END_STREAM (empty DATA when the body yields nothing more, or a
     /// HEADERS block carrying trailers).
+    #[inline]
     fn poll_body(
         msg_tx: &mut kanal::AsyncSender<StreamMsg>,
         mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
@@ -1044,6 +1060,7 @@ mod tests {
         parse_request(&headers).expect("request should parse")
     }
 
+    #[inline]
     fn pair_header(pair: &(&str, &str)) -> Header {
         Header::new(pair.0.to_string(), pair.1.to_string())
     }

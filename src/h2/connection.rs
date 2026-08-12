@@ -68,6 +68,7 @@ pub struct ConnectionOptions {
 }
 
 impl Default for ConnectionOptions {
+    #[inline]
     fn default() -> Self {
         ConnectionOptions {
             send_continue_response: false,
@@ -97,6 +98,7 @@ pub struct PeerSettings {
 }
 
 impl Default for PeerSettings {
+    #[inline]
     fn default() -> Self {
         PeerSettings {
             header_table_size: 4096,
@@ -171,6 +173,7 @@ where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     /// Creates a connection over `io`.
+    #[inline]
     pub fn new(io: Io, preface_timeout: Option<Duration>) -> Connection<Io> {
         Connection {
             io,
@@ -200,6 +203,7 @@ where
     /// when cancelled: the connection sends GOAWAY, stops opening new
     /// streams, drains in-flight responses, then closes (RFC 9113
     /// Section 6.8).
+    #[inline]
     pub fn with_shutdown(mut self, token: CancellationToken) -> Self {
         self.shutdown = Some(token);
         self
@@ -212,6 +216,7 @@ where
     /// Equivalent to [`Connection::handle`] with a handler that never
     /// completes; kept for tests and for callers that only want the
     /// connection-level behavior.
+    #[inline]
     pub async fn drive(self) -> std::io::Result<()> {
         self.handle(
             |_| std::future::pending::<Result<Response<Incoming>, std::io::Error>>(),
@@ -227,6 +232,7 @@ where
     /// (a clone-free sequential borrow: the loop owns the closure for
     /// the connection's lifetime). Responses are framed onto the wire
     /// by this task as the stream tasks emit them.
+    #[inline]
     pub async fn handle<F, Fut, ResB, ResBE, ResE>(
         mut self,
         mut request_fn: F,
@@ -282,7 +288,7 @@ where
         );
         self.flush().await?;
 
-        let (wake_tx, mut wake_rx) = kanal::bounded_async(1);
+        let (wake_tx, wake_rx) = kanal::bounded_async(1);
         self.wake_tx = Some(wake_tx);
 
         let mut buf = [0u8; 8192];
@@ -356,6 +362,7 @@ where
     /// answering a peer that never spoke is meaningless), `Ok(Some(
     /// true))` on a match, and `Ok(Some(false))` when the peer sent
     /// something else (the caller answers with GOAWAY).
+    #[inline]
     async fn read_preface(&mut self) -> std::io::Result<Option<bool>> {
         let mut magic = [0u8; CLIENT_PREFACE.len()];
         match self.preface_timeout {
@@ -385,6 +392,7 @@ where
     /// Decodes and handles every frame currently buffered. Returns
     /// `Ok(true)` when the connection should end (peer GOAWAY or an
     /// error we answered with GOAWAY).
+    #[inline]
     async fn process_frames<F, Fut, ResB, ResBE, ResE>(
         &mut self,
         request_fn: &mut F,
@@ -485,6 +493,7 @@ where
 
     /// A HEADERS frame: the start of a request field block, a trailer
     /// section, or a protocol violation.
+    #[inline]
     fn handle_headers_frame(
         &mut self,
         stream_id: u32,
@@ -520,6 +529,7 @@ where
     }
 
     /// A CONTINUATION fragment of the open field block.
+    #[inline]
     fn handle_continuation(&mut self, stream_id: u32, end_headers: bool, block: &[u8]) {
         let Some(entry) = self.streams.get_mut(&stream_id) else {
             // The codec already rejects stray CONTINUATION frames;
@@ -533,6 +543,7 @@ where
 
     /// A HEADERS block arrived on a stream with no entry: validate and
     /// open it (RFC 9113 Sections 5.1.1 and 6.2).
+    #[inline]
     fn open_request_stream(
         &mut self,
         stream_id: u32,
@@ -577,6 +588,7 @@ where
     }
 
     /// Removes the completed-block marker for a stream, if any.
+    #[inline]
     fn take_complete_block(&mut self) -> Option<u32> {
         let id = self
             .streams
@@ -590,6 +602,7 @@ where
 
     /// The field block is complete: decode it and, depending on the
     /// stream's phase, build and dispatch the request or the trailers.
+    #[inline]
     async fn finalize_field_block<F, Fut, ResB, ResBE, ResE>(
         &mut self,
         stream_id: u32,
@@ -673,6 +686,7 @@ where
     /// Spawns the stream task for a parsed request (RFC 9113
     /// Section 8.1.1): builds the `Request<Incoming>`, boxes the
     /// handler response, and hands the channels to a [`StreamDriver`].
+    #[inline]
     fn spawn_request<F, Fut, ResB, ResBE, ResE>(
         &mut self,
         stream_id: u32,
@@ -746,6 +760,7 @@ where
     /// frames for it can be told apart from idle-stream frames
     /// (RFC 9113 Section 5.1). Bounded to avoid unbounded growth on
     /// hostile input.
+    #[inline]
     fn mark_closed(&mut self, stream_id: u32) {
         if self.closed_streams.len() >= 4096 {
             self.closed_streams.clear();
@@ -755,6 +770,7 @@ where
 
     /// A DATA frame: forward to the task and restore flow-control
     /// windows (RFC 9113 Sections 6.1 and 6.9.2).
+    #[inline]
     async fn handle_data_frame(&mut self, stream_id: u32, end_stream: bool, data: Bytes) {
         self.writer
             .write_window_update(&mut self.out, stream_id, data.len() as u32);
@@ -808,6 +824,7 @@ where
 
     /// The request body ended: close the request side and enforce the
     /// declared `content-length` (RFC 9113 Section 8.1.2.6).
+    #[inline]
     async fn end_request_body(&mut self, stream_id: u32) {
         let (mismatch, gone) = {
             let entry = match self.streams.get_mut(&stream_id) {
@@ -834,6 +851,7 @@ where
     }
 
     /// A RST_STREAM frame from the peer.
+    #[inline]
     fn handle_reset_frame(&mut self, stream_id: u32, error_code: u32) {
         // RFC 9113 Section 5.1: RST_STREAM on a stream that never
         // existed is a connection error.
@@ -851,6 +869,7 @@ where
             entry.send_reset(error_code);
         }
     }
+    #[inline]
     fn apply_peer_settings(&mut self, settings: &[super::codec::Setting]) {
         for setting in settings {
             match setting.id {
@@ -899,6 +918,7 @@ where
     }
 
     /// Queues a GOAWAY frame; the connection closes after it flushes.
+    #[inline]
     fn goaway(&mut self, reason: Reason, debug: &[u8]) {
         self.closing = true;
         self.writer
@@ -909,6 +929,7 @@ where
     /// last stream id we will process and stops accepting new streams.
     /// The drain phase (finish_graceful_shutdown) closes the connection
     /// once in-flight streams finish or the drain window elapses.
+    #[inline]
     fn begin_graceful_shutdown(&mut self) {
         if self.graceful || self.closing {
             return;
@@ -926,6 +947,7 @@ where
     /// Sends the final GOAWAY that closes the connection. Called when the
     /// graceful drain completes (all streams finished) or its window
     /// elapses; the caller flushes.
+    #[inline]
     fn finish_graceful_shutdown(&mut self) {
         // An error already queued a GOAWAY; don't overwrite it.
         if self.closing {
@@ -942,6 +964,7 @@ where
     /// Queues a RST_STREAM for a stream error and forgets the stream.
     /// The task is severed by dropping the entry's channels, so it
     /// ends on its next poll.
+    #[inline]
     fn stream_error(&mut self, stream_id: u32, reason: Reason) {
         self.writer
             .write_reset(&mut self.out, stream_id, reason.code());
@@ -951,6 +974,7 @@ where
 
     /// A WINDOW_UPDATE frame: grow the sender window, checking for the
     /// 2^31-1 overflow (RFC 9113 Sections 6.9 and 6.9.1).
+    #[inline]
     fn handle_window_update(&mut self, stream_id: u32, increment: u32) {
         if increment == 0 {
             return;
@@ -984,6 +1008,7 @@ where
     /// Sends queued DATA chunks for one stream, respecting the flow
     /// control windows and the peer's max frame size. Returns when the
     /// window is exhausted or the queue is empty.
+    #[inline]
     fn pump_stream_data(&mut self, stream_id: u32) {
         loop {
             // Decide how much (if any) of the front chunk to send.
@@ -1067,6 +1092,7 @@ where
 
     /// Attempts to drain every stream's queued DATA after the flow
     /// control windows opened up.
+    #[inline]
     fn drain_pending_data(&mut self) {
         let ids: Vec<u32> = self.streams.keys().copied().collect();
         for id in ids {
@@ -1076,6 +1102,7 @@ where
 
     /// Drains every stream task's outbound channel, turning messages
     /// into frames. Called after each read and whenever a wake fires.
+    #[inline]
     fn drain_outbound(&mut self) {
         let pending: Vec<(u32, Vec<StreamMsg>)> = self
             .streams
@@ -1100,6 +1127,7 @@ where
     }
 
     /// One response-side message from a stream task.
+    #[inline]
     fn handle_stream_msg(&mut self, stream_id: u32, msg: StreamMsg) {
         match msg {
             StreamMsg::Informational { parts, .. } => {
@@ -1190,6 +1218,7 @@ where
     /// Encodes a response (or interim) field block: a `:status` pseudo
     /// header followed by the response headers, skipping the
     /// connection-specific fields the codec would reject anyway.
+    #[inline]
     fn encode_field_block(
         &mut self,
         stream_id: u32,
@@ -1221,6 +1250,7 @@ where
             .write_field_block(&mut self.out, stream_id, end_stream, &block);
     }
 
+    #[inline]
     async fn flush(&mut self) -> std::io::Result<()> {
         if !self.out.is_empty() {
             tokio::io::AsyncWriteExt::write_all(&mut self.io, &self.out).await?;
@@ -1237,6 +1267,7 @@ struct ConnBody {
 }
 
 impl ConnBody {
+    #[inline]
     fn new<ResB, ResBE>(body: ResB) -> Self
     where
         ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
@@ -1252,6 +1283,7 @@ impl Body for ConnBody {
     type Data = Bytes;
     type Error = std::io::Error;
 
+    #[inline]
     fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -1259,6 +1291,7 @@ impl Body for ConnBody {
         self.inner.as_mut().poll_frame(cx)
     }
 
+    #[inline]
     fn size_hint(&self) -> http_body::SizeHint {
         self.inner.size_hint()
     }
@@ -1268,10 +1301,12 @@ impl Body for ConnBody {
 /// `Send + Sync` (the native connection layer only needs the message, not the
 /// source; this keeps the public trait free of `Send`/`Sync` so it works on
 /// runtimes such as `vibeio` that do not demand them).
+#[inline]
 fn e2io<E: std::fmt::Display>(e: E) -> std::io::Error {
     #[derive(Debug)]
     struct Msg(String);
     impl std::fmt::Display for Msg {
+        #[inline]
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(&self.0)
         }
@@ -1292,6 +1327,7 @@ where
     type Data = Bytes;
     type Error = std::io::Error;
 
+    #[inline]
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -1311,6 +1347,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> http_body::SizeHint {
         match &self.0 {
             Some(body) => body.size_hint(),
@@ -1341,6 +1378,7 @@ mod tests {
     /// The preface timeout needs the vibeio timer, which does not run
     /// under a plain tokio test runtime (same pattern as the h1
     /// slowloris test), so a vibeio runtime is built per call.
+    #[inline]
     fn run_connection(
         preface: &[u8],
         frames: &[u8],
@@ -1402,6 +1440,7 @@ mod tests {
             })
     }
 
+    #[inline]
     fn decode_frames(wire: &[u8]) -> Vec<Frame> {
         let mut decoder = FrameDecoder::new(DEFAULT_MAX_FRAME_SIZE);
         decoder.extend(wire);
@@ -1412,6 +1451,7 @@ mod tests {
         frames
     }
 
+    #[inline]
     fn client_script(writer: impl FnOnce(&mut FrameWriter, &mut Vec<u8>)) -> Vec<u8> {
         let mut script = Vec::new();
         FrameWriter::new(DEFAULT_MAX_FRAME_SIZE).write_settings(&mut script, &[]);
