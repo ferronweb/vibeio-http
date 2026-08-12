@@ -33,11 +33,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_channel::mpsc as channel;
+use futures_util::FutureExt;
 use http::{HeaderMap, Method, Response, StatusCode, Uri};
 use http_body::{Body, Frame};
 use pin_project_lite::pin_project;
-use tokio::sync::mpsc;
 
 use super::hpack::Header;
 use crate::early_hints::EarlyHintsReceiver;
@@ -85,20 +84,20 @@ pub(crate) enum StreamMsg {
 /// Per-stream state kept by the connection task (RFC 9113 Section 5.1).
 pub(crate) struct StreamEntry {
     /// Request body delivery (receiver lives in the task's [`H2Body`]).
-    pub(crate) body_tx: mpsc::Sender<BodyMsg>,
+    pub(crate) body_tx: kanal::AsyncSender<BodyMsg>,
     /// Peer RST_STREAM notifications (receiver lives in the task).
-    pub(crate) reset_tx: mpsc::Sender<u32>,
+    pub(crate) reset_tx: kanal::AsyncSender<u32>,
     /// Outbound response messages (sender lives in the task).
-    pub(crate) msg_rx: channel::Receiver<StreamMsg>,
+    pub(crate) msg_rx: kanal::AsyncReceiver<StreamMsg>,
     /// Driver's sender clone; moved out when the task spawns.
-    pub(crate) msg_tx: Option<channel::Sender<StreamMsg>>,
+    pub(crate) msg_tx: Option<kanal::AsyncSender<StreamMsg>>,
     /// Receiver half for the request body; moved out when the task
     /// spawns (the H2Body hands it to the user).
-    pub(crate) body_rx: Option<mpsc::Receiver<BodyMsg>>,
+    pub(crate) body_rx: Option<kanal::AsyncReceiver<BodyMsg>>,
     /// Receiver half for peer resets; moved out when the task spawns.
-    pub(crate) reset_rx: Option<mpsc::Receiver<u32>>,
+    pub(crate) reset_rx: Option<kanal::AsyncReceiver<u32>>,
     /// Wakes the drive loop when the task's channel is full.
-    pub(crate) wake_tx: Option<mpsc::Sender<()>>,
+    pub(crate) wake_tx: Option<kanal::AsyncSender<()>>,
     /// Field block fragments between HEADERS and END_HEADERS.
     pub(crate) field_block: Vec<u8>,
     /// The END_STREAM flag of the frame that opened the field block.
@@ -134,9 +133,9 @@ pub(crate) struct StreamEntry {
 
 impl StreamEntry {
     pub(crate) fn new(
-        body_tx: mpsc::Sender<BodyMsg>,
-        reset_tx: mpsc::Sender<u32>,
-        msg_rx: channel::Receiver<StreamMsg>,
+        body_tx: kanal::AsyncSender<BodyMsg>,
+        reset_tx: kanal::AsyncSender<u32>,
+        msg_rx: kanal::AsyncReceiver<StreamMsg>,
     ) -> Self {
         StreamEntry {
             body_tx,
@@ -190,14 +189,14 @@ impl StreamEntry {
 /// the driver can emit `100 Continue` on first demand (RFC 9113
 /// Section 8.1.1).
 pub(crate) struct H2Body {
-    inner: Pin<Box<mpsc::Receiver<BodyMsg>>>,
+    inner: Pin<Box<kanal::AsyncReceiver<BodyMsg>>>,
     send_continue_body: Option<Arc<AtomicBool>>,
     ended: bool,
 }
 
 impl H2Body {
     pub(crate) fn new(
-        rx: mpsc::Receiver<BodyMsg>,
+        rx: kanal::AsyncReceiver<BodyMsg>,
         send_continue_body: Option<Arc<AtomicBool>>,
     ) -> Self {
         H2Body {
@@ -222,15 +221,15 @@ impl Body for H2Body {
             return Poll::Ready(None);
         }
         match std::pin::pin!(this.inner.recv()).poll(cx) {
-            Poll::Ready(Some(BodyMsg::Data(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
-            Poll::Ready(Some(BodyMsg::Trailers(trailers))) => {
+            Poll::Ready(Ok(BodyMsg::Data(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
+            Poll::Ready(Ok(BodyMsg::Trailers(trailers))) => {
                 Poll::Ready(Some(Ok(Frame::trailers(trailers))))
             }
-            Poll::Ready(Some(BodyMsg::EndStream)) => {
+            Poll::Ready(Ok(BodyMsg::EndStream)) => {
                 this.ended = true;
                 Poll::Ready(None)
             }
-            Poll::Ready(None) => {
+            Poll::Ready(Err(_)) => {
                 // The connection dropped the stream (reset, closed,
                 // connection gone).
                 this.ended = true;
@@ -535,12 +534,14 @@ pin_project! {
     /// every exit path it first enqueues [`StreamMsg::Closed`], so the
     /// connection can drop its per-stream state.
     pub(crate) struct StreamDriver<Fut, ResB> {
-        msg_tx: channel::Sender<StreamMsg>,
-        reset_rx: mpsc::Receiver<u32>,
+        msg_tx: kanal::AsyncSender<StreamMsg>,
+        reset_rx: kanal::AsyncReceiver<u32>,
         // Pokes the connection's drive loop when a message lands in
         // the channel, so responses are delivered even while the peer
         // idles.
-        wake_tx: mpsc::Sender<()>,
+        wake_tx: kanal::AsyncSender<()>,
+        #[pin]
+        msg_tx_fut: Option<kanal::SendFuture<'static, StreamMsg>>,
         queue: VecDeque<StreamMsg>,
         // Set once the terminal StreamMsg::Closed lands in the queue;
         // the task only drains from then on.
@@ -576,9 +577,9 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         response_fut: Fut,
-        reset_rx: mpsc::Receiver<u32>,
-        msg_tx: channel::Sender<StreamMsg>,
-        wake_tx: mpsc::Sender<()>,
+        reset_rx: kanal::AsyncReceiver<u32>,
+        msg_tx: kanal::AsyncSender<StreamMsg>,
+        wake_tx: kanal::AsyncSender<()>,
         early_hints_rx: EarlyHintsReceiver,
         send_continue: bool,
         send_continue_body: Option<Arc<AtomicBool>>,
@@ -587,6 +588,7 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
             msg_tx,
             reset_rx,
             wake_tx,
+            msg_tx_fut: None,
             queue: VecDeque::with_capacity(8),
             done: false,
             state: StreamDriverState::Service {
@@ -615,24 +617,39 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
         loop {
+            if let Some(msg_tx_fut) = this.msg_tx_fut.as_mut().as_pin_mut() {
+                match msg_tx_fut.poll(cx) {
+                    Poll::Ready(Ok(_)) => {
+                        // SAFETY: Pin is re-borrowed here
+                        let uckm = unsafe { this.msg_tx_fut.as_mut().get_unchecked_mut() };
+                        uckm.take();
+                        let _ = this.wake_tx.try_send(());
+                    }
+                    Poll::Ready(Err(_)) => {
+                        // SAFETY: Pin is re-borrowed here
+                        let uckm = unsafe { this.msg_tx_fut.as_mut().get_unchecked_mut() };
+                        uckm.take();
+                        return Poll::Ready(());
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
             // Drain the outbound queue first: the states are only
             // driven again once the queue is empty, so a completed
             // response or body frame is never re-read.
-            while this.queue.front().is_some() {
-                // poll_ready parks this sender when the channel is
-                // full; the connection task unparks it as it drains
-                // messages.
-                match this.msg_tx.poll_ready(cx) {
-                    Poll::Ready(Ok(())) => {
-                        let msg = this.queue.pop_front().expect("front");
-                        if this.msg_tx.start_send(msg).is_err() {
-                            return Poll::Ready(());
-                        }
-                        let _ = this.wake_tx.try_send(());
-                    }
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(_)) => return Poll::Ready(()),
-                }
+            if let Some(msg) = this.queue.pop_front() {
+                let msg_tx_fut = this.msg_tx.send(msg);
+                // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+                let msg_tx_fut = unsafe {
+                    std::mem::transmute::<
+                        kanal::SendFuture<'_, StreamMsg>,
+                        kanal::SendFuture<'static, StreamMsg>,
+                    >(msg_tx_fut)
+                };
+                // SAFETY: Pin is re-borrowed here
+                let uckm = unsafe { this.msg_tx_fut.as_mut().get_unchecked_mut() };
+                *uckm = Some(msg_tx_fut);
+                continue;
             }
             if *this.done {
                 return Poll::Ready(());
@@ -651,6 +668,7 @@ where
                     match Self::poll_service(
                         this.msg_tx,
                         this.wake_tx,
+                        this.msg_tx_fut.as_mut(),
                         this.reset_rx,
                         response_fut,
                         early_hints_rx,
@@ -671,7 +689,13 @@ where
                     }
                 }
                 StreamDriverProj::Body { body } => {
-                    match Self::poll_body(this.msg_tx, this.reset_rx, body, cx) {
+                    match Self::poll_body(
+                        this.msg_tx,
+                        this.msg_tx_fut.as_mut(),
+                        this.reset_rx,
+                        body,
+                        cx,
+                    ) {
                         Poll::Ready(()) => {}
                         Poll::Pending => return Poll::Pending,
                     }
@@ -698,9 +722,10 @@ where
     /// outbound channel drained.
     #[allow(clippy::too_many_arguments)]
     fn poll_service(
-        msg_tx: &mut channel::Sender<StreamMsg>,
-        wake_tx: &mpsc::Sender<()>,
-        reset_rx: &mut mpsc::Receiver<u32>,
+        msg_tx: &mut kanal::AsyncSender<StreamMsg>,
+        wake_tx: &kanal::AsyncSender<()>,
+        mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
+        reset_rx: &mut kanal::AsyncReceiver<u32>,
         mut response_fut: Pin<&mut Fut>,
         mut early_hints_rx: Pin<&mut EarlyHintsReceiver>,
         response_done: &mut bool,
@@ -730,7 +755,14 @@ where
                         let mut interim = Response::new(());
                         *interim.status_mut() = StatusCode::CONTINUE;
                         let (parts, _) = interim.into_parts();
-                        match Self::send(msg_tx, wake_tx, StreamMsg::Informational { parts }, cx) {
+
+                        match Self::send(
+                            msg_tx,
+                            msg_tx_fut.as_mut(),
+                            wake_tx,
+                            StreamMsg::Informational { parts },
+                            cx,
+                        ) {
                             Poll::Ready(()) => {}
                             Poll::Pending => return ServicePoll::Pending,
                         }
@@ -739,8 +771,10 @@ where
                 }
                 let response_is_end_stream = response.body().is_end_stream();
                 let (parts, response_body) = response.into_parts();
+
                 match Self::send(
                     msg_tx,
+                    msg_tx_fut.as_mut(),
                     wake_tx,
                     StreamMsg::Headers {
                         parts,
@@ -755,8 +789,8 @@ where
                 *response_done = true;
                 continue;
             }
-            match reset_rx.poll_recv(cx) {
-                Poll::Ready(Some(_)) | Poll::Ready(None) => return ServicePoll::Done,
+            match std::pin::pin!(reset_rx.recv()).poll(cx) {
+                Poll::Ready(_) => return ServicePoll::Done,
                 Poll::Pending => {}
             }
             if *send_continue
@@ -768,7 +802,13 @@ where
                 let mut interim = Response::new(());
                 *interim.status_mut() = StatusCode::CONTINUE;
                 let (parts, _) = interim.into_parts();
-                match Self::send(msg_tx, wake_tx, StreamMsg::Informational { parts }, cx) {
+                match Self::send(
+                    msg_tx,
+                    msg_tx_fut.as_mut(),
+                    wake_tx,
+                    StreamMsg::Informational { parts },
+                    cx,
+                ) {
                     Poll::Ready(()) => {}
                     Poll::Pending => return ServicePoll::Pending,
                 }
@@ -782,7 +822,13 @@ where
                         *interim.status_mut() = StatusCode::EARLY_HINTS;
                         *interim.headers_mut() = headers;
                         let (parts, _) = interim.into_parts();
-                        match Self::send(msg_tx, wake_tx, StreamMsg::Informational { parts }, cx) {
+                        match Self::send(
+                            msg_tx,
+                            msg_tx_fut.as_mut(),
+                            wake_tx,
+                            StreamMsg::Informational { parts },
+                            cx,
+                        ) {
                             Poll::Ready(()) => {}
                             Poll::Pending => return ServicePoll::Pending,
                         }
@@ -808,64 +854,135 @@ where
     /// will be woken when the connection task drains); `Ready(())`
     /// means the message was delivered or the connection is gone.
     fn send(
-        msg_tx: &mut channel::Sender<StreamMsg>,
-        wake_tx: &mpsc::Sender<()>,
+        msg_tx: &mut kanal::AsyncSender<StreamMsg>,
+        mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
+        wake_tx: &kanal::AsyncSender<()>,
         msg: StreamMsg,
         cx: &mut Context<'_>,
     ) -> Poll<()> {
-        match msg_tx.poll_ready(cx) {
-            // `Ready(())` on a closed channel means the connection is
-            // gone; the task ends the same way as after a delivery.
-            Poll::Ready(Ok(())) => {}
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(_)) => {}
+        if let Some(msg_tx_fut2) = msg_tx_fut.as_mut().as_pin_mut() {
+            match msg_tx_fut2.poll(cx) {
+                Poll::Ready(Ok(_)) => {
+                    // SAFETY: Pin is re-borrowed here
+                    let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                    uckm.take();
+                    let _ = wake_tx.try_send(());
+                }
+                Poll::Ready(Err(_)) => {
+                    return Poll::Ready(());
+                }
+                Poll::Pending => return Poll::Pending,
+            }
         }
-        if msg_tx.start_send(msg).is_ok() {
-            let _ = wake_tx.try_send(());
+
+        let msg_tx_fut2 = msg_tx.send(msg);
+        // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+        let msg_tx_fut2 = unsafe {
+            std::mem::transmute::<
+                kanal::SendFuture<'_, StreamMsg>,
+                kanal::SendFuture<'static, StreamMsg>,
+            >(msg_tx_fut2)
+        };
+        // SAFETY: Pin is re-borrowed here
+        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+        *uckm = Some(msg_tx_fut2);
+
+        if let Some(msg_tx_fut2) = msg_tx_fut.as_mut().as_pin_mut() {
+            match msg_tx_fut2.poll(cx) {
+                Poll::Ready(Ok(_)) => {
+                    // SAFETY: Pin is re-borrowed here
+                    let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                    uckm.take();
+                    let _ = wake_tx.try_send(());
+                    return Poll::Ready(());
+                }
+                Poll::Ready(Err(_)) => {
+                    // SAFETY: Pin is re-borrowed here
+                    let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                    uckm.take();
+                    return Poll::Ready(());
+                }
+                Poll::Pending => return Poll::Pending,
+            }
         }
-        Poll::Ready(())
+
+        Poll::Pending
     }
 
     /// Pipes the response body to the connection: DATA frames, then an
     /// END_STREAM (empty DATA when the body yields nothing more, or a
     /// HEADERS block carrying trailers).
     fn poll_body(
-        msg_tx: &mut channel::Sender<StreamMsg>,
-        reset_rx: &mut mpsc::Receiver<u32>,
+        msg_tx: &mut kanal::AsyncSender<StreamMsg>,
+        mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
+        reset_rx: &mut kanal::AsyncReceiver<u32>,
         mut body: Pin<&mut ResB>,
         cx: &mut Context<'_>,
     ) -> Poll<()> {
+        let mut end = false;
         loop {
-            match reset_rx.poll_recv(cx) {
-                Poll::Ready(Some(_)) | Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Pending => {}
+            if let Some(msg_tx_fut2) = msg_tx_fut.as_mut().as_pin_mut() {
+                match msg_tx_fut2.poll(cx) {
+                    Poll::Ready(Ok(_)) => {
+                        // SAFETY: Pin is re-borrowed here
+                        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                        uckm.take();
+                        if end {
+                            return Poll::Ready(());
+                        }
+                    }
+                    Poll::Ready(Err(_)) => {
+                        // SAFETY: Pin is re-borrowed here
+                        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                        uckm.take();
+                        return Poll::Ready(());
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
             }
-            // poll_ready parks this sender when the channel is full;
-            // the connection task unparks it as it drains messages.
-            match msg_tx.poll_ready(cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(_)) => return Poll::Ready(()),
+
+            if body.is_end_stream() {
+                return Poll::Ready(());
+            }
+
+            match std::pin::pin!(reset_rx.recv()).poll(cx) {
+                Poll::Ready(_) => return Poll::Ready(()),
+                Poll::Pending => {}
             }
             match body.as_mut().poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
                     Ok(data) => {
-                        if msg_tx
-                            .start_send(StreamMsg::Data {
-                                data,
-                                end_stream: false,
-                            })
-                            .is_err()
-                        {
-                            return Poll::Ready(());
-                        }
+                        let msg = StreamMsg::Data {
+                            data,
+                            end_stream: false,
+                        };
+
+                        let msg_tx_fut2 = msg_tx.send(msg);
+                        // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+                        let msg_tx_fut2 = unsafe {
+                            std::mem::transmute::<
+                                kanal::SendFuture<'_, StreamMsg>,
+                                kanal::SendFuture<'static, StreamMsg>,
+                            >(msg_tx_fut2)
+                        };
+                        // SAFETY: Pin is re-borrowed here
+                        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                        *uckm = Some(msg_tx_fut2);
                     }
                     Err(frame) => match frame.into_trailers() {
                         Ok(trailers) => {
-                            if msg_tx.start_send(StreamMsg::Trailers { trailers }).is_err() {
-                                return Poll::Ready(());
-                            }
-                            return Poll::Ready(());
+                            let msg_tx_fut2 = msg_tx.send(StreamMsg::Trailers { trailers });
+                            // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+                            let msg_tx_fut2 = unsafe {
+                                std::mem::transmute::<
+                                    kanal::SendFuture<'_, StreamMsg>,
+                                    kanal::SendFuture<'static, StreamMsg>,
+                                >(msg_tx_fut2)
+                            };
+                            // SAFETY: Pin is re-borrowed here
+                            let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                            *uckm = Some(msg_tx_fut2);
+                            end = true;
                         }
                         Err(_) => return Poll::Ready(()),
                     },
@@ -874,10 +991,18 @@ where
                     let msg = StreamMsg::Reset {
                         error_code: super::error::Reason::InternalError.code(),
                     };
-                    if msg_tx.start_send(msg).is_err() {
-                        return Poll::Ready(());
-                    }
-                    return Poll::Ready(());
+                    let msg_tx_fut2 = msg_tx.send(msg);
+                    // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+                    let msg_tx_fut2 = unsafe {
+                        std::mem::transmute::<
+                            kanal::SendFuture<'_, StreamMsg>,
+                            kanal::SendFuture<'static, StreamMsg>,
+                        >(msg_tx_fut2)
+                    };
+                    // SAFETY: Pin is re-borrowed here
+                    let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                    *uckm = Some(msg_tx_fut2);
+                    end = true;
                 }
                 Poll::Ready(None) => {
                     // The body has no more frames: close with an empty
@@ -886,10 +1011,18 @@ where
                         data: Bytes::new(),
                         end_stream: true,
                     };
-                    if msg_tx.start_send(msg).is_err() {
-                        return Poll::Ready(());
-                    }
-                    return Poll::Ready(());
+                    let msg_tx_fut2 = msg_tx.send(msg);
+                    // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+                    let msg_tx_fut2 = unsafe {
+                        std::mem::transmute::<
+                            kanal::SendFuture<'_, StreamMsg>,
+                            kanal::SendFuture<'static, StreamMsg>,
+                        >(msg_tx_fut2)
+                    };
+                    // SAFETY: Pin is re-borrowed here
+                    let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                    *uckm = Some(msg_tx_fut2);
+                    end = true;
                 }
                 Poll::Pending => return Poll::Pending,
             }

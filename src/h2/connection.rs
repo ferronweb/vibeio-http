@@ -147,7 +147,7 @@ pub struct Connection<Io> {
     opts: ConnectionOptions,
     /// Wakes the drive loop when a stream task fills its outbound
     /// channel; the loop drains channels between reads.
-    wake_tx: Option<tokio::sync::mpsc::Sender<()>>,
+    wake_tx: Option<kanal::AsyncSender<()>>,
     /// Highest stream id opened by the peer (RFC 9113 Section 5.1.1).
     highest_stream_id: u32,
     /// A connection error is pending; the loop stops after flushing.
@@ -282,7 +282,7 @@ where
         );
         self.flush().await?;
 
-        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(1);
+        let (wake_tx, mut wake_rx) = kanal::bounded_async(1);
         self.wake_tx = Some(wake_tx);
 
         let mut buf = [0u8; 8192];
@@ -561,9 +561,9 @@ where
                 .write_reset(&mut self.out, stream_id, Reason::RefusedStream.code());
             return;
         }
-        let (body_tx, body_rx) = tokio::sync::mpsc::channel(32);
-        let (reset_tx, reset_rx) = tokio::sync::mpsc::channel(1);
-        let (msg_tx, msg_rx) = futures_channel::mpsc::channel(16);
+        let (body_tx, body_rx) = kanal::bounded_async(32);
+        let (reset_tx, reset_rx) = kanal::bounded_async(1);
+        let (msg_tx, msg_rx) = kanal::bounded_async(16);
         let mut entry = StreamEntry::new(body_tx, reset_tx, msg_rx);
         entry.send_window = self.peer.initial_window_size as i64;
         entry.msg_tx = Some(msg_tx);
@@ -1082,7 +1082,7 @@ where
             .iter_mut()
             .filter_map(|(id, entry)| {
                 let mut msgs = Vec::new();
-                while let Ok(msg) = entry.msg_rx.try_recv() {
+                while let Ok(Some(msg)) = entry.msg_rx.try_recv() {
                     msgs.push(msg);
                 }
                 if msgs.is_empty() {
@@ -1587,9 +1587,9 @@ mod tests {
         let (_client, server) = tokio::io::duplex(1 << 16);
         let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
         // Open a stream so it has a flow-control window.
-        let (body_tx, _) = tokio::sync::mpsc::channel::<BodyMsg>(1);
-        let (reset_tx, _) = tokio::sync::mpsc::channel::<u32>(1);
-        let (_, msg_rx) = futures_channel::mpsc::channel::<StreamMsg>(1);
+        let (body_tx, _) = kanal::bounded_async::<BodyMsg>(1);
+        let (reset_tx, _) = kanal::bounded_async::<u32>(1);
+        let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
         conn.streams
             .insert(1, StreamEntry::new(body_tx, reset_tx, msg_rx));
         conn.handle_window_update(1, 0x7fff_ffff);
