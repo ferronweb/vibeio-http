@@ -83,8 +83,14 @@ pub struct Header {
 }
 
 impl Header {
-    pub(crate) fn new(name: Bytes, value: Bytes) -> Self {
-        Header { name, value }
+    /// Creates a header field from raw name/value bytes. Names are used
+    /// verbatim (no case normalization), which allows HTTP/2 pseudo
+    /// headers (`:method`, `:status`, ...).
+    pub fn new(name: impl Into<Bytes>, value: impl Into<Bytes>) -> Self {
+        Header {
+            name: name.into(),
+            value: value.into(),
+        }
     }
 
     /// Size in octets as defined in RFC 7541 Section 4.1: the sum of the
@@ -148,20 +154,58 @@ impl Table {
     }
 
     /// Number of dynamic entries.
+    #[cfg(test)]
     pub(crate) fn dynamic_len(&self) -> usize {
         self.entries.len()
     }
 
+    /// 1-based index of the exact `(name, value)` entry if present:
+    /// the static table is searched first, then the dynamic table
+    /// (newest first).
+    pub(crate) fn find(&self, name: &[u8], value: &[u8]) -> Option<usize> {
+        for (i, (n, v)) in STATIC_TABLE.iter().enumerate() {
+            if *n == name && *v == value {
+                return Some(i + 1);
+            }
+        }
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.name() == name && entry.value() == value {
+                return Some(STATIC_LEN + i + 1);
+            }
+        }
+        None
+    }
+
+    /// 1-based index of an entry with the given `name` if present: the
+    /// static table is searched first, then the dynamic table (newest
+    /// first).
+    pub(crate) fn find_name(&self, name: &[u8]) -> Option<usize> {
+        for (i, (n, _)) in STATIC_TABLE.iter().enumerate() {
+            if *n == name {
+                return Some(i + 1);
+            }
+        }
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.name() == name {
+                return Some(STATIC_LEN + i + 1);
+            }
+        }
+        None
+    }
+
     /// Number of static and dynamic entries combined.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         STATIC_LEN + self.entries.len()
     }
 
     /// Current combined size of the dynamic entries.
+    #[cfg(test)]
     pub(crate) fn size(&self) -> usize {
         self.size
     }
 
+    #[cfg(test)]
     pub(crate) fn max_size(&self) -> usize {
         self.max_size
     }

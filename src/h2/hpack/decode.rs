@@ -62,6 +62,7 @@ impl Decoder {
         self.max_header_list_size = size;
     }
 
+    #[cfg(test)]
     pub(crate) fn table(&self) -> &Table {
         &self.table
     }
@@ -128,7 +129,7 @@ impl Decoder {
                         return Err(HpackError::HeaderListTooLarge);
                     }
 
-                    let header = Header::new(name.into(), value.into());
+                    let header = Header::new(name, value);
                     if rep == Representation::LiteralWithIndexing {
                         self.table.add(header.clone());
                     }

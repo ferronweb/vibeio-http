@@ -1,16 +1,17 @@
 //! HPACK (RFC 7541) header compression.
 //!
-//! Public surface: [`Decoder`] (H3) and, once the encoder lands (H4),
-//! [`Encoder`]. Internal modules stay crate-private.
-#![allow(dead_code)]
+//! Public surface: [`Decoder`] and [`Encoder`]. Internal modules stay
+//! crate-private.
 
 pub(crate) mod decode;
+pub(crate) mod encode;
 pub(crate) mod huffman;
 pub(crate) mod integer;
 pub(crate) mod string;
 pub(crate) mod table;
 
 pub use decode::Decoder;
+pub use encode::Encoder;
 pub use table::Header;
 
 /// Errors produced by the HPACK codec. Callers map these to HTTP/2

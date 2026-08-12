@@ -198,6 +198,75 @@ fn corpus_decodes() {
     println!("decoded cases: {total}");
 }
 
+/// Re-encodes every fixture case and round-trips it back through the
+/// decoder.
+///
+/// The corpus wires come from three encoder implementations with
+/// different policies (indexing and Huffman choices), so the encoder
+/// side is checked semantically, not byte-for-byte: each case's headers
+/// are encoded with a warm encoder (dynamic table state carries across
+/// cases in order), then decoded and compared to the expected list. A
+/// case's `header_table_size` is queued on both sides before that case.
+#[test]
+fn corpus_encode_round_trips() {
+    let mut failed = Vec::new();
+    let mut total = 0usize;
+    for path in story_paths() {
+        let story = parse_story(&path);
+        let mut encoder = hpack::Encoder::new(4096);
+        let mut decoder = hpack::Decoder::new(4096);
+        decoder.set_max_header_list_size(64 * 1024);
+        for (i, case) in story.cases.iter().enumerate() {
+            if let Some(size) = case.header_table_size {
+                encoder.queue_size_update(size as usize);
+                decoder.queue_size_update(size as usize);
+            }
+            let headers = case
+                .headers
+                .iter()
+                .map(|(name, value)| {
+                    hpack::Header::new(name.as_bytes().to_vec(), value.as_bytes().to_vec())
+                })
+                .collect::<Vec<_>>();
+            let mut wire = Vec::new();
+            encoder.encode(&headers, &mut wire);
+
+            let expected: Vec<(String, String)> = case.headers.clone();
+            let got = decoder.decode(&wire);
+            total += 1;
+            match got {
+                Ok(headers) => {
+                    let got: Vec<(String, String)> = headers
+                        .into_iter()
+                        .map(|h| {
+                            (
+                                String::from_utf8(h.name().to_vec()).unwrap(),
+                                String::from_utf8(h.value().to_vec()).unwrap(),
+                            )
+                        })
+                        .collect();
+                    if got != expected {
+                        failed.push(format!(
+                            "{} case {i}: expected {expected:?}, got {got:?}",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    failed.push(format!("{} case {i}: encode error {e:?}", path.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "{} encode failures out of {total}:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+    println!("round-tripped cases: {total}");
+}
+
 mod hpack {
-    pub(crate) use vibeio_http::hpack::Decoder;
+    pub(crate) use vibeio_http::hpack::{Decoder, Encoder, Header};
 }
