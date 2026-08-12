@@ -28,6 +28,7 @@ use bytes::Bytes;
 use futures_util::{pin_mut, FutureExt};
 use http::{Request, Response, StatusCode};
 use http_body::Body;
+use tokio_util::sync::CancellationToken;
 
 use super::codec::{
     Frame, FrameDecoder, FrameWriter, Setting, CLIENT_PREFACE, DEFAULT_INITIAL_WINDOW_SIZE,
@@ -135,6 +136,15 @@ pub struct Connection<Io> {
     highest_stream_id: u32,
     /// A connection error is pending; the loop stops after flushing.
     closing: bool,
+    /// Graceful shutdown is in progress: the first GOAWAY is sent and we
+    /// only drain already-open streams until they finish or the drain
+    /// window elapses (RFC 9113 Section 6.8).
+    graceful: bool,
+    /// Last stream id advertised in the graceful-shutdown GOAWAY; peers
+    /// must not open streams beyond it.
+    graceful_last_stream: u32,
+    /// Optional token that triggers graceful shutdown when cancelled.
+    shutdown: Option<CancellationToken>,
     /// Shared `Date` header value, refreshed periodically for the
     /// responses the stream tasks emit.
     date_cache: Arc<DateCache>,
@@ -163,8 +173,20 @@ where
             wake_tx: None,
             highest_stream_id: 0,
             closing: false,
+            graceful: false,
+            graceful_last_stream: 0,
+            shutdown: None,
             date_cache: Arc::new(DateCache::new()),
         }
+    }
+
+    /// Arms a [`CancellationToken`] that triggers a graceful shutdown
+    /// when cancelled: the connection sends GOAWAY, stops opening new
+    /// streams, drains in-flight responses, then closes (RFC 9113
+    /// Section 6.8).
+    pub fn with_shutdown(mut self, token: CancellationToken) -> Self {
+        self.shutdown = Some(token);
+        self
     }
 
     /// Drives a connection that never serves requests: the preface
@@ -231,11 +253,21 @@ where
 
         let mut buf = [0u8; 8192];
         let mut peer_goaway = false;
-        while !peer_goaway {
+        while !peer_goaway && !(self.graceful && self.streams.is_empty()) {
             let wake_recv = wake_rx.recv().fuse();
             let read = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).fuse();
+            // Graceful-shutdown signal: never fires without a token. The
+            // clone lives for the loop iteration so the boxed future can
+            // borrow it.
+            let shutdown_token = self.shutdown.clone();
+            let shutdown_fut: Pin<Box<dyn futures_util::future::FusedFuture<Output = ()> + Send>> =
+                match &shutdown_token {
+                    Some(token) => Box::pin(token.cancelled().fuse()),
+                    None => Box::pin(futures_util::future::pending().fuse()),
+                };
             pin_mut!(wake_recv);
             pin_mut!(read);
+            pin_mut!(shutdown_fut);
             futures_util::select! {
                 n = read => {
                     let n = n?;
@@ -252,7 +284,14 @@ where
                     self.drain_outbound();
                     self.flush().await?;
                 }
+                _ = shutdown_fut => {
+                    self.begin_graceful_shutdown();
+                    self.flush().await?;
+                }
             }
+        }
+        if self.graceful {
+            self.finish_graceful_shutdown();
         }
         self.flush().await?;
         Ok(())
@@ -400,6 +439,11 @@ where
         end_headers: bool,
         block: &[u8],
     ) {
+        // During graceful shutdown, the peer must not open streams beyond
+        // the id advertised in GOAWAY (RFC 9113 Section 6.8).
+        if self.graceful && stream_id > self.graceful_last_stream {
+            return;
+        }
         let (start_new, remote_ended) = match self.streams.get_mut(&stream_id) {
             None => (true, false),
             Some(entry) => {
@@ -786,6 +830,40 @@ where
             .write_goaway(&mut self.out, self.highest_stream_id, reason.code(), debug);
     }
 
+    /// Begins a graceful shutdown (RFC 9113 Section 6.8): advertises the
+    /// last stream id we will process and stops accepting new streams.
+    /// The drain phase (finish_graceful_shutdown) closes the connection
+    /// once in-flight streams finish or the drain window elapses.
+    fn begin_graceful_shutdown(&mut self) {
+        if self.graceful || self.closing {
+            return;
+        }
+        self.graceful = true;
+        self.graceful_last_stream = self.highest_stream_id;
+        self.writer.write_goaway(
+            &mut self.out,
+            self.graceful_last_stream,
+            Reason::NoError.code(),
+            b"graceful shutdown",
+        );
+    }
+
+    /// Sends the final GOAWAY that closes the connection. Called when the
+    /// graceful drain completes (all streams finished) or its window
+    /// elapses; the caller flushes.
+    fn finish_graceful_shutdown(&mut self) {
+        // An error already queued a GOAWAY; don't overwrite it.
+        if self.closing {
+            return;
+        }
+        self.writer.write_goaway(
+            &mut self.out,
+            self.graceful_last_stream,
+            Reason::NoError.code(),
+            b"graceful shutdown",
+        );
+    }
+
     /// Queues a RST_STREAM for a stream error and forgets the stream.
     /// The task is severed by dropping the entry's channels, so it
     /// ends on its next poll.
@@ -1163,6 +1241,8 @@ enum StreamDataState {
 mod tests {
     use super::*;
     use crate::h2::codec::Setting;
+    use crate::h2::error::Reason;
+    use crate::h2::stream::{BodyMsg, StreamMsg};
 
     /// Runs a connection against a scripted peer over an in-memory
     /// duplex stream and collects the server's reply bytes.
@@ -1359,5 +1439,65 @@ mod tests {
         // The peer's GOAWAY draws no reply beyond the SETTINGS
         // exchange; the server closes quietly.
         assert!(!decoded.iter().any(|f| matches!(f, Frame::GoAway { .. })));
+    }
+
+    #[test]
+    fn window_update_overflow_is_connection_error() {
+        // A WINDOW_UPDATE that pushes the connection window past 2^31-1
+        // is a FLOW_CONTROL_ERROR connection error (RFC 9113 6.9.1).
+        let (_client, server) = tokio::io::duplex(1 << 16);
+        let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+        conn.handle_window_update(0, 0x7fff_ffff);
+        let decoded = decode_frames(&conn.out);
+        assert!(decoded.iter().any(|f| matches!(
+            f,
+            Frame::GoAway { error_code, .. } if *error_code == Reason::FlowControlError.code()
+        )));
+    }
+
+    #[test]
+    fn stream_window_update_overflow_is_stream_error() {
+        // A WINDOW_UPDATE that overflows a single stream's window is a
+        // RST_STREAM with FLOW_CONTROL_ERROR (RFC 9113 6.9.1).
+        let (_client, server) = tokio::io::duplex(1 << 16);
+        let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+        // Open a stream so it has a flow-control window.
+        let (body_tx, _) = tokio::sync::mpsc::channel::<BodyMsg>(1);
+        let (reset_tx, _) = tokio::sync::mpsc::channel::<u32>(1);
+        let (_, msg_rx) = futures_channel::mpsc::channel::<StreamMsg>(1);
+        conn.streams
+            .insert(1, StreamEntry::new(body_tx, reset_tx, msg_rx));
+        conn.handle_window_update(1, 0x7fff_ffff);
+        let decoded = decode_frames(&conn.out);
+        assert!(decoded.iter().any(|f| matches!(
+            f,
+            Frame::Reset { stream_id, error_code } if *stream_id == 1 && *error_code == Reason::FlowControlError.code()
+        )));
+    }
+
+    #[test]
+    fn graceful_shutdown_queues_goaway() {
+        // Cancelling the shutdown token sends GOAWAY (NO_ERROR) and the
+        // connection drains in-flight streams before the final GOAWAY.
+        vibeio::RuntimeBuilder::new()
+            .enable_timer(true)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (_client, server) = tokio::io::duplex(1 << 16);
+                let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+                conn.begin_graceful_shutdown();
+                assert!(conn.graceful);
+                conn.finish_graceful_shutdown();
+                let decoded = decode_frames(&conn.out);
+                let codes: Vec<u32> = decoded
+                    .iter()
+                    .filter_map(|f| match f {
+                        Frame::GoAway { error_code, .. } => Some(*error_code),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(codes, vec![Reason::NoError.code(), Reason::NoError.code()]);
+            });
     }
 }
