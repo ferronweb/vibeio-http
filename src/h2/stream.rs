@@ -580,6 +580,7 @@ pin_project! {
         Body {
             #[pin]
             body: ResB,
+            body_end: bool,
         },
     }
 }
@@ -696,17 +697,21 @@ where
                         ServicePoll::Done => {}
                         ServicePoll::Pending => return Poll::Pending,
                         ServicePoll::Body(body) => {
-                            this.state.set(StreamDriverState::Body { body });
+                            this.state.set(StreamDriverState::Body {
+                                body,
+                                body_end: false,
+                            });
                             continue;
                         }
                     }
                 }
-                StreamDriverProj::Body { body } => {
+                StreamDriverProj::Body { body, body_end } => {
                     match Self::poll_body(
                         this.msg_tx,
                         this.msg_tx_fut.as_mut(),
                         this.reset_rx,
                         body,
+                        body_end,
                         cx,
                     ) {
                         Poll::Ready(()) => {}
@@ -933,9 +938,9 @@ where
         mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
         reset_rx: &mut kanal::AsyncReceiver<u32>,
         mut body: Pin<&mut ResB>,
+        end: &mut bool,
         cx: &mut Context<'_>,
     ) -> Poll<()> {
-        let mut end = false;
         loop {
             if let Some(msg_tx_fut2) = msg_tx_fut.as_mut().as_pin_mut() {
                 match msg_tx_fut2.poll(cx) {
@@ -943,9 +948,6 @@ where
                         // SAFETY: Pin is re-borrowed here
                         let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
                         uckm.take();
-                        if end {
-                            return Poll::Ready(());
-                        }
                     }
                     Poll::Ready(Err(_)) => {
                         // SAFETY: Pin is re-borrowed here
@@ -957,7 +959,7 @@ where
                 }
             }
 
-            if body.is_end_stream() {
+            if *end {
                 return Poll::Ready(());
             }
 
@@ -998,7 +1000,7 @@ where
                             // SAFETY: Pin is re-borrowed here
                             let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
                             *uckm = Some(msg_tx_fut2);
-                            end = true;
+                            *end = true;
                         }
                         Err(_) => return Poll::Ready(()),
                     },
@@ -1018,7 +1020,7 @@ where
                     // SAFETY: Pin is re-borrowed here
                     let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
                     *uckm = Some(msg_tx_fut2);
-                    end = true;
+                    *end = true;
                 }
                 Poll::Ready(None) => {
                     // The body has no more frames: close with an empty
@@ -1038,7 +1040,7 @@ where
                     // SAFETY: Pin is re-borrowed here
                     let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
                     *uckm = Some(msg_tx_fut2);
-                    end = true;
+                    *end = true;
                 }
                 Poll::Pending => return Poll::Pending,
             }

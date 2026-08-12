@@ -1012,7 +1012,7 @@ where
     fn pump_stream_data(&mut self, stream_id: u32) {
         loop {
             // Decide how much (if any) of the front chunk to send.
-            let amount = match self.streams.get_mut(&stream_id) {
+            let (amount, limited) = match self.streams.get_mut(&stream_id) {
                 None => return,
                 Some(entry) => {
                     if entry.local_ended {
@@ -1046,9 +1046,9 @@ where
                     if available <= 0 {
                         return;
                     }
-                    (data.len() as i64)
-                        .min(available)
-                        .min(self.peer.max_frame_size as i64) as usize
+                    let orig_amount = (data.len() as u64).min(available as u64);
+                    let amount = orig_amount.min(self.peer.max_frame_size as u64);
+                    (amount as usize, orig_amount != amount)
                 }
             };
             // Send `amount` bytes from the front chunk; the entry borrow
@@ -1083,7 +1083,7 @@ where
                     self.streams.remove(&stream_id);
                     return;
                 }
-            } else {
+            } else if !limited {
                 // The tail waits for the window to open again.
                 break;
             }
