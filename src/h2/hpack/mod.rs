@@ -8,6 +8,7 @@
 pub(crate) mod huffman;
 pub(crate) mod integer;
 pub(crate) mod string;
+pub(crate) mod table;
 
 /// Errors produced by the HPACK codec. Callers map these to HTTP/2
 /// connection errors (`COMPRESSION_ERROR`).
