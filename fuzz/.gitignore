@@ -1,7 +1,5 @@
-# cargo-fuzz generated artifacts (corpus grows unbounded during runs)
+target
 corpus
 artifacts
-target
-
-# fuzz-only lockfile (not published)
+coverage
 Cargo.lock
