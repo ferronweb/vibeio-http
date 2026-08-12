@@ -8,27 +8,11 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-bytes = "1.11.1"
-http = "1.4.0"
-http-body-util = "0.1.3"
 libfuzzer-sys = "0.4"
-tokio = "1.52.3"
-vibeio = "0.2.10"
-
-[dependencies.vibeio-http]
-path = ".."
-features = ["h1", "h2"]
+vibeio-http = { path = "..", features = ["h2"] }
 
 [[bin]]
-name = "http1"
-path = "fuzz_targets/http1.rs"
+name = "hpack_decode"
+path = "fuzz_targets/hpack_decode.rs"
 test = false
 doc = false
-bench = false
-
-[[bin]]
-name = "http2_frames"
-path = "fuzz_targets/http2_frames.rs"
-test = false
-doc = false
-bench = false
