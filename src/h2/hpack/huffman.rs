@@ -1,16 +1,20 @@
 //! HPACK Huffman coding (RFC 7541 Appendix B).
 //!
-//! Encoding walks the 257-symbol code table; decoding walks a binary tree
-//! built from the same table in a `const fn`, one bit at a time. Decoding
-//! enforces the RFC 7541 Section 5.2 rules: the EOS symbol must not appear
-//! in the data, and trailing padding must be at most 7 bits of the EOS
-//! code's most significant bits (all 1-bits).
+//! Encoding walks the 257-symbol code table; decoding walks a precomputed
+//! 4-bit finite-state machine that consumes four encoded bits per table
+//! lookup (vs. one bit per walk in a binary tree). The FSM enforces the
+//! RFC 7541 Section 5.2 rules: the EOS symbol must not appear in the data,
+//! and trailing padding must be at most 7 bits of the EOS code's most
+//! significant bits (all 1-bits).
 //!
 //! The code table data below is specified by RFC 7541 Appendix B; the
 //! literal formatting is taken from the MIT-licensed `h2` crate's generated
-//! `hpack/huffman/table.rs` (https://github.com/hyperium/h2).
-//! A multi-bit decode table is a planned Phase 5 optimization.
+//! `hpack/huffman/table.rs` (https://github.com/hyperium/h2). The 4-bit
+//! decode DFA in `huffman_table.rs` is ported from ls-hpack
+//! (https://github.com/litespeedtech/ls-hpack), which uses the same RFC
+//! code table.
 
+use super::huffman_table::HUFF_DFA;
 use super::HpackError;
 
 // __HPACK_HUFFMAN_TABLE__
@@ -276,53 +280,6 @@ const CODES: [(u8, u32); 257] = [
     (30, 0x3FFFFFFF),
 ];
 
-/// A node of the decoding tree.
-#[derive(Clone, Copy)]
-struct Node {
-    /// Child node indices for bits `0` and `1`; `-1` marks a leaf.
-    child: [i16; 2],
-    /// Decoded symbol for leaves; `-1` for internal nodes.
-    sym: i16,
-    /// Whether the path from the root to this node is a prefix of the EOS
-    /// code (30 1-bits). Used to validate trailing padding.
-    eos_prefix: bool,
-}
-
-/// Builds the binary decoding tree from `CODES` at compile time.
-const fn build_tree() -> [Node; 516] {
-    let mut nodes = [Node {
-        child: [-1; 2],
-        sym: -1,
-        eos_prefix: true,
-    }; 516];
-    let mut next: i16 = 1;
-    let mut i = 0;
-    while i < 257 {
-        let (len, code) = CODES[i];
-        let mut node: i16 = 0;
-        let mut b: i32 = len as i32 - 1;
-        while b >= 0 {
-            let bit = ((code >> b) & 1) as usize;
-            if nodes[node as usize].child[bit] == -1 {
-                let fresh = next;
-                next += 1;
-                nodes[node as usize].child[bit] = fresh;
-                nodes[fresh as usize].eos_prefix = nodes[node as usize].eos_prefix && bit == 1;
-                node = fresh;
-            } else {
-                node = nodes[node as usize].child[bit];
-            }
-            b -= 1;
-        }
-        nodes[node as usize].sym = i as i16;
-        i += 1;
-    }
-    nodes
-}
-
-/// Decoding tree; at most 513 nodes for 257 symbols, root included.
-const TREE: [Node; 516] = build_tree();
-
 /// Encodes `src` using the RFC 7541 Huffman code, appending the encoded
 /// bytes (with EOS-prefix padding to the octet boundary) to `dst`.
 pub(crate) fn encode(src: &[u8], dst: &mut Vec<u8>) {
@@ -351,28 +308,35 @@ pub(crate) fn encoded_len(src: &[u8]) -> usize {
 ///
 /// Fails per RFC 7541 Section 5.2 if the EOS symbol appears in the data,
 /// if the data ends mid-code with more than 7 padding bits, or if the
-/// padding is not a prefix of the EOS code.
+/// padding is not a prefix of the EOS code. The 4-bit DFA ([`HUFF_DFA`])
+/// advances one nibble at a time, so each encoded byte costs two table
+/// lookups instead of the eight a bit-by-bit walk would need.
 pub(crate) fn decode(src: &[u8], dst: &mut Vec<u8>) -> Result<(), HpackError> {
     dst.clear();
-    let mut node: usize = 0;
-    let mut partial: u32 = 0;
+    let mut state: usize = 0;
+    let mut accepted = true;
     for &byte in src {
-        for i in 0..8 {
-            let bit = (byte >> (7 - i)) & 1;
-            node = TREE[node].child[bit as usize] as usize;
-            partial += 1;
-            let sym = TREE[node].sym;
-            if sym != -1 {
-                if sym == 256 {
-                    return Err(HpackError::InvalidHuffman);
-                }
-                dst.push(sym as u8);
-                node = 0;
-                partial = 0;
-            }
+        // High nibble, then low nibble (Huffman bits are most-significant first).
+        let next = HUFF_DFA[state * 16 + (byte >> 4) as usize];
+        if next.1 & 0x04 != 0 {
+            return Err(HpackError::InvalidHuffman);
         }
+        if next.1 & 0x02 != 0 {
+            dst.push(next.2);
+        }
+        state = next.0 as usize;
+
+        let next = HUFF_DFA[state * 16 + (byte & 0x0f) as usize];
+        if next.1 & 0x04 != 0 {
+            return Err(HpackError::InvalidHuffman);
+        }
+        if next.1 & 0x02 != 0 {
+            dst.push(next.2);
+        }
+        accepted = next.1 & 0x01 != 0;
+        state = next.0 as usize;
     }
-    if node != 0 && (partial > 7 || !TREE[node].eos_prefix) {
+    if !accepted {
         return Err(HpackError::InvalidHuffman);
     }
     Ok(())

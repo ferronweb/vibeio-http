@@ -6,6 +6,7 @@
 pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod huffman;
+pub(crate) mod huffman_table;
 pub(crate) mod integer;
 pub(crate) mod string;
 pub(crate) mod table;
