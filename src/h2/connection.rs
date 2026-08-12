@@ -16,7 +16,6 @@
 //! `http2/6.4` and `http2/8.1` groups cover.
 
 use std::{
-    collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
     sync::{atomic::AtomicBool, Arc},
@@ -28,6 +27,7 @@ use bytes::Bytes;
 use futures_util::{pin_mut, FutureExt};
 use http::{Request, Response, StatusCode};
 use http_body::Body;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio_util::sync::CancellationToken;
 
 use super::codec::{
@@ -134,14 +134,14 @@ pub struct Connection<Io> {
     /// is too slow is disconnected without a GOAWAY.
     preface_timeout: Option<Duration>,
     /// Active streams, keyed by stream id (RFC 9113 Section 5.1).
-    streams: HashMap<u32, StreamEntry>,
+    streams: FxHashMap<u32, StreamEntry>,
     /// Connection-level send window for DATA payloads (RFC 9113
     /// Section 6.9.1); initial 65,535 octets.
     conn_window: i64,
     /// Stream ids whose streams have ended (closed state per RFC 9113
     /// Section 5.1); used to tell closed-stream frames apart from
     /// idle-stream frames.
-    closed_streams: HashSet<u32>,
+    closed_streams: FxHashSet<u32>,
     /// Behavior options for this connection (used by [`Connection::handle`]).
     #[allow(dead_code)]
     opts: ConnectionOptions,
@@ -182,9 +182,9 @@ where
             peer: PeerSettings::default(),
             local: PeerSettings::default(),
             preface_timeout,
-            streams: HashMap::new(),
+            streams: FxHashMap::default(),
             conn_window: DEFAULT_INITIAL_WINDOW_SIZE as i64,
-            closed_streams: HashSet::new(),
+            closed_streams: FxHashSet::default(),
             opts: ConnectionOptions::default(),
             wake_tx: None,
             highest_stream_id: 0,
