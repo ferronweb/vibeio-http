@@ -240,4 +240,12 @@ async fn real_h2_session_frames_decode() {
             .any(|f| matches!(f, Frame::GoAway { .. })),
         "no GOAWAY from server"
     );
+
+    // Optional seed capture for the frame codec fuzz target: run with
+    // H2_DUMP_SEEDS=fuzz/seeds/http2 to refresh the corpus files.
+    if let Ok(dir) = std::env::var("H2_DUMP_SEEDS") {
+        std::fs::create_dir_all(&dir).expect("create seeds dir");
+        std::fs::write(format!("{dir}/client-session.bin"), &c2s).expect("write client seed");
+        std::fs::write(format!("{dir}/server-session.bin"), &s2c).expect("write server seed");
+    }
 }

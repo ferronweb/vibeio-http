@@ -17,11 +17,18 @@ vibeio = "0.2.10"
 
 [dependencies.vibeio-http]
 path = ".."
-features = ["h1"]
+features = ["h1", "h2"]
 
 [[bin]]
 name = "http1"
 path = "fuzz_targets/http1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http2_frames"
+path = "fuzz_targets/http2_frames.rs"
 test = false
 doc = false
 bench = false
