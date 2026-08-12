@@ -87,13 +87,13 @@ where
         F: Fn(http::Request<super::Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
-        ResE: std::error::Error,
-        ResBE: std::error::Error,
+        ResE: std::error::Error + 'static,
+        ResBE: std::error::Error + 'static,
         EF: FnOnce(bool) -> EFut,
         EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
-        EResE: std::error::Error,
-        EResBE: std::error::Error,
+        EResE: std::error::Error + 'static,
+        EResBE: std::error::Error + 'static,
     {
         self.inner.handle_with_error_fn_and_zerocopy(
             request_fn,
@@ -116,8 +116,8 @@ where
         F: Fn(http::Request<super::Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
-        ResE: std::error::Error,
-        ResBE: std::error::Error,
+        ResE: std::error::Error + 'static,
+        ResBE: std::error::Error + 'static,
     {
         self.handle_with_error_fn(request_fn, |is_timeout| async move {
             let mut response = Response::builder();

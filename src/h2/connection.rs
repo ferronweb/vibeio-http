@@ -54,6 +54,14 @@ pub struct ConnectionOptions {
     pub send_date_header: bool,
     /// `SETTINGS_MAX_CONCURRENT_STREAMS` announced to the peer.
     pub max_concurrent_streams: u32,
+    /// `SETTINGS_INITIAL_WINDOW_SIZE`: per-stream DATA credit we start with.
+    pub initial_stream_window_size: u32,
+    /// Connection-level DATA credit we start with (RFC 9113 Section 6.9.1).
+    pub initial_connection_window_size: u32,
+    /// Largest frame (payload) we send or receive (`SETTINGS_MAX_FRAME_SIZE`).
+    pub max_frame_size: u32,
+    /// Largest decoded header list we accept (`SETTINGS_MAX_HEADER_LIST_SIZE`).
+    pub max_header_list_size: u32,
 }
 
 impl Default for ConnectionOptions {
@@ -62,6 +70,10 @@ impl Default for ConnectionOptions {
             send_continue_response: false,
             send_date_header: true,
             max_concurrent_streams: 100,
+            initial_stream_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
+            max_header_list_size: u32::MAX,
         }
     }
 }
@@ -218,12 +230,20 @@ where
     ) -> std::io::Result<()>
     where
         F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
-        Fut: Future<Output = Result<Response<ResB>, ResE>> + Send + 'static,
-        ResB: Body<Data = Bytes, Error = ResBE> + Send + 'static,
-        ResBE: std::error::Error + Send + Sync + 'static,
-        ResE: std::error::Error + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
+        ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
+        ResBE: std::error::Error + 'static,
+        ResE: std::error::Error + 'static,
     {
         self.opts = options;
+        // Apply the negotiated native settings before the handshake.
+        self.request_decoder
+            .set_max_header_list_size(self.opts.max_header_list_size as usize);
+        self.decoder
+            .set_max_frame_size(self.opts.max_frame_size as usize);
+        self.writer.max_frame_size = self.opts.max_frame_size as usize;
+        self.peer.max_frame_size = self.opts.max_frame_size as usize;
+        self.conn_window = self.opts.initial_connection_window_size as i64;
         match self.read_preface().await? {
             None => return Ok(()), // preface timeout: close quietly
             Some(false) => {
@@ -236,15 +256,25 @@ where
             Some(true) => {}
         }
 
-        // Our connection preface: SETTINGS announcing our
-        // MAX_CONCURRENT_STREAMS plus the RFC defaults (RFC 9113
+        // Our connection preface: SETTINGS announcing our flow-control
+        // windows, frame/header limits and concurrency (RFC 9113
         // Sections 3.5 and 6.5.2).
         self.writer.write_settings(
             &mut self.out,
-            &[Setting {
-                id: 0x03,
-                value: self.opts.max_concurrent_streams,
-            }],
+            &[
+                Setting {
+                    id: 0x03,
+                    value: self.opts.max_concurrent_streams,
+                },
+                Setting {
+                    id: 0x04,
+                    value: self.opts.initial_stream_window_size,
+                },
+                Setting {
+                    id: 0x05,
+                    value: self.opts.max_frame_size,
+                },
+            ],
         );
         self.flush().await?;
 
@@ -338,10 +368,10 @@ where
     ) -> std::io::Result<bool>
     where
         F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
-        Fut: Future<Output = Result<Response<ResB>, ResE>> + Send + 'static,
-        ResB: Body<Data = Bytes, Error = ResBE> + Send + 'static,
-        ResBE: std::error::Error + Send + Sync + 'static,
-        ResE: std::error::Error + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
+        ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
+        ResBE: std::error::Error + 'static,
+        ResE: std::error::Error + 'static,
     {
         loop {
             let frame = match self.decoder.next_frame() {
@@ -543,10 +573,10 @@ where
         request_fn: &mut F,
     ) where
         F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
-        Fut: Future<Output = Result<Response<ResB>, ResE>> + Send + 'static,
-        ResB: Body<Data = Bytes, Error = ResBE> + Send + 'static,
-        ResBE: std::error::Error + Send + Sync + 'static,
-        ResE: std::error::Error + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
+        ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
+        ResBE: std::error::Error + 'static,
+        ResE: std::error::Error + 'static,
     {
         let Some(entry) = self.streams.get_mut(&stream_id) else {
             return;
@@ -614,10 +644,10 @@ where
         request_fn: &mut F,
     ) where
         F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
-        Fut: Future<Output = Result<Response<ResB>, ResE>> + Send + 'static,
-        ResB: Body<Data = Bytes, Error = ResBE> + Send + 'static,
-        ResBE: std::error::Error + Send + Sync + 'static,
-        ResE: std::error::Error + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
+        ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
+        ResBE: std::error::Error + 'static,
+        ResE: std::error::Error + 'static,
     {
         let Some(entry) = self.streams.get_mut(&stream_id) else {
             return;
@@ -659,7 +689,7 @@ where
         let send_date_header = self.opts.send_date_header;
         let mut request_fn = request_fn.clone();
         let response_fut = Box::pin(async move {
-            let mut response = request_fn(request).await.map_err(std::io::Error::other)?;
+            let mut response = request_fn(request).await.map_err(e2io)?;
             sanitize_response(&mut response, send_date_header, &date_cache);
             Ok::<Response<ConnBody>, std::io::Error>(response.map(ConnBody::new))
         });
@@ -1158,14 +1188,14 @@ where
 /// A boxed response body: the handler's body type is erased at the
 /// stream boundary so `Connection` stays monomorphic.
 struct ConnBody {
-    inner: Pin<Box<dyn Body<Data = Bytes, Error = std::io::Error> + Send>>,
+    inner: Pin<Box<dyn Body<Data = Bytes, Error = std::io::Error>>>,
 }
 
 impl ConnBody {
     fn new<ResB, ResBE>(body: ResB) -> Self
     where
-        ResB: Body<Data = Bytes, Error = ResBE> + Send + 'static,
-        ResBE: std::error::Error + Send + Sync + 'static,
+        ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
+        ResBE: std::error::Error + 'static,
     {
         ConnBody {
             inner: Box::pin(BodyAdapter(Some(Box::pin(body)))),
@@ -1189,6 +1219,22 @@ impl Body for ConnBody {
     }
 }
 
+/// Converts any displayable error into an [`io::Error`] without requiring
+/// `Send + Sync` (the native connection layer only needs the message, not the
+/// source; this keeps the public trait free of `Send`/`Sync` so it works on
+/// runtimes such as `vibeio` that do not demand them).
+fn e2io<E: std::fmt::Display>(e: E) -> std::io::Error {
+    #[derive(Debug)]
+    struct Msg(String);
+    impl std::fmt::Display for Msg {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+    impl std::error::Error for Msg {}
+    std::io::Error::other(Msg(format!("{e}")))
+}
+
 /// Adapts an arbitrary body whose error is not `io::Error` into one
 /// that is (the stream layer only deals in `io::Error`).
 struct BodyAdapter<ResB>(Option<Pin<Box<ResB>>>);
@@ -1196,7 +1242,7 @@ struct BodyAdapter<ResB>(Option<Pin<Box<ResB>>>);
 impl<ResB, ResBE> Body for BodyAdapter<ResB>
 where
     ResB: Body<Data = Bytes, Error = ResBE>,
-    ResBE: std::error::Error + Send + Sync + 'static,
+    ResBE: std::error::Error + 'static,
 {
     type Data = Bytes;
     type Error = std::io::Error;
@@ -1211,7 +1257,7 @@ where
         };
         match inner.as_mut().poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(std::io::Error::other(error)))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(e2io(error)))),
             Poll::Ready(None) => {
                 this.0 = None;
                 Poll::Ready(None)

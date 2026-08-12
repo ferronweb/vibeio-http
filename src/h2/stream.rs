@@ -607,8 +607,8 @@ impl<Fut, ResB, ResBE, ResE> Future for StreamDriver<Fut, ResB>
 where
     Fut: Future<Output = Result<Response<ResB>, ResE>>,
     ResB: Body<Data = Bytes, Error = ResBE> + Unpin,
-    ResBE: std::error::Error,
-    ResE: std::error::Error,
+    ResBE: std::error::Error + 'static,
+    ResE: std::error::Error + 'static,
 {
     type Output = ();
 
@@ -690,8 +690,8 @@ impl<Fut, ResB, ResBE, ResE> StreamDriver<Fut, ResB>
 where
     Fut: Future<Output = Result<Response<ResB>, ResE>>,
     ResB: Body<Data = Bytes, Error = ResBE> + Unpin,
-    ResBE: std::error::Error,
-    ResE: std::error::Error,
+    ResBE: std::error::Error + 'static,
+    ResE: std::error::Error + 'static,
 {
     /// Polls the service state: the response future, peer resets, the
     /// `100 Continue` trigger and early hints. Returns only with the

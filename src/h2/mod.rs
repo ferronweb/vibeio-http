@@ -1,76 +1,26 @@
+use http::{Request, Response};
+use http_body::Body;
+use tokio_util::sync::CancellationToken;
+
+use crate::h2::connection::{Connection, ConnectionOptions};
+use crate::h2::date::DateCache;
+use crate::h2::options::Http2Options;
+use crate::{HttpProtocol, Incoming};
+
 pub mod codec;
 pub mod connection;
 mod date;
 pub mod error;
 pub mod hpack;
-mod options;
-mod send;
+pub mod options;
 mod stream;
-mod upgrade;
 
 pub(crate) use stream::H2Body;
 
-/// Bridges an `h2`-crate request stream into the channel-backed
-/// [`H2Body`], so the crate-level server shares the body type with the
-/// native connection until the crate path is fully replaced.
-fn h2crate_body(
-    recv_stream: h2::RecvStream,
-    send_continue_body: Option<Arc<AtomicBool>>,
-) -> H2Body {
-    let (body_tx, body_rx) = tokio::sync::mpsc::channel(32);
-    vibeio::spawn(async move {
-        let mut recv = recv_stream;
-        loop {
-            let next = std::future::poll_fn(|cx| recv.poll_data(cx)).await;
-            match next {
-                Some(Ok(data)) => {
-                    let _ = recv.flow_control().release_capacity(data.len());
-                    if body_tx.send(stream::BodyMsg::Data(data)).await.is_err() {
-                        return;
-                    }
-                }
-                Some(Err(_)) => return,
-                None => break,
-            }
-        }
-        if let Ok(Some(trailers)) = std::future::poll_fn(|cx| recv.poll_trailers(cx)).await {
-            if body_tx
-                .send(stream::BodyMsg::Trailers(trailers))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        let _ = body_tx.send(stream::BodyMsg::EndStream).await;
-    });
-    H2Body::new(body_rx, send_continue_body)
-}
-
-pub use options::*;
-use pin_project_lite::pin_project;
-use tokio_util::sync::CancellationToken;
-
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{atomic::AtomicBool, Arc},
-    task::{Context, Poll},
-};
-
-use http::{Request, Response};
-use http_body::Body;
-
-use crate::{
-    early_hints::EarlyHintsReceiver,
-    h2::{
-        date::DateCache,
-        send::{PipeToSendStream, SendBuf},
-    },
-    EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
-};
-
-static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
+/// Header fields a server must strip from a response before sending it
+/// on an HTTP/2 connection (RFC 9113 Section 8.1.2.2): these are
+/// connection-level concerns, not per-message headers.
+pub(crate) const HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::HeaderName::from_static("keep-alive"),
     http::header::HeaderName::from_static("proxy-connection"),
     http::header::CONNECTION,
@@ -78,20 +28,8 @@ static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::UPGRADE,
 ];
 
-#[inline]
-pub(super) fn h2_error_to_io(error: h2::Error) -> std::io::Error {
-    if error.is_io() {
-        error.into_io().unwrap_or(std::io::Error::other("io error"))
-    } else {
-        std::io::Error::other(error)
-    }
-}
-
-#[inline]
-pub(super) fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
-    std::io::Error::other(h2::Error::from(reason))
-}
-
+/// Mangles a response into HTTP/2-legal shape: injects a `Date` header
+/// when configured and removes connection-specific response headers.
 #[inline]
 pub(super) fn sanitize_response<ResB>(
     response: &mut Response<ResB>,
@@ -121,266 +59,11 @@ pub(super) fn sanitize_response<ResB>(
     }
 }
 
-struct PendingUpgrade {
-    tx: oneshot::Sender<Upgraded>,
-    upgraded: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    recv_stream: h2::RecvStream,
-}
-
-pin_project! {
-    struct H2Stream<Fut, ResB>
-    where
-        Fut: Future,
-        ResB: Body<Data = bytes::Bytes>,
-    {
-        stream: h2::server::SendResponse<SendBuf<ResB::Data>>,
-        #[pin]
-        state: H2StreamState<Fut, ResB>,
-    }
-}
-
-pin_project! {
-    #[project = H2StreamStateProj]
-    enum H2StreamState<Fut, ResB>
-    where
-        Fut: Future,
-        ResB: Body<Data = bytes::Bytes>,
-    {
-        Service {
-            #[pin]
-            response_fut: Fut,
-            early_hints_rx: EarlyHintsReceiver,
-            date_cache: Arc<DateCache>,
-            send_date_header: bool,
-            upgrade: Option<PendingUpgrade>,
-            send_continue: bool,
-            early_hints_open: bool,
-            send_continue_body: Option<Arc<AtomicBool>>,
-            continue_sent: bool
-        },
-        Body {
-            #[pin]
-            pipe: PipeToSendStream<ResB>,
-        },
-    }
-}
-
-impl<Fut, ResB> H2Stream<Fut, ResB>
-where
-    Fut: Future,
-    ResB: Body<Data = bytes::Bytes>,
-{
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    const fn new(
-        stream: h2::server::SendResponse<SendBuf<ResB::Data>>,
-        response_fut: Fut,
-        early_hints_rx: EarlyHintsReceiver,
-        date_cache: Arc<DateCache>,
-        send_date_header: bool,
-        upgrade: Option<PendingUpgrade>,
-        send_continue: bool,
-        send_continue_body: Option<Arc<AtomicBool>>,
-    ) -> Self {
-        Self {
-            stream,
-            state: H2StreamState::Service {
-                response_fut,
-                early_hints_rx,
-                date_cache,
-                send_date_header,
-                upgrade,
-                send_continue,
-                early_hints_open: true,
-                send_continue_body,
-                continue_sent: false,
-            },
-        }
-    }
-}
-
-impl<Fut, ResB, ResBE, ResE> Future for H2Stream<Fut, ResB>
-where
-    Fut: Future<Output = Result<Response<ResB>, ResE>>,
-    ResB: Body<Data = bytes::Bytes, Error = ResBE>,
-    ResE: std::error::Error,
-    ResBE: std::error::Error,
-{
-    type Output = ();
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-
-        loop {
-            match this.state.as_mut().project() {
-                H2StreamStateProj::Service { .. } => {
-                    match Self::poll_service(this.stream, this.state.as_mut(), cx) {
-                        ServicePoll::Done => return Poll::Ready(()),
-                        ServicePoll::Pending => return Poll::Pending,
-                        ServicePoll::Body(pipe) => {
-                            this.state.set(H2StreamState::Body { pipe });
-                            continue;
-                        }
-                    }
-                }
-                H2StreamStateProj::Body { pipe } => return pipe.poll(cx).map(|_| ()),
-            }
-        }
-    }
-}
-
-/// The outcome of polling the `H2Stream` service state.
-enum ServicePoll<ResB>
-where
-    ResB: Body<Data = bytes::Bytes>,
-{
-    /// The stream has finished.
-    Done,
-    /// The stream is not ready to make progress yet.
-    Pending,
-    /// The response body is ready to be piped to the send stream.
-    Body(PipeToSendStream<ResB>),
-}
-
-impl<Fut, ResB, ResBE, ResE> H2Stream<Fut, ResB>
-where
-    Fut: Future<Output = Result<Response<ResB>, ResE>>,
-    ResB: Body<Data = bytes::Bytes, Error = ResBE>,
-    ResE: std::error::Error,
-    ResBE: std::error::Error,
-{
-    /// Polls the `H2StreamState::Service` state until the response future
-    /// resolves, interim responses are sent, or the stream would block.
-    #[inline]
-    fn poll_service(
-        stream: &mut h2::server::SendResponse<SendBuf<ResB::Data>>,
-        state: Pin<&mut H2StreamState<Fut, ResB>>,
-        cx: &mut Context<'_>,
-    ) -> ServicePoll<ResB> {
-        let mut state = state;
-        loop {
-            let H2StreamStateProj::Service {
-                response_fut,
-                early_hints_rx,
-                date_cache,
-                send_date_header,
-                upgrade,
-                send_continue,
-                early_hints_open,
-                send_continue_body,
-                continue_sent,
-            } = state.as_mut().project()
-            else {
-                unreachable!("poll_service called for non-Service state");
-            };
-
-            if let Poll::Ready(response_result) = response_fut.poll(cx) {
-                let Ok(mut response) = response_result else {
-                    return ServicePoll::Done;
-                };
-
-                sanitize_response(&mut response, *send_date_header, date_cache.as_ref());
-
-                let response_is_end_stream = response.body().is_end_stream();
-                if !response_is_end_stream {
-                    if let Some(content_length) = response.body().size_hint().exact() {
-                        if !response
-                            .headers()
-                            .contains_key(http::header::CONTENT_LENGTH)
-                        {
-                            response
-                                .headers_mut()
-                                .insert(http::header::CONTENT_LENGTH, content_length.into());
-                        }
-                    }
-                }
-
-                if *send_continue && !*continue_sent {
-                    if !response.status().is_client_error() && !response.status().is_server_error()
-                    {
-                        let mut response = Response::new(());
-                        *response.status_mut() = http::StatusCode::CONTINUE;
-                        let _ = stream.send_informational(response).map_err(h2_error_to_io);
-                    }
-                    *continue_sent = true;
-                }
-
-                let (response_parts, response_body) = response.into_parts();
-                let Ok(send) = stream.send_response(
-                    Response::from_parts(response_parts, ()),
-                    response_is_end_stream && upgrade.is_none(),
-                ) else {
-                    return ServicePoll::Done;
-                };
-
-                if let Some(PendingUpgrade {
-                    tx,
-                    upgraded,
-                    recv_stream,
-                }) = upgrade.take()
-                {
-                    if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
-                        let (upgraded, task) = self::upgrade::pair(send, recv_stream);
-                        let _ = tx.send(Upgraded::new(upgraded, None));
-                        vibeio::spawn(task);
-                        return ServicePoll::Done;
-                    }
-                }
-
-                if response_is_end_stream {
-                    return ServicePoll::Done;
-                }
-
-                return ServicePoll::Body(PipeToSendStream::new(send, response_body));
-            }
-
-            match stream.poll_reset(cx) {
-                Poll::Ready(Ok(_)) | Poll::Ready(Err(_)) => return ServicePoll::Done,
-                Poll::Pending => {}
-            }
-
-            if *send_continue
-                && !*continue_sent
-                && send_continue_body
-                    .as_ref()
-                    .is_some_and(|scb| scb.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                let mut response = Response::new(());
-                *response.status_mut() = http::StatusCode::CONTINUE;
-                let _ = stream.send_informational(response).map_err(h2_error_to_io);
-                *continue_sent = true;
-            }
-
-            if *early_hints_open {
-                match early_hints_rx.poll_recv(cx) {
-                    Poll::Ready(Some((headers, sender))) => {
-                        let mut response = Response::new(());
-                        *response.status_mut() = http::StatusCode::EARLY_HINTS;
-                        *response.headers_mut() = headers;
-                        sender
-                            .into_inner()
-                            .send(stream.send_informational(response).map_err(h2_error_to_io))
-                            .ok();
-                        continue;
-                    }
-                    Poll::Ready(None) => {
-                        *early_hints_open = false;
-                        continue;
-                    }
-                    Poll::Pending => {}
-                }
-            }
-
-            return ServicePoll::Pending;
-        }
-    }
-}
-
 /// An HTTP/2 connection handler.
 ///
 /// `Http2` wraps an async I/O stream (`Io`) and drives the HTTP/2 server
-/// connection using the [`h2`] crate. It supports:
+/// connection using the native implementation in [`connection`]. It
+/// supports:
 ///
 /// - Concurrent request stream handling
 /// - Streaming request/response bodies and trailers
@@ -401,7 +84,6 @@ where
 /// connection to completion.
 pub struct Http2<Io> {
     io_to_handshake: Option<Io>,
-    date_header_value_cached: Arc<DateCache>,
     options: Http2Options,
     cancel_token: Option<CancellationToken>,
 }
@@ -425,7 +107,6 @@ where
     pub fn new(io: Io, options: Http2Options) -> Self {
         Self {
             io_to_handshake: Some(io),
-            date_header_value_cached: Arc::new(DateCache::default()),
             options,
             cancel_token: None,
         }
@@ -446,167 +127,41 @@ impl<Io> HttpProtocol for Http2<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
 {
-    #[allow(clippy::manual_async_fn)]
     #[inline]
-    fn handle<F, Fut, ResB, ResBE, ResE>(
-        mut self,
-        request_fn: F,
-    ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
+    async fn handle<F, Fut, ResB, ResBE, ResE>(self, request_fn: F) -> Result<(), std::io::Error>
     where
-        F: Fn(Request<super::Incoming>) -> Fut + 'static,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: http_body::Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
-        ResE: std::error::Error,
-        ResBE: std::error::Error,
+        ResE: std::error::Error + 'static,
+        ResBE: std::error::Error + 'static,
     {
-        async move {
-            let handshake_fut = self.options.h2.handshake(
-                self.io_to_handshake
-                    .take()
-                    .ok_or_else(|| std::io::Error::other("no io to handshake"))?,
-            );
-            let mut h2 = (if let Some(timeout) = self.options.handshake_timeout {
-                vibeio::time::timeout(timeout, handshake_fut).await
-            } else {
-                Ok(handshake_fut.await)
-            })
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "handshake timeout"))?
-            .map_err(|e| {
-                if e.is_io() {
-                    e.into_io().unwrap_or(std::io::Error::other("io error"))
-                } else {
-                    std::io::Error::other(e)
-                }
-            })?;
+        let preface_timeout = self.options.handshake_timeout;
+        let options = ConnectionOptions {
+            send_continue_response: self.options.send_continue_response,
+            send_date_header: self.options.send_date_header,
+            max_concurrent_streams: self.options.max_concurrent_streams,
+            initial_stream_window_size: self.options.initial_stream_window_size,
+            initial_connection_window_size: self.options.initial_connection_window_size,
+            max_frame_size: self.options.max_frame_size,
+            max_header_list_size: self.options.max_header_list_size,
+        };
+        // The trait hands us a plain `Fn`; the native connection needs
+        // a `Clone` closure (it is reused across streams). Wrap it in an
+        // `Arc` so the spawned task can own a cheap clone.
+        let shared = std::sync::Arc::new(request_fn);
+        let handler = move |req: Request<Incoming>| shared(req);
 
-            while let Some(request) = {
-                let res = {
-                    let accept_fut_orig = h2.accept();
-                    let accept_fut_orig_pin = std::pin::pin!(accept_fut_orig);
-                    let cancel_token = self.cancel_token.clone();
-                    let cancel_fut = async move {
-                        if let Some(token) = cancel_token {
-                            token.cancelled().await
-                        } else {
-                            futures_util::future::pending().await
-                        }
-                    };
-                    let cancel_fut_pin = std::pin::pin!(cancel_fut);
-                    let accept_fut =
-                        futures_util::future::select(cancel_fut_pin, accept_fut_orig_pin);
-
-                    match if let Some(timeout) = self.options.accept_timeout {
-                        vibeio::time::timeout(timeout, accept_fut).await
-                    } else {
-                        Ok(accept_fut.await)
-                    } {
-                        Ok(futures_util::future::Either::Right((request, _))) => {
-                            (Some(request), false)
-                        }
-                        Ok(futures_util::future::Either::Left((_, _))) => {
-                            // Canceled
-                            (None, true)
-                        }
-                        Err(_) => {
-                            // Timeout
-                            (None, false)
-                        }
-                    }
-                };
-                match res {
-                    (Some(request), _) => request,
-                    (None, graceful) => {
-                        h2.graceful_shutdown();
-                        let _ = h2.accept().await;
-                        if graceful || !h2.has_streams() {
-                            return Ok(());
-                        }
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "accept timeout",
-                        ));
-                    }
-                }
-            } {
-                let (request, stream) = match request {
-                    Ok(d) => d,
-                    Err(e) if e.is_go_away() => {
-                        continue;
-                    }
-                    Err(e) if e.is_io() => {
-                        let e_io = e.into_io().unwrap_or(std::io::Error::other("io error"));
-                        if h2.has_streams()
-                            && matches!(
-                                e_io.kind(),
-                                std::io::ErrorKind::BrokenPipe
-                                    | std::io::ErrorKind::ConnectionReset
-                                    | std::io::ErrorKind::ConnectionAborted
-                                    | std::io::ErrorKind::UnexpectedEof
-                            )
-                        {
-                            // HTTP/2 abruptly closed when idle
-                            return Ok(());
-                        }
-                        return Err(e_io);
-                    }
-                    Err(e) => {
-                        return Err(std::io::Error::other(e));
-                    }
-                };
-
-                // 100 Continue
-                let is_100_continue = self.options.send_continue_response
-                    && request
-                        .headers()
-                        .get(http::header::EXPECT)
-                        .and_then(|v| v.to_str().ok())
-                        .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-
-                let date_cache = self.date_header_value_cached.clone();
-                let send_continue_body = is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
-                let (request_parts, recv_stream) = request.into_parts();
-                let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
-                    (Incoming::Empty, Some(recv_stream))
-                } else {
-                    (
-                        Incoming::H2(h2crate_body(recv_stream, send_continue_body.clone())),
-                        None,
-                    )
-                };
-                let mut request = Request::from_parts(request_parts, request_body);
-
-                // Install early hints
-                let (early_hints, early_hints_rx) = EarlyHints::new_lazy();
-                request.extensions_mut().insert(early_hints);
-
-                // Install HTTP upgrade
-                let upgrade = if let Some(recv_stream) = upgrade {
-                    let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
-                    let upgrade = Upgrade::new(upgrade_rx);
-                    let upgraded = upgrade.upgraded.clone();
-                    request.extensions_mut().insert(upgrade);
-                    Some(PendingUpgrade {
-                        tx: upgrade_tx,
-                        upgraded,
-                        recv_stream,
-                    })
-                } else {
-                    None
-                };
-
-                vibeio::spawn(H2Stream::new(
-                    stream,
-                    request_fn(request),
-                    early_hints_rx,
-                    date_cache,
-                    self.options.send_date_header,
-                    upgrade,
-                    is_100_continue,
-                    send_continue_body,
-                ));
-            }
-
-            Ok(())
-        }
+        let connection = Connection::new(
+            self.io_to_handshake
+                .ok_or_else(|| std::io::Error::other("no io to handshake"))?,
+            preface_timeout,
+        );
+        let connection = if let Some(token) = self.cancel_token {
+            connection.with_shutdown(token)
+        } else {
+            connection
+        };
+        connection.handle(handler, options).await
     }
 }

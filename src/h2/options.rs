@@ -1,113 +1,120 @@
-const DEFAULT_CONN_WINDOW: u32 = 1024 * 1024;
-const DEFAULT_STREAM_WINDOW: u32 = 1024 * 1024;
-const DEFAULT_MAX_FRAME_SIZE: u32 = 1024 * 16;
-const DEFAULT_MAX_SEND_BUF_SIZE: usize = 1024 * 400;
-const DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE: u32 = 1024 * 16;
-const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 200;
-const DEFAULT_MAX_LOCAL_ERROR_RESET_STREAMS: Option<usize> = Some(1024);
+use std::time::Duration;
 
-/// Configuration options for the HTTP/2 connection handler.
+use crate::h2::codec::{DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_FRAME_SIZE};
+
+/// HTTP/2 server configuration.
 ///
-/// Use the builder-style methods to customise behaviour, then pass the finished
-/// value to [`Http2::new`](super::Http2::new).
+/// Build one with [`Http2Options::default`] and override individual fields
+/// with the builder methods, then hand it to [`Http2::new`](crate::Http2::new).
 ///
-/// # Examples
-///
-/// ```rust,ignore
-/// let options = Http2Options::default()
-///     .handshake_timeout(Some(std::time::Duration::from_secs(10)))
-///     .accept_timeout(Some(std::time::Duration::from_secs(60)));
-/// ```
+/// Unlike the framing/header limits below, the connection window settings
+/// ([`initial_stream_window_size`](Http2Options::initial_stream_window_size)
+/// and [`initial_connection_window_size`](Http2Options::initial_connection_window_size))
+/// are advisory: a client may shrink them with its own `SETTINGS`, and the
+/// server honours the smaller value.
 #[derive(Debug, Clone)]
 pub struct Http2Options {
-    pub(super) h2: h2::server::Builder,
-    pub(super) accept_timeout: Option<std::time::Duration>,
-    pub(super) handshake_timeout: Option<std::time::Duration>,
-    pub(super) send_continue_response: bool,
+    /// Max time to wait for the client's preface before giving up.
+    pub(crate) handshake_timeout: Option<Duration>,
+    /// Send a `100 Continue` response as soon as a request's headers arrive,
+    /// before its body has been fully read.
+    pub(crate) send_continue_response: bool,
+    /// Insert a `Date` header into every response when absent.
     pub(crate) send_date_header: bool,
-}
-
-impl Http2Options {
-    /// Creates a new `Http2Options` from an `h2` server builder with the
-    /// following defaults:
-    ///
-    /// | Option | Default |
-    /// |---|---|
-    /// | `accept_timeout` | 30 seconds |
-    /// | `handshake_timeout` | 30 seconds |
-    /// | `send_continue_response` | `true` |
-    /// | `send_date_header` | `true` |
-    ///
-    /// The `h2` builder is used as-is and is not modified by this method.
-    pub fn new(h2: h2::server::Builder) -> Self {
-        Self {
-            h2,
-            accept_timeout: Some(std::time::Duration::from_secs(30)),
-            handshake_timeout: Some(std::time::Duration::from_secs(30)),
-            send_continue_response: true,
-            send_date_header: true,
-        }
-    }
-
-    /// Returns a mutable reference to the underlying `h2::server::Builder`.
-    ///
-    /// Use this to tune HTTP/2 protocol settings such as flow-control windows,
-    /// frame size limits, and header list size.
-    pub fn h2_builder(&mut self) -> &mut h2::server::Builder {
-        &mut self.h2
-    }
-
-    /// Sets the timeout for waiting on the next accepted HTTP/2 stream.
-    ///
-    /// If no new stream arrives before this duration, the connection is
-    /// gracefully shut down and the handler returns a timeout error.
-    /// Pass `None` to disable this timeout. Defaults to **30 seconds**.
-    pub fn accept_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
-        self.accept_timeout = timeout;
-        self
-    }
-
-    /// Sets the timeout for the initial HTTP/2 handshake.
-    ///
-    /// If the handshake does not complete within this duration, the handler
-    /// returns an I/O timeout error. Pass `None` to disable this timeout.
-    /// Defaults to **30 seconds**.
-    pub fn handshake_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
-        self.handshake_timeout = timeout;
-        self
-    }
-
-    /// Controls whether a `100 Continue` interim response is sent when a
-    /// request contains an `Expect: 100-continue` header.
-    ///
-    /// Defaults to **`true`**.
-    pub fn send_continue_response(mut self, send: bool) -> Self {
-        self.send_continue_response = send;
-        self
-    }
-
-    /// Controls whether a `Date` header is automatically added to every
-    /// response.
-    ///
-    /// The value is cached and refreshed at most once per second.
-    /// Defaults to **`true`**.
-    pub fn send_date_header(mut self, send: bool) -> Self {
-        self.send_date_header = send;
-        self
-    }
+    /// Maximum number of concurrent streams the server allows.
+    pub(crate) max_concurrent_streams: u32,
+    /// Initial per-stream flow-control window the server advertises.
+    pub(crate) initial_stream_window_size: u32,
+    /// Initial connection-level flow-control window the server uses.
+    pub(crate) initial_connection_window_size: u32,
+    /// Largest frame payload the server will send or receive.
+    pub(crate) max_frame_size: u32,
+    /// Largest uncompressed header list the server will accept.
+    pub(crate) max_header_list_size: u32,
 }
 
 impl Default for Http2Options {
+    #[inline]
     fn default() -> Self {
-        let mut builder = h2::server::Builder::new();
-        builder
-            .initial_window_size(DEFAULT_STREAM_WINDOW)
-            .initial_connection_window_size(DEFAULT_CONN_WINDOW)
-            .max_frame_size(DEFAULT_MAX_FRAME_SIZE)
-            .max_send_buffer_size(DEFAULT_MAX_SEND_BUF_SIZE)
-            .max_header_list_size(DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE)
-            .max_concurrent_streams(DEFAULT_MAX_CONCURRENT_STREAMS)
-            .max_local_error_reset_streams(DEFAULT_MAX_LOCAL_ERROR_RESET_STREAMS);
-        Self::new(builder)
+        Http2Options {
+            handshake_timeout: Some(Duration::from_secs(10)),
+            send_continue_response: true,
+            send_date_header: true,
+            max_concurrent_streams: 200,
+            initial_stream_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
+            max_header_list_size: u32::MAX,
+        }
+    }
+}
+
+impl Http2Options {
+    /// Sets the maximum time to wait for a client to send the HTTP/2
+    /// preface before aborting the connection.
+    #[inline]
+    pub fn handshake_timeout(mut self, handshake_timeout: Option<Duration>) -> Self {
+        self.handshake_timeout = handshake_timeout;
+        self
+    }
+
+    /// Sends `100 Continue` responses automatically when a request has a body.
+    ///
+    /// Defaults to `true`.
+    #[inline]
+    pub fn send_continue_response(mut self, send_continue_response: bool) -> Self {
+        self.send_continue_response = send_continue_response;
+        self
+    }
+
+    /// Inserts a `Date` header into responses that lack one.
+    ///
+    /// Defaults to `true`.
+    #[inline]
+    pub fn send_date_header(mut self, send_date_header: bool) -> Self {
+        self.send_date_header = send_date_header;
+        self
+    }
+
+    /// Sets the maximum number of concurrent streams allowed on a connection.
+    ///
+    /// Defaults to `200`.
+    #[inline]
+    pub fn max_concurrent_streams(mut self, max_concurrent_streams: u32) -> Self {
+        self.max_concurrent_streams = max_concurrent_streams;
+        self
+    }
+
+    /// Sets the initial per-stream flow-control window size advertised to the
+    /// client. Defaults to the RFC 9113 default (`65_535`).
+    #[inline]
+    pub fn initial_stream_window_size(mut self, initial_stream_window_size: u32) -> Self {
+        self.initial_stream_window_size = initial_stream_window_size;
+        self
+    }
+
+    /// Sets the initial connection-level flow-control window size.
+    /// Defaults to the RFC 9113 default (`65_535`).
+    #[inline]
+    pub fn initial_connection_window_size(mut self, initial_connection_window_size: u32) -> Self {
+        self.initial_connection_window_size = initial_connection_window_size;
+        self
+    }
+
+    /// Sets the maximum frame size the server will send or receive.
+    /// Defaults to the RFC 9113 default (`16_384`); must not exceed
+    /// `2^24 - 1`.
+    #[inline]
+    pub fn max_frame_size(mut self, max_frame_size: u32) -> Self {
+        self.max_frame_size = max_frame_size;
+        self
+    }
+
+    /// Sets the maximum size of an uncompressed header list the server will
+    /// accept. Defaults to `u32::MAX` (unbounded).
+    #[inline]
+    pub fn max_header_list_size(mut self, max_header_list_size: u32) -> Self {
+        self.max_header_list_size = max_header_list_size;
+        self
     }
 }

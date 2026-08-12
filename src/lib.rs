@@ -74,6 +74,8 @@ pub use h1::*;
 #[cfg(feature = "h2")]
 pub use h2::connection::*;
 #[cfg(feature = "h2")]
+pub use h2::options::Http2Options;
+#[cfg(feature = "h2")]
 pub use h2::*;
 #[cfg(feature = "h3")]
 pub use h3::*;
@@ -96,8 +98,8 @@ pub trait HttpProtocol: Sized {
         F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
-        ResE: std::error::Error,
-        ResBE: std::error::Error;
+        ResE: std::error::Error + 'static,
+        ResBE: std::error::Error + 'static;
 
     #[allow(unused_variables)]
     #[inline]
@@ -110,13 +112,13 @@ pub trait HttpProtocol: Sized {
         F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
-        ResE: std::error::Error,
-        ResBE: std::error::Error,
+        ResE: std::error::Error + 'static,
+        ResBE: std::error::Error + 'static,
         EF: FnOnce(bool) -> EFut,
         EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
-        EResE: std::error::Error,
-        EResBE: std::error::Error,
+        EResE: std::error::Error + 'static,
+        EResBE: std::error::Error + 'static,
     {
         self.handle(request_fn)
     }
