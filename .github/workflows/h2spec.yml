@@ -1,0 +1,47 @@
+name: h2spec
+
+# HTTP/2 conformance gate for the native backend. Builds the `h2spec_server`
+# example and runs it against h2spec with `--strict`, gating CI on the result.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  H2SPEC_VERSION: "2.6.0"
+
+jobs:
+  h2spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install h2spec
+        run: |
+          curl -fsSL -o h2spec.tar.gz \
+            "https://github.com/summerwind/h2spec/releases/download/v${H2SPEC_VERSION}/h2spec_linux_amd64.tar.gz"
+          tar -xzf h2spec.tar.gz
+          mkdir -p h2spec
+          mv h2spec_linux_amd64/h2spec h2spec/h2spec
+          chmod +x h2spec/h2spec
+          ./h2spec/h2spec --version
+
+      - name: Run h2spec conformance
+        # scripts/h2spec.sh builds the example (with --features h2), waits for
+        # readiness, runs h2spec --strict, and propagates its exit code.
+        run: bash scripts/h2spec.sh
+
+      - name: Upload h2spec report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2spec-report
+          path: target/h2spec-report.xml
+          if-no-files-found: ignore
