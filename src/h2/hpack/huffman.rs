@@ -282,6 +282,7 @@ const CODES: [(u8, u32); 257] = [
 
 /// Encodes `src` using the RFC 7541 Huffman code, appending the encoded
 /// bytes (with EOS-prefix padding to the octet boundary) to `dst`.
+#[inline]
 pub(crate) fn encode(src: &[u8], dst: &mut Vec<u8>) {
     let mut bits: u64 = 0;
     let mut nbits: u32 = 0;
@@ -300,6 +301,7 @@ pub(crate) fn encode(src: &[u8], dst: &mut Vec<u8>) {
 }
 
 /// The number of bits needed to Huffman-encode `src`.
+#[inline]
 pub(crate) fn encoded_len(src: &[u8]) -> usize {
     src.iter().map(|&b| usize::from(CODES[b as usize].0)).sum()
 }
@@ -311,6 +313,7 @@ pub(crate) fn encoded_len(src: &[u8]) -> usize {
 /// padding is not a prefix of the EOS code. The 4-bit DFA ([`HUFF_DFA`])
 /// advances one nibble at a time, so each encoded byte costs two table
 /// lookups instead of the eight a bit-by-bit walk would need.
+#[inline]
 pub(crate) fn decode(src: &[u8], dst: &mut Vec<u8>) -> Result<(), HpackError> {
     dst.clear();
     let mut state: usize = 0;
