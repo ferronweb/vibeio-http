@@ -69,7 +69,10 @@ pub(crate) fn parse_story(path: &Path) -> Story {
             let obj = header.as_object().expect("header is an object");
             assert_eq!(obj.len(), 1, "case {seqno}: header object has one key");
             let (name, value) = obj.iter().next().unwrap();
-            header_list.push((name.clone(), value.as_str().expect("header value").to_owned()));
+            header_list.push((
+                name.clone(),
+                value.as_str().expect("header value").to_owned(),
+            ));
         }
 
         let header_table_size = case
@@ -124,11 +127,7 @@ fn corpus_parses() {
     for path in &paths {
         let story = parse_story(path);
         total_cases += story.cases.len();
-        total_headers += story
-            .cases
-            .iter()
-            .map(|c| c.headers.len())
-            .sum::<usize>();
+        total_headers += story.cases.iter().map(|c| c.headers.len()).sum::<usize>();
         for case in &story.cases {
             assert!(!case.wire.is_empty(), "{}: empty wire", path.display());
         }
@@ -138,5 +137,8 @@ fn corpus_parses() {
     println!("stories: {}", paths.len());
     println!("cases: {total_cases}");
     println!("header entries: {total_headers}");
-    assert!(total_cases > 1000, "corpus is too small: {total_cases} cases");
+    assert!(
+        total_cases > 1000,
+        "corpus is too small: {total_cases} cases"
+    );
 }
