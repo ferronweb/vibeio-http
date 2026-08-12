@@ -1,5 +1,5 @@
 mod date;
-mod hpack;
+pub mod hpack;
 mod options;
 mod send;
 mod upgrade;

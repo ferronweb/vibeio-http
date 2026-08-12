@@ -92,7 +92,10 @@ pub(crate) fn parse_story(path: &Path) -> Story {
 }
 
 fn parse_hex(hex: &str) -> Vec<u8> {
-    assert!(hex.len() % 2 == 0, "wire hex string has even length");
+    assert!(
+        hex.len().is_multiple_of(2),
+        "wire hex string has even length"
+    );
     hex.as_bytes()
         .chunks_exact(2)
         .map(|pair| {
@@ -141,4 +144,60 @@ fn corpus_parses() {
         total_cases > 1000,
         "corpus is too small: {total_cases} cases"
     );
+}
+
+/// Decodes every fixture case; all cases in a story share one compression
+/// context (dynamic table state carries across cases in order), and a
+/// case's `header_table_size` is applied as the protocol maximum before
+/// that case.
+#[test]
+fn corpus_decodes() {
+    let mut failed = Vec::new();
+    let mut total = 0usize;
+    for path in story_paths() {
+        let story = parse_story(&path);
+        let mut decoder = hpack::Decoder::new(4096);
+        decoder.set_max_header_list_size(64 * 1024);
+        for (i, case) in story.cases.iter().enumerate() {
+            if let Some(size) = case.header_table_size {
+                decoder.queue_size_update(size as usize);
+            }
+            let got = decoder.decode(&case.wire);
+            let expected: Vec<(String, String)> = case.headers.clone();
+            total += 1;
+            match got {
+                Ok(headers) => {
+                    let got: Vec<(String, String)> = headers
+                        .into_iter()
+                        .map(|h| {
+                            (
+                                String::from_utf8(h.name().to_vec()).unwrap(),
+                                String::from_utf8(h.value().to_vec()).unwrap(),
+                            )
+                        })
+                        .collect();
+                    if got != expected {
+                        failed.push(format!(
+                            "{} case {i}: expected {expected:?}, got {got:?}",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    failed.push(format!("{} case {i}: decode error {e:?}", path.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "{} decode failures out of {total}:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+    println!("decoded cases: {total}");
+}
+
+mod hpack {
+    pub(crate) use vibeio_http::hpack::Decoder;
 }

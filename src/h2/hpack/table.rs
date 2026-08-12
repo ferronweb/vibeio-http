@@ -77,7 +77,7 @@ const ENTRY_OVERHEAD: usize = 32;
 
 /// A header field name/value pair stored in or fetched from a table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Header {
+pub struct Header {
     name: Bytes,
     value: Bytes,
 }
@@ -93,17 +93,18 @@ impl Header {
         ENTRY_OVERHEAD + self.name.len() + self.value.len()
     }
 
-    pub(crate) fn name(&self) -> &[u8] {
+    pub fn name(&self) -> &[u8] {
         &self.name
     }
 
-    pub(crate) fn value(&self) -> &[u8] {
+    pub fn value(&self) -> &[u8] {
         &self.value
     }
 }
 
 /// The HPACK header table: the immutable static table followed by a
 /// dynamically sized FIFO (RFC 7541 Section 4).
+#[derive(Debug)]
 pub(crate) struct Table {
     /// Dynamic entries, newest at the front. The entry at index 62 in the
     /// combined addressing scheme is `entries[0]`.

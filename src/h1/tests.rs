@@ -613,7 +613,7 @@ async fn test_http_pipelining() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            let requests = vec![
+            let requests = [
                 "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
                 "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
             ];
@@ -802,7 +802,7 @@ fn test_slowloris() {
 
             assert!(response_buf.starts_with(b"HTTP/1.1 408 Request Timeout\r\n"));
 
-            let _ = client_task.cancel();
+            client_task.cancel();
             let _ = server_task.await;
         });
 }
