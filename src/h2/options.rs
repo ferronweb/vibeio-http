@@ -47,7 +47,7 @@ impl Default for Http2Options {
             initial_stream_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
-            max_header_list_size: u32::MAX,
+            max_header_list_size: 1024 * 16,
             idle_timeout: None,
         }
     }

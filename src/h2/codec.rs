@@ -26,7 +26,7 @@ pub const DEFAULT_MAX_FRAME_SIZE: usize = 16_384;
 /// The largest settable frame payload size (2^24-1).
 pub const MAX_FRAME_SIZE_LIMIT: usize = 16_777_215;
 /// The initial connection flow-control window (RFC 9113 Section 5.2.1).
-pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65_535;
+pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 1_048_576;
 /// The largest legal flow-control window (2^31-1).
 pub const MAX_WINDOW_SIZE: u32 = 2_147_483_647;
 /// The HTTP/2 connection preface (RFC 9113 Section 3.5).
