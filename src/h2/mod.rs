@@ -145,6 +145,7 @@ where
             initial_connection_window_size: self.options.initial_connection_window_size,
             max_frame_size: self.options.max_frame_size,
             max_header_list_size: self.options.max_header_list_size,
+            idle_timeout: self.options.idle_timeout,
         };
         // The trait hands us a plain `Fn`; the native connection needs
         // a `Clone` closure (it is reused across streams). Wrap it in an

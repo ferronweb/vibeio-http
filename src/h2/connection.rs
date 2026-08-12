@@ -62,6 +62,9 @@ pub struct ConnectionOptions {
     pub max_frame_size: u32,
     /// Largest decoded header list we accept (`SETTINGS_MAX_HEADER_LIST_SIZE`).
     pub max_header_list_size: u32,
+    /// Close the connection after this long with no frame from the peer
+    /// (RFC 9113 Section 10.5). `None` disables the idle timeout.
+    pub idle_timeout: Option<Duration>,
 }
 
 impl Default for ConnectionOptions {
@@ -74,6 +77,7 @@ impl Default for ConnectionOptions {
             initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
             max_header_list_size: u32::MAX,
+            idle_timeout: None,
         }
     }
 }
@@ -298,6 +302,18 @@ where
             pin_mut!(wake_recv);
             pin_mut!(read);
             pin_mut!(shutdown_fut);
+            // Idle timeout (RFC 9113 Section 10.5): no frame received from the
+            // peer within `idle_timeout` => graceful shutdown. Recreated each
+            // iteration so it measures the gap since the last received frame.
+            let mut idle: Pin<Box<dyn futures_util::future::FusedFuture<Output = ()>>> =
+                match self.opts.idle_timeout {
+                    Some(d) => Box::pin(
+                        vibeio::time::timeout(d, futures_util::future::pending::<()>())
+                            .map(|_| ())
+                            .fuse(),
+                    ),
+                    None => Box::pin(futures_util::future::pending::<()>().fuse()),
+                };
             futures_util::select! {
                 n = read => {
                     let n = n?;
@@ -317,6 +333,13 @@ where
                 _ = shutdown_fut => {
                     self.begin_graceful_shutdown();
                     self.flush().await?;
+                }
+                _ = idle => {
+                    // The peer was silent for `idle_timeout`; close the
+                    // connection gracefully (GOAWAY) and stop.
+                    self.begin_graceful_shutdown();
+                    self.flush().await?;
+                    break;
                 }
             }
         }
@@ -863,10 +886,7 @@ where
                     if setting.value < DEFAULT_MAX_FRAME_SIZE as u32
                         || setting.value > MAX_FRAME_SIZE_LIMIT as u32
                     {
-                        self.goaway(
-                            Reason::ProtocolError,
-                            b"invalid SETTINGS_MAX_FRAME_SIZE",
-                        );
+                        self.goaway(Reason::ProtocolError, b"invalid SETTINGS_MAX_FRAME_SIZE");
                         return;
                     }
                     self.peer.max_frame_size = setting.value as usize;
@@ -1321,7 +1341,12 @@ mod tests {
     /// The preface timeout needs the vibeio timer, which does not run
     /// under a plain tokio test runtime (same pattern as the h1
     /// slowloris test), so a vibeio runtime is built per call.
-    fn run_connection(preface: &[u8], frames: &[u8], preface_timeout: Option<Duration>) -> Vec<u8> {
+    fn run_connection(
+        preface: &[u8],
+        frames: &[u8],
+        preface_timeout: Option<Duration>,
+        idle_timeout: Option<Duration>,
+    ) -> Vec<u8> {
         let script: Vec<u8> = [preface, frames].concat();
         vibeio::RuntimeBuilder::new()
             .enable_timer(true)
@@ -1333,7 +1358,17 @@ mod tests {
 
                 let server = vibeio::spawn(async move {
                     let conn = Connection::new(server_end, preface_timeout);
-                    let _ = conn.drive().await;
+                    let _ = conn
+                        .handle(
+                            |_| {
+                                std::future::pending::<Result<Response<Incoming>, std::io::Error>>()
+                            },
+                            ConnectionOptions {
+                                idle_timeout,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                 });
 
                 let mut client = client_end;
@@ -1390,6 +1425,7 @@ mod tests {
             CLIENT_PREFACE,
             &client_script(|_, _| {}),
             Some(Duration::from_secs(5)),
+            None,
         );
         let decoded = decode_frames(&reply);
 
@@ -1410,6 +1446,7 @@ mod tests {
             b"INVALID CONNECTION PREFACE!!",
             &[],
             Some(Duration::from_secs(5)),
+            None,
         );
         let decoded = decode_frames(&reply);
         assert_eq!(decoded.len(), 1);
@@ -1452,6 +1489,7 @@ mod tests {
                 );
             }),
             Some(Duration::from_secs(5)),
+            None,
         );
         let decoded = decode_frames(&reply);
         // One ACK per non-ACK SETTINGS frame, in order.
@@ -1473,7 +1511,7 @@ mod tests {
         ];
         let mut frames = client_script(|_, _| {});
         frames.extend_from_slice(&bad);
-        let reply = run_connection(CLIENT_PREFACE, &frames, Some(Duration::from_secs(5)));
+        let reply = run_connection(CLIENT_PREFACE, &frames, Some(Duration::from_secs(5)), None);
         let decoded = decode_frames(&reply);
         assert!(matches!(
             decoded.last().and_then(|f| match f {
@@ -1492,6 +1530,7 @@ mod tests {
                 writer.write_ping(script, &[1, 2, 3, 4, 5, 6, 7, 8]);
             }),
             Some(Duration::from_secs(5)),
+            None,
         );
         let decoded = decode_frames(&reply);
         assert!(decoded.iter().any(|f| matches!(
@@ -1505,11 +1544,26 @@ mod tests {
         let mut script = client_script(|_, _| {});
         FrameWriter::new(DEFAULT_MAX_FRAME_SIZE).write_goaway(&mut script, 0, 0x00, b"bye");
 
-        let reply = run_connection(CLIENT_PREFACE, &script, Some(Duration::from_secs(5)));
+        let reply = run_connection(CLIENT_PREFACE, &script, Some(Duration::from_secs(5)), None);
         let decoded = decode_frames(&reply);
         // The peer's GOAWAY draws no reply beyond the SETTINGS
         // exchange; the server closes quietly.
         assert!(!decoded.iter().any(|f| matches!(f, Frame::GoAway { .. })));
+    }
+
+    #[test]
+    fn idle_timeout_closes_connection() {
+        // With an idle timeout set, a peer that completes the handshake and
+        // then goes silent must be shut down gracefully with a GOAWAY
+        // (RFC 9113 Section 10.5).
+        let reply = run_connection(
+            CLIENT_PREFACE,
+            &client_script(|_, _| {}),
+            Some(Duration::from_secs(5)),
+            Some(Duration::from_millis(30)),
+        );
+        let decoded = decode_frames(&reply);
+        assert!(decoded.iter().any(|f| matches!(f, Frame::GoAway { .. })));
     }
 
     #[test]

@@ -31,6 +31,9 @@ pub struct Http2Options {
     pub(crate) max_frame_size: u32,
     /// Largest uncompressed header list the server will accept.
     pub(crate) max_header_list_size: u32,
+    /// Close a connection after this long with no frame from the peer
+    /// (RFC 9113 Section 10.5). `None` disables the idle timeout.
+    pub(crate) idle_timeout: Option<Duration>,
 }
 
 impl Default for Http2Options {
@@ -45,6 +48,7 @@ impl Default for Http2Options {
             initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
             max_header_list_size: u32::MAX,
+            idle_timeout: None,
         }
     }
 }
@@ -115,6 +119,15 @@ impl Http2Options {
     #[inline]
     pub fn max_header_list_size(mut self, max_header_list_size: u32) -> Self {
         self.max_header_list_size = max_header_list_size;
+        self
+    }
+
+    /// Sets the idle timeout: a connection that receives no frame from the
+    /// peer for this long is closed gracefully with a `GOAWAY` (RFC 9113
+    /// Section 10.5). Defaults to `None` (no idle timeout).
+    #[inline]
+    pub fn idle_timeout(mut self, idle_timeout: Option<Duration>) -> Self {
+        self.idle_timeout = idle_timeout;
         self
     }
 }
