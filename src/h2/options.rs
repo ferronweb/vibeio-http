@@ -90,7 +90,7 @@ impl Http2Options {
     }
 
     /// Sets the initial per-stream flow-control window size advertised to the
-    /// client. Defaults to the RFC 9113 default (`65_535`).
+    /// client. Defaults to `1_048_576`.
     #[inline]
     pub fn initial_stream_window_size(mut self, initial_stream_window_size: u32) -> Self {
         self.initial_stream_window_size = initial_stream_window_size;
@@ -98,7 +98,7 @@ impl Http2Options {
     }
 
     /// Sets the initial connection-level flow-control window size.
-    /// Defaults to the RFC 9113 default (`65_535`).
+    /// Defaults to `1_048_576`.
     #[inline]
     pub fn initial_connection_window_size(mut self, initial_connection_window_size: u32) -> Self {
         self.initial_connection_window_size = initial_connection_window_size;
@@ -115,7 +115,7 @@ impl Http2Options {
     }
 
     /// Sets the maximum size of an uncompressed header list the server will
-    /// accept. Defaults to `u32::MAX` (unbounded).
+    /// accept. Defaults to `16_384`.
     #[inline]
     pub fn max_header_list_size(mut self, max_header_list_size: u32) -> Self {
         self.max_header_list_size = max_header_list_size;
