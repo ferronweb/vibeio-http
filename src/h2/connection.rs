@@ -32,11 +32,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::codec::{
     Frame, FrameDecoder, FrameWriter, Setting, CLIENT_PREFACE, DEFAULT_INITIAL_WINDOW_SIZE,
-    DEFAULT_MAX_FRAME_SIZE,
+    DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE_LIMIT,
 };
 use super::date::DateCache;
 use super::error::Reason;
-use super::hpack::{Decoder as HpackDecoder, Encoder, Header as HpackHeader};
+use super::hpack::{Decoder as HpackDecoder, Encoder, Header as HpackHeader, HpackError};
 use super::sanitize_response;
 use super::stream::{
     BodyMsg, H2Body, MalformedRequest, ParsedRequest, StreamDriver, StreamEntry, StreamMsg,
@@ -585,10 +585,17 @@ where
         let end_stream = entry.pending_end_stream;
         let decoded = match self.request_decoder.decode(&block) {
             Ok(headers) => headers,
-            Err(_) => {
-                // Compression errors are connection errors (RFC 9113
-                // Section 4.3).
-                self.goaway(Reason::CompressionError, b"hpack decode error");
+            Err(e) => {
+                if matches!(e, HpackError::HeaderListTooLarge) {
+                    // A header list exceeding SETTINGS_MAX_HEADER_LIST_SIZE is
+                    // a stream error (RFC 9113 Section 10.5.1), not a
+                    // connection-level compression error.
+                    self.stream_error(stream_id, Reason::ProtocolError);
+                } else {
+                    // Other compression errors are connection errors
+                    // (RFC 9113 Section 4.3).
+                    self.goaway(Reason::CompressionError, b"hpack decode error");
+                }
                 return;
             }
         };
@@ -850,7 +857,18 @@ where
                     }
                 }
                 0x05 => {
-                    // SETTINGS_MAX_FRAME_SIZE: cap for frames we send.
+                    // SETTINGS_MAX_FRAME_SIZE: bounds-checked, since the
+                    // value MUST be in [2^14, 2^24-1] (RFC 9113 Section
+                    // 6.5.2). Anything else is a connection error.
+                    if setting.value < DEFAULT_MAX_FRAME_SIZE as u32
+                        || setting.value > MAX_FRAME_SIZE_LIMIT as u32
+                    {
+                        self.goaway(
+                            Reason::ProtocolError,
+                            b"invalid SETTINGS_MAX_FRAME_SIZE",
+                        );
+                        return;
+                    }
                     self.peer.max_frame_size = setting.value as usize;
                     self.writer.max_frame_size = setting.value as usize;
                 }
