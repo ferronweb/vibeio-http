@@ -630,6 +630,13 @@ where
                 return;
             }
         };
+        if end_stream {
+            // No DATA frame will follow: close the request body now so the
+            // handler's body reader sees end-of-stream (RFC 9113 Section
+            // 8.1). A trailing DATA frame ending the stream is handled by
+            // `handle_data_frame`.
+            self.end_request_body(stream_id).await;
+        }
         self.spawn_request(stream_id, end_stream, parsed, request_fn);
     }
 
