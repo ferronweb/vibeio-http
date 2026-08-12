@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod connection;
 mod date;
 pub mod error;
 pub mod hpack;
