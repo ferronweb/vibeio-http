@@ -5,7 +5,47 @@ pub mod error;
 pub mod hpack;
 mod options;
 mod send;
+mod stream;
 mod upgrade;
+
+pub(crate) use stream::H2Body;
+
+/// Bridges an `h2`-crate request stream into the channel-backed
+/// [`H2Body`], so the crate-level server shares the body type with the
+/// native connection until the crate path is fully replaced.
+fn h2crate_body(
+    recv_stream: h2::RecvStream,
+    send_continue_body: Option<Arc<AtomicBool>>,
+) -> H2Body {
+    let (body_tx, body_rx) = tokio::sync::mpsc::channel(32);
+    vibeio::spawn(async move {
+        let mut recv = recv_stream;
+        loop {
+            let next = std::future::poll_fn(|cx| recv.poll_data(cx)).await;
+            match next {
+                Some(Ok(data)) => {
+                    let _ = recv.flow_control().release_capacity(data.len());
+                    if body_tx.send(stream::BodyMsg::Data(data)).await.is_err() {
+                        return;
+                    }
+                }
+                Some(Err(_)) => return,
+                None => break,
+            }
+        }
+        if let Ok(Some(trailers)) = std::future::poll_fn(|cx| recv.poll_trailers(cx)).await {
+            if body_tx
+                .send(stream::BodyMsg::Trailers(trailers))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = body_tx.send(stream::BodyMsg::EndStream).await;
+    });
+    H2Body::new(body_rx, send_continue_body)
+}
 
 pub use options::*;
 use pin_project_lite::pin_project;
@@ -18,9 +58,8 @@ use std::{
     task::{Context, Poll},
 };
 
-use bytes::Bytes;
 use http::{Request, Response};
-use http_body::{Body, Frame};
+use http_body::Body;
 
 use crate::{
     early_hints::EarlyHintsReceiver,
@@ -39,63 +78,6 @@ static HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::UPGRADE,
 ];
 
-pub(crate) struct H2Body {
-    recv: h2::RecvStream,
-    data_done: bool,
-    send_continue_body: Option<Arc<AtomicBool>>,
-}
-
-impl H2Body {
-    #[inline]
-    fn new(recv: h2::RecvStream, send_continue_body: Option<Arc<AtomicBool>>) -> Self {
-        Self {
-            recv,
-            data_done: false,
-            send_continue_body,
-        }
-    }
-}
-
-impl Body for H2Body {
-    type Data = Bytes;
-    type Error = std::io::Error;
-
-    #[inline]
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        if !self.data_done {
-            match self.recv.poll_data(cx) {
-                Poll::Ready(Some(Ok(data))) => {
-                    let _ = self.recv.flow_control().release_capacity(data.len());
-                    return Poll::Ready(Some(Ok(Frame::data(data))));
-                }
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(h2_error_to_io(err)))),
-                Poll::Ready(None) => self.data_done = true,
-                Poll::Pending => {
-                    if let Some(scb) = self.send_continue_body.as_ref() {
-                        scb.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    return Poll::Pending;
-                }
-            }
-        }
-
-        match self.recv.poll_trailers(cx) {
-            Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
-            Poll::Ready(Ok(None)) => Poll::Ready(None),
-            Poll::Ready(Err(err)) => Poll::Ready(Some(Err(h2_error_to_io(err)))),
-            Poll::Pending => {
-                if let Some(scb) = self.send_continue_body.as_ref() {
-                    scb.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                Poll::Pending
-            }
-        }
-    }
-}
-
 #[inline]
 pub(super) fn h2_error_to_io(error: h2::Error) -> std::io::Error {
     if error.is_io() {
@@ -111,7 +93,7 @@ pub(super) fn h2_reason_to_io(reason: h2::Reason) -> std::io::Error {
 }
 
 #[inline]
-fn sanitize_response<ResB>(
+pub(super) fn sanitize_response<ResB>(
     response: &mut Response<ResB>,
     send_date_header: bool,
     date_cache: &DateCache,
@@ -168,7 +150,7 @@ pin_project! {
             #[pin]
             response_fut: Fut,
             early_hints_rx: EarlyHintsReceiver,
-            date_cache: DateCache,
+            date_cache: Arc<DateCache>,
             send_date_header: bool,
             upgrade: Option<PendingUpgrade>,
             send_continue: bool,
@@ -194,7 +176,7 @@ where
         stream: h2::server::SendResponse<SendBuf<ResB::Data>>,
         response_fut: Fut,
         early_hints_rx: EarlyHintsReceiver,
-        date_cache: DateCache,
+        date_cache: Arc<DateCache>,
         send_date_header: bool,
         upgrade: Option<PendingUpgrade>,
         send_continue: bool,
@@ -298,7 +280,7 @@ where
                     return ServicePoll::Done;
                 };
 
-                sanitize_response(&mut response, *send_date_header, date_cache);
+                sanitize_response(&mut response, *send_date_header, date_cache.as_ref());
 
                 let response_is_end_stream = response.body().is_end_stream();
                 if !response_is_end_stream {
@@ -419,7 +401,7 @@ where
 /// connection to completion.
 pub struct Http2<Io> {
     io_to_handshake: Option<Io>,
-    date_header_value_cached: DateCache,
+    date_header_value_cached: Arc<DateCache>,
     options: Http2Options,
     cancel_token: Option<CancellationToken>,
 }
@@ -443,7 +425,7 @@ where
     pub fn new(io: Io, options: Http2Options) -> Self {
         Self {
             io_to_handshake: Some(io),
-            date_header_value_cached: DateCache::default(),
+            date_header_value_cached: Arc::new(DateCache::default()),
             options,
             cancel_token: None,
         }
@@ -587,7 +569,7 @@ where
                     (Incoming::Empty, Some(recv_stream))
                 } else {
                     (
-                        Incoming::H2(H2Body::new(recv_stream, send_continue_body.clone())),
+                        Incoming::H2(h2crate_body(recv_stream, send_continue_body.clone())),
                         None,
                     )
                 };

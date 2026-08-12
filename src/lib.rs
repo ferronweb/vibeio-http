@@ -72,6 +72,8 @@ pub use early_hints::*;
 #[cfg(feature = "h1")]
 pub use h1::*;
 #[cfg(feature = "h2")]
+pub use h2::connection::*;
+#[cfg(feature = "h2")]
 pub use h2::*;
 #[cfg(feature = "h3")]
 pub use h3::*;

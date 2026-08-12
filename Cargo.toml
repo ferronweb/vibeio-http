@@ -13,6 +13,7 @@ repository = "https://github.com/ferronweb/vibeio-http"
 
 [dependencies]
 bytes = "1.11.1"
+futures-channel = { version = "0.3", optional = true }
 futures-util = "0.3.32"
 http = "1.4.0"
 http-body = "1.0.1"
@@ -48,5 +49,5 @@ serde_json = "1"
 default = ["h1", "h1-zerocopy", "h2"]
 h1 = ["httparse", "httpdate", "memchr", "tokio-util"]
 h1-zerocopy = ["h1", "vibeio/splice"]
-h2 = ["dep:h2", "httpdate", "tokio-util", "pin-project-lite"]
+h2 = ["dep:h2", "dep:futures-channel", "httpdate", "tokio-util", "pin-project-lite"]
 h3 = ["dep:h3", "httpdate", "tokio-util"]

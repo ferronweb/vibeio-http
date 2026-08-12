@@ -184,10 +184,9 @@ impl FrameDecoder {
         let flags = self.buf[4];
         let raw_stream_id =
             u32::from_be_bytes([self.buf[5], self.buf[6], self.buf[7], self.buf[8]]);
-        // The reserved bit must not be set (RFC 9113 Section 4.1).
-        if raw_stream_id & 0x8000_0000 != 0 {
-            return Err(H2Error::protocol("frame header reserved bit is set"));
-        }
+        // RFC 9113 Section 4.1: the high bit of the stream identifier
+        // field is reserved and MUST be ignored, not treated as an
+        // error.
         let stream_id = raw_stream_id & 0x7fff_ffff;
 
         if payload_len > self.max_frame_size {
