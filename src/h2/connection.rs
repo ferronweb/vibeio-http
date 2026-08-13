@@ -219,7 +219,7 @@ where
     #[inline]
     pub async fn drive(self) -> std::io::Result<()> {
         self.handle(
-            |_| std::future::pending::<Result<Response<Incoming>, std::io::Error>>(),
+            Arc::new(|_| std::future::pending::<Result<Response<Incoming>, std::io::Error>>()),
             ConnectionOptions::default(),
         )
         .await
@@ -235,11 +235,11 @@ where
     #[inline]
     pub async fn handle<F, Fut, ResB, ResBE, ResE>(
         mut self,
-        mut request_fn: F,
+        request_fn: Arc<F>,
         options: ConnectionOptions,
     ) -> std::io::Result<()>
     where
-        F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
         ResBE: std::error::Error + 'static,
@@ -327,7 +327,7 @@ where
                         break; // peer closed; nothing more to say
                     }
                     self.decoder.extend(&buf[..n]);
-                    peer_goaway = self.process_frames(&mut request_fn).await?;
+                    peer_goaway = self.process_frames(&request_fn).await?;
                     self.drain_outbound();
                     self.flush().await?;
                 }
@@ -395,10 +395,10 @@ where
     #[inline]
     async fn process_frames<F, Fut, ResB, ResBE, ResE>(
         &mut self,
-        request_fn: &mut F,
+        request_fn: &Arc<F>,
     ) -> std::io::Result<bool>
     where
-        F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
         ResBE: std::error::Error + 'static,
@@ -479,7 +479,7 @@ where
             // field block per frame arrival; act on it while the
             // handler closure is in scope.
             if let Some(id) = self.take_complete_block() {
-                self.finalize_field_block(id, request_fn).await;
+                self.finalize_field_block(id, &request_fn).await;
             }
             if self.closing {
                 self.flush().await?;
@@ -606,9 +606,9 @@ where
     async fn finalize_field_block<F, Fut, ResB, ResBE, ResE>(
         &mut self,
         stream_id: u32,
-        request_fn: &mut F,
+        request_fn: &Arc<F>,
     ) where
-        F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
         ResBE: std::error::Error + 'static,
@@ -692,9 +692,9 @@ where
         stream_id: u32,
         end_stream: bool,
         parsed: ParsedRequest,
-        request_fn: &mut F,
+        request_fn: &Arc<F>,
     ) where
-        F: FnMut(Request<Incoming>) -> Fut + Clone + 'static,
+        F: Fn(Request<Incoming>) -> Fut + 'static,
         Fut: Future<Output = Result<Response<ResB>, ResE>> + 'static,
         ResB: Body<Data = Bytes, Error = ResBE> + Unpin + 'static,
         ResBE: std::error::Error + 'static,
@@ -738,7 +738,7 @@ where
 
         let date_cache = self.date_cache.clone();
         let send_date_header = self.opts.send_date_header;
-        let mut request_fn = request_fn.clone();
+        let request_fn = request_fn.clone();
         let response_fut = Box::pin(async move {
             let mut response = request_fn(request).await.map_err(e2io)?;
             sanitize_response(&mut response, send_date_header, &date_cache);
@@ -1414,9 +1414,9 @@ mod tests {
                     let conn = Connection::new(server_end, preface_timeout);
                     let _ = conn
                         .handle(
-                            |_| {
+                            Arc::new(|_| {
                                 std::future::pending::<Result<Response<Incoming>, std::io::Error>>()
-                            },
+                            }),
                             ConnectionOptions {
                                 idle_timeout,
                                 ..Default::default()

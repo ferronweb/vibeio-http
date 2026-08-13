@@ -151,7 +151,6 @@ where
         // a `Clone` closure (it is reused across streams). Wrap it in an
         // `Arc` so the spawned task can own a cheap clone.
         let shared = std::sync::Arc::new(request_fn);
-        let handler = move |req: Request<Incoming>| shared(req);
 
         let connection = Connection::new(
             self.io_to_handshake
@@ -163,6 +162,6 @@ where
         } else {
             connection
         };
-        connection.handle(handler, options).await
+        connection.handle(shared, options).await
     }
 }

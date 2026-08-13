@@ -193,7 +193,7 @@ impl StreamEntry {
 /// the driver can emit `100 Continue` on first demand (RFC 9113
 /// Section 8.1.1).
 pub(crate) struct H2Body {
-    inner: Pin<Box<kanal::AsyncReceiver<BodyMsg>>>,
+    inner: kanal::AsyncReceiver<BodyMsg>,
     send_continue_body: Option<Arc<AtomicBool>>,
     ended: bool,
 }
@@ -205,7 +205,7 @@ impl H2Body {
         send_continue_body: Option<Arc<AtomicBool>>,
     ) -> Self {
         H2Body {
-            inner: Box::pin(rx),
+            inner: rx,
             send_continue_body,
             ended: false,
         }
