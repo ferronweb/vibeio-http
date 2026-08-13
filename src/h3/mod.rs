@@ -1,3 +1,13 @@
+//! Native HTTP/3 server (RFC 9114) over the [`transport`] abstraction.
+//!
+//! A single connection task owns the control plane ([`control`]) and
+//! accept loops; each accepted request stream is handed to its own task
+//! through an async [`futures_util::lock::Mutex`], sharing the connection's
+//! QPACK codecs ([`stream::SharedCodecs`]) with the driver. Requests and
+//! responses are streamed with trailers; `100 Continue` and `103 Early
+//! Hints` interim responses are supported, as are `Date` header caching
+//! and graceful shutdown via a [`CancellationToken`].
+
 mod control;
 mod date;
 mod error;
@@ -13,24 +23,42 @@ mod upgrade;
 
 pub use error::{H3Error, TransportError};
 pub use frame::{Frame, FrameDecoder, FrameError, Settings};
-
-use futures_util::FutureExt;
 pub use options::*;
-use tokio_util::sync::CancellationToken;
 
 use std::{
     pin::Pin,
     rc::Rc,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
 
-use bytes::{Buf, Bytes};
-use http::{Request, Response};
+use bytes::Bytes;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{ready, Future, FutureExt, StreamExt};
+use http::{Request, Response, StatusCode};
 use http_body::{Body, Frame as BodyFrame};
 use http_body_util::BodyExt;
+use tokio_util::sync::CancellationToken;
 
-use crate::{h3::date::DateCache, EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded};
+use crate::{
+    h3::{
+        control::{ControlEvent, ControlStreams},
+        date::DateCache,
+        stream::{RequestStream, SharedCodecs},
+    },
+    EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
+};
+
+/// Application error codes from RFC 9114 Section 8.1 used by the driver.
+const H3_NO_ERROR: u64 = 0x0100;
+const H3_REQUEST_REJECTED: u64 = 0x010b;
+
+/// The shared handle on a request stream: the connection task, the request
+/// task, the response body, and a possible upgrade all work through it.
+type SharedRequest = Arc<futures_util::lock::Mutex<RequestStream>>;
 
 static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::HeaderName::from_static("keep-alive"),
@@ -40,25 +68,23 @@ static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::UPGRADE,
 ];
 
-struct H3BodyState<S, B> {
-    recv: h3::server::RequestStream<S, B>,
+/// The read half of a shared request stream, as a [`Body`].
+struct H3BodyState {
+    stream: SharedRequest,
     data_done: bool,
     send_continue_body: Option<Arc<AtomicBool>>,
 }
 
-pub(crate) struct H3Body<S, B> {
-    inner: futures_util::lock::Mutex<H3BodyState<S, B>>,
+pub(crate) struct H3Body {
+    inner: futures_util::lock::Mutex<H3BodyState>,
 }
 
-impl<S, B> H3Body<S, B> {
+impl H3Body {
     #[inline]
-    fn new(
-        recv: h3::server::RequestStream<S, B>,
-        send_continue_body: Option<Arc<AtomicBool>>,
-    ) -> Self {
+    fn new(stream: SharedRequest, send_continue_body: Option<Arc<AtomicBool>>) -> Self {
         Self {
             inner: futures_util::lock::Mutex::new(H3BodyState {
-                recv,
+                stream,
                 data_done: false,
                 send_continue_body,
             }),
@@ -66,11 +92,7 @@ impl<S, B> H3Body<S, B> {
     }
 }
 
-impl<S, B> Body for H3Body<S, B>
-where
-    S: h3::quic::RecvStream + Send,
-    B: bytes::Buf + Send,
-{
+impl Body for H3Body {
     type Data = Bytes;
     type Error = std::io::Error;
 
@@ -85,25 +107,42 @@ where
         };
 
         if !inner.data_done {
-            match inner.recv.poll_recv_data(cx) {
-                Poll::Ready(Ok(Some(mut data))) => {
-                    let data = data.copy_to_bytes(data.remaining());
-                    return Poll::Ready(Some(Ok(BodyFrame::data(data))));
-                }
-                Poll::Ready(Ok(None)) => inner.data_done = true,
-                Poll::Ready(Err(err)) => {
-                    return Poll::Ready(Some(Err(h3_stream_error_to_io(err))));
-                }
-                Poll::Pending => {
-                    if let Some(scb) = inner.send_continue_body.as_ref() {
-                        scb.store(true, std::sync::atomic::Ordering::Relaxed);
+            let done = {
+                let mut stream = match inner.stream.lock().poll_unpin(cx) {
+                    Poll::Ready(stream) => stream,
+                    Poll::Pending => return Poll::Pending,
+                };
+                match stream.poll_recv_data(cx) {
+                    Poll::Ready(Ok(Some(data))) => {
+                        return Poll::Ready(Some(Ok(BodyFrame::data(data))));
                     }
-                    return Poll::Pending;
+                    Poll::Ready(Ok(None)) => true,
+                    Poll::Ready(Err(err)) => {
+                        return Poll::Ready(Some(Err(h3_stream_error_to_io(err))));
+                    }
+                    Poll::Pending => {
+                        if let Some(scb) = inner.send_continue_body.as_ref() {
+                            scb.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        return Poll::Pending;
+                    }
                 }
+            };
+            if done {
+                inner.data_done = true;
             }
         }
 
-        match inner.recv.poll_recv_trailers(cx) {
+        let mut stream = match inner.stream.lock().poll_unpin(cx) {
+            Poll::Ready(stream) => stream,
+            Poll::Pending => {
+                if let Some(scb) = inner.send_continue_body.as_ref() {
+                    scb.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                return Poll::Pending;
+            }
+        };
+        match stream.poll_recv_trailers(cx) {
             Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(BodyFrame::trailers(trailers)))),
             Poll::Ready(Ok(None)) => Poll::Ready(None),
             Poll::Ready(Err(err)) => Poll::Ready(Some(Err(h3_stream_error_to_io(err)))),
@@ -118,16 +157,17 @@ where
 }
 
 #[inline]
-fn h3_connection_error_to_io(error: h3::error::ConnectionError) -> std::io::Error {
-    // There could be logic to construct different error kinds,
-    // but for now we just convert to other, because for private enum variants.
+fn h3_control_error_to_io(error: control::ControlError) -> std::io::Error {
     std::io::Error::other(error)
 }
 
 #[inline]
-fn h3_stream_error_to_io(error: h3::error::StreamError) -> std::io::Error {
-    // There could be logic to construct different error kinds,
-    // but for now we just convert to other, because for private enum variants.
+fn h3_transport_error_to_io(error: TransportError) -> std::io::Error {
+    std::io::Error::other(error)
+}
+
+#[inline]
+fn h3_stream_error_to_io(error: stream::StreamError) -> std::io::Error {
     std::io::Error::other(error)
 }
 
@@ -146,20 +186,339 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
     }
 }
 
+/// Waits until the peer's SETTINGS bound the QPACK encoder, so field
+/// sections can be encoded (RFC 9204 Section 5).
+///
+/// The control plane wakes this task (via the shared waiters map) when
+/// the SETTINGS frame arrives.
+async fn wait_for_encoder(shared: &Arc<std::sync::Mutex<SharedCodecs>>, stream_id: u64) {
+    std::future::poll_fn(|cx| {
+        let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if shared.encoder.is_some() {
+            shared.waiters.remove(&stream_id);
+            return Poll::Ready(());
+        }
+        shared.waiters.insert(stream_id, cx.waker().clone());
+        Poll::Pending
+    })
+    .await
+}
+
+/// Writes an interim (1xx) response HEADERS frame.
+async fn send_interim_response(
+    stream: &SharedRequest,
+    status: StatusCode,
+) -> Result<(), std::io::Error> {
+    let mut guard = stream.lock().await;
+    std::future::poll_fn(|cx| guard.poll_send_response(cx, status, &http::HeaderMap::new()))
+        .await
+        .map_err(h3_stream_error_to_io)
+}
+
+/// Writes the response HEADERS frame for `status`/`headers`, waiting for
+/// the peer's SETTINGS first.
+async fn send_response(
+    stream: &SharedRequest,
+    shared: &Arc<std::sync::Mutex<SharedCodecs>>,
+    stream_id: u64,
+    status: StatusCode,
+    headers: &http::HeaderMap,
+) -> Result<(), std::io::Error> {
+    wait_for_encoder(shared, stream_id).await;
+    let mut guard = stream.lock().await;
+    std::future::poll_fn(|cx| guard.poll_send_response(cx, status, headers))
+        .await
+        .map_err(h3_stream_error_to_io)
+}
+
+/// Writes one response DATA frame.
+async fn send_data(stream: &SharedRequest, data: Bytes) -> Result<(), std::io::Error> {
+    let mut guard = stream.lock().await;
+    std::future::poll_fn(|cx| guard.poll_send_data(cx, data.clone()))
+        .await
+        .map_err(h3_stream_error_to_io)
+}
+
+/// Writes the response trailers HEADERS frame.
+async fn send_trailers(
+    stream: &SharedRequest,
+    trailers: &http::HeaderMap,
+) -> Result<(), std::io::Error> {
+    let mut guard = stream.lock().await;
+    std::future::poll_fn(|cx| guard.poll_send_trailers(cx, trailers))
+        .await
+        .map_err(h3_stream_error_to_io)
+}
+
+/// Finishes the response (`FIN`).
+async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
+    let mut guard = stream.lock().await;
+    std::future::poll_fn(|cx| guard.poll_finish(cx))
+        .await
+        .map_err(h3_stream_error_to_io)
+}
+
+/// A request task's end is observed by the connection driver through the
+/// oneshot completion channel it holds in its `FuturesUnordered`; the
+/// sender is dropped when the task finishes.
+///
+/// Drives one accepted request stream to completion.
+#[allow(clippy::type_complexity)]
+async fn handle_request<F, Fut, ResB, ResBE, ResE>(
+    stream: SharedRequest,
+    shared: Arc<std::sync::Mutex<SharedCodecs>>,
+    stream_id: u64,
+    request_fn: Rc<F>,
+    date_cache: DateCache,
+    send_continue_response: bool,
+    send_date_header: bool,
+) where
+    F: Fn(Request<Incoming>) -> Fut,
+    Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
+    ResB: Body<Data = Bytes, Error = ResBE> + Unpin,
+    ResE: std::error::Error,
+    ResBE: std::error::Error,
+{
+    // Read the request.
+    let request_headers = {
+        let mut guard = stream.lock().await;
+        std::future::poll_fn(|cx| guard.poll_headers(cx))
+            .await
+            .map_err(h3_stream_error_to_io)
+    };
+    let request = match request_headers {
+        Ok(Some(request)) => request,
+        // The stream ended without a request, or it errored: nothing to
+        // respond to.
+        _ => return,
+    };
+
+    // 100 Continue
+    let is_100_continue = send_continue_response
+        && request
+            .headers()
+            .get(http::header::EXPECT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+
+    let send_continue_body = is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
+    let (request_parts, _) = request.into_parts();
+    let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
+        (Incoming::Empty, Some(stream.clone()))
+    } else {
+        (
+            Incoming::Boxed(Box::pin(H3Body::new(
+                stream.clone(),
+                send_continue_body.clone(),
+            ))),
+            None,
+        )
+    };
+    let mut request = Request::from_parts(request_parts, request_body);
+
+    // Install early hints
+    let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
+    request.extensions_mut().insert(early_hints);
+
+    // Install HTTP upgrade
+    let upgrade = if let Some(recv_stream) = upgrade {
+        let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
+        let upgrade = Upgrade::new(upgrade_rx);
+        let upgraded = upgrade.upgraded.clone();
+        request.extensions_mut().insert(upgrade);
+        Some((upgrade_tx, upgraded, recv_stream))
+    } else {
+        None
+    };
+
+    let mut response_fut = std::pin::pin!(request_fn(request));
+    let mut early_hints_open = true;
+    let mut continue_sent = false;
+    let response_result = loop {
+        if !early_hints_open {
+            break response_fut.as_mut().await;
+        }
+
+        let next = std::future::poll_fn(|cx| {
+            if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
+                return Poll::Ready(Some(futures_util::future::Either::Left(res)));
+            }
+
+            match early_hints_rx.poll_recv(cx) {
+                Poll::Ready(Some(msg)) => {
+                    return Poll::Ready(Some(futures_util::future::Either::Right(Ok(msg))))
+                }
+                Poll::Ready(None) => {
+                    return Poll::Ready(Some(futures_util::future::Either::Right(Err(()))))
+                }
+                Poll::Pending => {}
+            }
+
+            if !continue_sent
+                && is_100_continue
+                && send_continue_body
+                    .as_ref()
+                    .is_some_and(|b| b.load(Ordering::Relaxed))
+            {
+                continue_sent = true;
+                return Poll::Ready(None);
+            }
+
+            Poll::Pending
+        })
+        .await;
+
+        match next {
+            // HTTP response
+            Some(futures_util::future::Either::Left(response_result)) => {
+                break response_result;
+            }
+            // 103 Early Hints
+            Some(futures_util::future::Either::Right(Ok((headers, sender)))) => {
+                sender
+                    .into_inner()
+                    .send(
+                        send_response(
+                            &stream,
+                            &shared,
+                            stream_id,
+                            StatusCode::EARLY_HINTS,
+                            &headers,
+                        )
+                        .await,
+                    )
+                    .ok();
+            }
+            Some(futures_util::future::Either::Right(Err(()))) => {
+                early_hints_open = false;
+            }
+            // 100 Continue
+            None => {
+                if send_interim_response(&stream, StatusCode::CONTINUE)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    };
+
+    let Ok(mut response) = response_result else {
+        // Return early if the request handler returns an error
+        return;
+    };
+
+    {
+        let response_headers = response.headers_mut();
+        if send_date_header {
+            if let Some(http_date) = date_cache.get_date_header_value() {
+                response_headers
+                    .entry(http::header::DATE)
+                    .or_insert(http_date);
+            }
+        }
+        remove_invalid_http3_headers(response_headers);
+    }
+
+    let response_is_end_stream = response.body().is_end_stream();
+    if !response_is_end_stream {
+        if let Some(content_length) = response.body().size_hint().exact() {
+            if !response
+                .headers()
+                .contains_key(http::header::CONTENT_LENGTH)
+            {
+                response
+                    .headers_mut()
+                    .insert(http::header::CONTENT_LENGTH, content_length.into());
+            }
+        }
+    }
+
+    if is_100_continue
+        && !continue_sent
+        && !response.status().is_client_error()
+        && !response.status().is_server_error()
+        && send_interim_response(&stream, StatusCode::CONTINUE)
+            .await
+            .is_err()
+    {
+        return;
+    }
+
+    let (response_parts, mut response_body) = response.into_parts();
+    if send_response(
+        &stream,
+        &shared,
+        stream_id,
+        response_parts.status,
+        &response_parts.headers,
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    if let Some((upgrade_tx, upgraded, recv_stream)) = upgrade {
+        if upgraded.load(Ordering::Relaxed) {
+            let (upgraded, task) = self::upgrade::pair(recv_stream);
+            let _ = upgrade_tx.send(Upgraded::new(upgraded, None));
+            task.await;
+            return;
+        }
+    }
+
+    if !response_is_end_stream {
+        while let Some(chunk) = response_body.frame().await {
+            match chunk {
+                Ok(frame) => {
+                    if frame.is_data() {
+                        match frame.into_data() {
+                            Ok(data) => {
+                                if send_data(&stream, data).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(_) => {
+                                return;
+                            }
+                        }
+                    } else if frame.is_trailers() {
+                        match frame.into_trailers() {
+                            Ok(mut trailers) => {
+                                remove_invalid_http3_headers(&mut trailers);
+                                if send_trailers(&stream, &trailers).await.is_err() {
+                                    return;
+                                }
+                                break;
+                            }
+                            Err(_) => {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    return;
+                }
+            }
+        }
+    }
+
+    let _ = send_finish(&stream).await;
+}
+
 /// An HTTP/3 connection handler.
 ///
 /// `Http3` wraps a QUIC connection (`Io`) and drives the HTTP/3 server
-/// connection using the [`h3`] crate. It supports:
+/// connection over the native transport stack. It supports:
 ///
 /// - Concurrent request stream handling
 /// - Streaming request/response bodies and trailers
 /// - Automatic `100 Continue` and `103 Early Hints` interim responses
 /// - Per-connection `Date` header caching
 /// - Graceful shutdown via a [`CancellationToken`]
-///
-/// > **Note:** The underlying [`h3`] crate is still experimental. The API may
-/// > change in future releases and there may be occasional bugs. Use with care
-/// > in production environments.
 ///
 /// # Construction
 ///
@@ -181,7 +540,7 @@ pub struct Http3<Io> {
 
 impl<Io> Http3<Io>
 where
-    Io: h3::quic::Connection<bytes::Bytes> + Unpin + 'static,
+    Io: transport::Connection + Unpin + 'static,
 {
     /// Creates a new `Http3` connection handler wrapping the given QUIC
     /// connection.
@@ -208,8 +567,8 @@ where
     /// Attaches a [`CancellationToken`] for graceful shutdown.
     ///
     /// When the token is cancelled, the handler sends an HTTP/3 graceful
-    /// shutdown signal (via `h3`'s `shutdown`), stops accepting new request
-    /// streams, and exits cleanly.
+    /// shutdown signal (GOAWAY), stops accepting new request streams, and
+    /// exits cleanly once the in-flight requests have drained.
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
@@ -219,17 +578,12 @@ where
 
 impl<Io> HttpProtocol for Http3<Io>
 where
-    Io: h3::quic::Connection<bytes::Bytes> + Unpin + 'static,
-    <Io as h3::quic::OpenStreams<bytes::Bytes>>::BidiStream:
-        h3::quic::BidiStream<bytes::Bytes> + Send + 'static,
-    <<Io as h3::quic::OpenStreams<bytes::Bytes>>::BidiStream as h3::quic::BidiStream<
-        bytes::Bytes,
-    >>::RecvStream: Send,
+    Io: transport::Connection + Unpin + 'static,
 {
     #[allow(clippy::manual_async_fn)]
     #[inline]
     fn handle<F, Fut, ResB, ResBE, ResE>(
-        mut self,
+        self,
         request_fn: F,
     ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
     where
@@ -241,317 +595,211 @@ where
     {
         async move {
             let request_fn = Rc::new(request_fn);
-            let handshake_fut = self.options.h3.build(
-                self.io_to_handshake
-                    .take()
-                    .ok_or_else(|| std::io::Error::other("no io to handshake"))?,
-            );
-            let mut h3 = (if let Some(timeout) = self.options.handshake_timeout {
-                vibeio::time::timeout(timeout, handshake_fut).await
+            let Http3 {
+                mut io_to_handshake,
+                date_header_value_cached,
+                options,
+                cancel_token,
+            } = self;
+            let mut conn = io_to_handshake
+                .take()
+                .ok_or_else(|| std::io::Error::other("no io to handshake"))?;
+            let date_cache = date_header_value_cached;
+            let send_continue_response = options.send_continue_response;
+            let send_date_header = options.send_date_header;
+
+            // The QUIC handshake may not be complete yet (0-RTT); wait for
+            // it, bounded by the handshake timeout. Server-side QUIC
+            // connections are already complete when handed over.
+            if let Some(timeout) = options.handshake_timeout {
+                vibeio::time::timeout(timeout, async {
+                    while !conn.is_handshake_complete() {
+                        vibeio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "handshake timeout")
+                })?;
             } else {
-                Ok(handshake_fut.await)
-            })
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "handshake timeout"))?
-            .map_err(h3_connection_error_to_io)?;
-
-            loop {
-                let resolver = {
-                    let res = {
-                        let accept_fut_orig = h3.accept();
-                        let accept_fut_orig_pin = std::pin::pin!(accept_fut_orig);
-                        let cancel_token = self.cancel_token.clone();
-                        let cancel_fut = async move {
-                            if let Some(token) = cancel_token {
-                                token.cancelled().await
-                            } else {
-                                futures_util::future::pending().await
-                            }
-                        };
-                        let cancel_fut_pin = std::pin::pin!(cancel_fut);
-                        let accept_fut =
-                            futures_util::future::select(cancel_fut_pin, accept_fut_orig_pin);
-
-                        match if let Some(timeout) = self.options.accept_timeout {
-                            vibeio::time::timeout(timeout, accept_fut).await
-                        } else {
-                            Ok(accept_fut.await)
-                        } {
-                            Ok(futures_util::future::Either::Right((request, _))) => {
-                                (Some(request), false)
-                            }
-                            Ok(futures_util::future::Either::Left((_, _))) => {
-                                // Canceled
-                                (None, true)
-                            }
-                            Err(_) => {
-                                // Timeout
-                                (None, false)
-                            }
-                        }
-                    };
-                    match res {
-                        (Some(resolver), _) => resolver,
-                        (None, graceful) => {
-                            if let Err(err) = h3.shutdown(0).await {
-                                if !err.is_h3_no_error() {
-                                    return Err(h3_connection_error_to_io(err));
-                                }
-                            }
-                            let _ = h3.accept().await;
-                            if graceful {
-                                return Ok(());
-                            }
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "accept timeout",
-                            ));
-                        }
-                    }
-                };
-
-                let resolver = match resolver {
-                    Ok(Some(resolver)) => resolver,
-                    Ok(None) => break,
-                    Err(err) if err.is_h3_no_error() => break,
-                    Err(err) => return Err(h3_connection_error_to_io(err)),
-                };
-
-                let date_cache = self.date_header_value_cached.clone();
-                let request_fn = request_fn.clone();
-                let send_continue_response = self.options.send_continue_response;
-                vibeio::spawn(async move {
-                    let (request, stream) = match resolver.resolve_request().await {
-                        Ok(resolved) => resolved,
-                        Err(_) => {
-                            return;
-                        }
-                    };
-                    let (mut send, receive) = stream.split();
-
-                    // 100 Continue
-                    let is_100_continue = send_continue_response
-                        && request
-                            .headers()
-                            .get(http::header::EXPECT)
-                            .and_then(|v| v.to_str().ok())
-                            .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-
-                    let send_continue_body =
-                        is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
-                    let (request_parts, _) = request.into_parts();
-                    let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
-                        (Incoming::Empty, Some(receive))
-                    } else {
-                        (
-                            Incoming::Boxed(Box::pin(H3Body::new(
-                                receive,
-                                send_continue_body.clone(),
-                            ))),
-                            None,
-                        )
-                    };
-                    let mut request = Request::from_parts(request_parts, request_body);
-
-                    // Install early hints
-                    let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
-                    request.extensions_mut().insert(early_hints);
-
-                    // Install HTTP upgrade
-                    let upgrade = if let Some(recv_stream) = upgrade {
-                        let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
-                        let upgrade = Upgrade::new(upgrade_rx);
-                        let upgraded = upgrade.upgraded.clone();
-                        request.extensions_mut().insert(upgrade);
-                        Some((upgrade_tx, upgraded, recv_stream))
-                    } else {
-                        None
-                    };
-
-                    let mut response_fut = std::pin::pin!(request_fn(request));
-                    let mut early_hints_open = true;
-                    let mut continue_sent = false;
-                    let response_result = loop {
-                        if !early_hints_open {
-                            break response_fut.as_mut().await;
-                        }
-
-                        let next = std::future::poll_fn(|cx| {
-                            if let Poll::Ready(res) = response_fut.as_mut().poll(cx) {
-                                return Poll::Ready(Some(futures_util::future::Either::Left(res)));
-                            }
-
-                            match early_hints_rx.poll_recv(cx) {
-                                Poll::Ready(Some(msg)) => {
-                                    return Poll::Ready(Some(futures_util::future::Either::Right(
-                                        Ok(msg),
-                                    )))
-                                }
-                                Poll::Ready(None) => {
-                                    return Poll::Ready(Some(futures_util::future::Either::Right(
-                                        Err(()),
-                                    )))
-                                }
-                                Poll::Pending => {}
-                            }
-
-                            if !continue_sent
-                                && is_100_continue
-                                && send_continue_body
-                                    .as_ref()
-                                    .is_some_and(|b| b.load(std::sync::atomic::Ordering::Relaxed))
-                            {
-                                continue_sent = true;
-                                return Poll::Ready(None);
-                            }
-
-                            Poll::Pending
-                        })
-                        .await;
-
-                        match next {
-                            // HTTP response
-                            Some(futures_util::future::Either::Left(response_result)) => {
-                                break response_result;
-                            }
-                            // 103 Early Hints
-                            Some(futures_util::future::Either::Right(Ok((headers, sender)))) => {
-                                let mut response = Response::new(());
-                                *response.status_mut() = http::StatusCode::EARLY_HINTS;
-                                *response.headers_mut() = headers;
-                                sender
-                                    .into_inner()
-                                    .send(
-                                        send.send_response(response)
-                                            .await
-                                            .map_err(h3_stream_error_to_io),
-                                    )
-                                    .ok();
-                            }
-                            Some(futures_util::future::Either::Right(Err(()))) => {
-                                early_hints_open = false;
-                            }
-                            // 100 Continue
-                            None => {
-                                let mut response = Response::new(());
-                                *response.status_mut() = http::StatusCode::CONTINUE;
-                                if send.send_response(response).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                    };
-
-                    let Ok(mut response) = response_result else {
-                        // Return early if the request handler returns an error
-                        return;
-                    };
-
-                    {
-                        let response_headers = response.headers_mut();
-                        if self.options.send_date_header {
-                            if let Some(http_date) = date_cache.get_date_header_value() {
-                                response_headers
-                                    .entry(http::header::DATE)
-                                    .or_insert(http_date);
-                            }
-                        }
-                        remove_invalid_http3_headers(response_headers);
-                    }
-
-                    let response_is_end_stream = response.body().is_end_stream();
-                    if !response_is_end_stream {
-                        if let Some(content_length) = response.body().size_hint().exact() {
-                            if !response
-                                .headers()
-                                .contains_key(http::header::CONTENT_LENGTH)
-                            {
-                                response
-                                    .headers_mut()
-                                    .insert(http::header::CONTENT_LENGTH, content_length.into());
-                            }
-                        }
-                    }
-
-                    if is_100_continue && !continue_sent {
-                        if !response.status().is_client_error()
-                            && !response.status().is_server_error()
-                        {
-                            let mut response = Response::new(());
-                            *response.status_mut() = http::StatusCode::CONTINUE;
-                            if send.send_response(response).await.is_err() {
-                                return;
-                            }
-                        }
-                        #[allow(unused)]
-                        {
-                            continue_sent = true;
-                        }
-                    }
-
-                    let (response_parts, mut response_body) = response.into_parts();
-                    if send
-                        .send_response(Response::from_parts(response_parts, ()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-
-                    if let Some((upgrade_tx, upgraded, recv_stream)) = upgrade {
-                        if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
-                            let (upgraded, task) = self::upgrade::pair(send, recv_stream);
-                            let _ = upgrade_tx.send(Upgraded::new(upgraded, None));
-                            task.await;
-                            return;
-                        }
-                    }
-
-                    if !response_is_end_stream {
-                        while let Some(chunk) = response_body.frame().await {
-                            match chunk {
-                                Ok(frame) => {
-                                    if frame.is_data() {
-                                        match frame.into_data() {
-                                            Ok(data) => {
-                                                if send.send_data(data).await.is_err() {
-                                                    return;
-                                                }
-                                            }
-                                            Err(_) => {
-                                                return;
-                                            }
-                                        }
-                                    } else if frame.is_trailers() {
-                                        match frame.into_trailers() {
-                                            Ok(mut trailers) => {
-                                                remove_invalid_http3_headers(&mut trailers);
-                                                if send.send_trailers(trailers).await.is_err() {
-                                                    return;
-                                                }
-                                                break;
-                                            }
-                                            Err(_) => {
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-
-                    if let Err(err) = send.finish().await {
-                        if !err.is_h3_no_error() {
-                            // No-op: stream is already aborted.
-                        }
-                    }
-                });
+                while !conn.is_handshake_complete() {
+                    vibeio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
             }
 
-            Ok(())
+            let mut controls = ControlStreams::new(options.local_settings.clone());
+            let shared = controls.shared().clone();
+            let mut ongoing: FuturesUnordered<oneshot::AsyncReceiver<()>> = FuturesUnordered::new();
+            let mut cancel_fut: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+                None;
+            if let Some(token) = cancel_token.as_ref() {
+                cancel_fut = Some(Box::pin(token.cancelled()));
+            }
+            let mut accept_sleep: Option<Pin<Box<vibeio::time::Sleep>>> = None;
+            let mut shutdown = false;
+            let mut outcome: Option<Result<(), std::io::Error>> = None;
+            let mut last_request_id = 0u64;
+
+            // Bring up the control plane (control stream plus QPACK
+            // encoder/decoder streams) and write the initial SETTINGS.
+            std::future::poll_fn(|cx| -> Poll<Result<(), std::io::Error>> {
+                ready!(controls
+                    .poll_init(&mut conn, cx)
+                    .map_err(h3_control_error_to_io))?;
+                ready!(controls.poll_flush(cx).map_err(h3_control_error_to_io))?;
+                Poll::Ready(Ok(()))
+            })
+            .await?;
+
+            std::future::poll_fn(|cx| loop {
+                // Accept-timeout window: refreshed whenever a request
+                // stream is accepted; it bounds waiting for the next one.
+                let mut timeout_fired = false;
+                if let Some(sleep) = accept_sleep.as_mut() {
+                    if let Poll::Ready(()) = sleep.as_mut().poll(cx) {
+                        accept_sleep = None;
+                        timeout_fired = true;
+                    }
+                } else if let Some(accept_timeout) = options.accept_timeout {
+                    accept_sleep = Some(Box::pin(vibeio::time::sleep(accept_timeout)));
+                    continue;
+                }
+
+                // Graceful shutdown trigger.
+                let mut cancel_fired = false;
+                if let Some(fut) = cancel_fut.as_mut() {
+                    if let Poll::Ready(()) = fut.as_mut().poll(cx) {
+                        cancel_fired = true;
+                    }
+                }
+                if !shutdown {
+                    if cancel_fired {
+                        shutdown = true;
+                        outcome = Some(Ok(()));
+                    } else if timeout_fired {
+                        shutdown = true;
+                        outcome = Some(Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "accept timeout",
+                        )));
+                    }
+                }
+
+                // Hand the request streams' queued QPACK encoder
+                // instructions to the control plane.
+                {
+                    let mut instructions = Vec::new();
+                    {
+                        let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        while let Some(bytes) = shared.encoder_stream.pop_front() {
+                            instructions.push(bytes);
+                        }
+                    }
+                    for bytes in instructions {
+                        controls.queue_encoder_stream(bytes);
+                    }
+                }
+
+                // Write the control plane's outbound streams.
+                ready!(controls.poll_flush(cx).map_err(h3_control_error_to_io))?;
+
+                // Read the peer's control plane and react to its events.
+                loop {
+                    match controls.poll_read(&mut conn, cx) {
+                        Poll::Ready(Ok(Some(ControlEvent::Goaway { .. }))) => {
+                            // The client is going away: stop accepting new
+                            // request streams and close once the in-flight
+                            // ones drain.
+                            if !shutdown {
+                                shutdown = true;
+                                outcome = Some(Ok(()));
+                            }
+                        }
+                        Poll::Ready(Ok(Some(_))) => {}
+                        Poll::Ready(Ok(None)) => {}
+                        Poll::Ready(Err(err)) => {
+                            return Poll::Ready(Err(h3_control_error_to_io(err)));
+                        }
+                        Poll::Pending => break,
+                    }
+                }
+
+                // Accept request streams.
+                match conn.poll_accept(cx) {
+                    Poll::Ready(Ok(Some(stream))) => {
+                        let id = stream.id();
+                        last_request_id = last_request_id.max(id);
+                        accept_sleep = None;
+                        if controls.shutting_down()
+                            && id > controls.goaway_sent().unwrap_or(u64::MAX)
+                        {
+                            // A request after our GOAWAY: reject it
+                            // (RFC 9114 Section 5.2).
+                            let mut rejected = RequestStream::new(stream, shared.clone());
+                            let _ = rejected.poll_reset(cx, H3_REQUEST_REJECTED);
+                        } else {
+                            let (end_tx, end_rx) = oneshot::async_channel();
+                            ongoing.push(end_rx);
+                            let request_stream = Arc::new(futures_util::lock::Mutex::new(
+                                RequestStream::new(stream, shared.clone()),
+                            ));
+                            let request_fn = request_fn.clone();
+                            let date_cache = date_cache.clone();
+                            let shared = shared.clone();
+                            vibeio::spawn(async move {
+                                let _end = end_tx;
+                                handle_request(
+                                    request_stream,
+                                    shared.clone(),
+                                    id,
+                                    request_fn,
+                                    date_cache,
+                                    send_continue_response,
+                                    send_date_header,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    // The connection closed: nothing left to do.
+                    Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Err(err)) => {
+                        return Poll::Ready(Err(h3_transport_error_to_io(err)));
+                    }
+                    Poll::Pending => {}
+                }
+
+                // Graceful shutdown: send GOAWAY once, then close with
+                // H3_NO_ERROR once every in-flight request has drained.
+                if shutdown {
+                    if controls.goaway_sent().is_none() {
+                        controls.send_goaway(last_request_id);
+                    }
+                    if ongoing.is_empty() {
+                        ready!(conn
+                            .poll_shutdown(cx, H3_NO_ERROR)
+                            .map_err(h3_transport_error_to_io))?;
+                        return Poll::Ready(outcome.take().unwrap_or(Ok(())));
+                    }
+                }
+
+                // Collect finished request tasks. Their completion
+                // receivers were registered on first poll, so parking
+                // below wakes whenever one finishes; a completion can
+                // race the registration, so re-check before parking.
+                match ongoing.poll_next_unpin(cx) {
+                    Poll::Ready(Some(Ok(()))) => continue,
+                    Poll::Ready(Some(Err(_))) => continue,
+                    Poll::Ready(None) => unreachable!("completion stream is unbounded"),
+                    Poll::Pending => {}
+                }
+                if ongoing.is_empty() && shutdown {
+                    continue;
+                }
+
+                return Poll::Pending;
+            })
+            .await
         }
     }
 }

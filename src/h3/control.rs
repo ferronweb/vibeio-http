@@ -32,9 +32,8 @@
 //! consumed only to keep flow control moving.
 #![allow(dead_code)] // consumed by the connection driver (step 15)
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::{Bytes, BytesMut};
@@ -109,6 +108,14 @@ impl From<TransportError> for ControlError {
     }
 }
 
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for ControlError {}
+
 fn map_frame_error(err: FrameError) -> ControlError {
     match err {
         FrameError::Frame => ControlError::Frame,
@@ -171,7 +178,7 @@ pub(crate) struct ControlStreams {
     // The connection's QPACK codecs, shared with the request streams. The
     // decoder's capacity is fixed by our own SETTINGS; the encoder is
     // created when the peer's SETTINGS bound its table.
-    shared: Rc<RefCell<SharedCodecs>>,
+    shared: Arc<Mutex<SharedCodecs>>,
 
     settings_received: bool,
     max_push_id: Option<u64>,
@@ -185,7 +192,7 @@ impl ControlStreams {
     /// settings. The QPACK decoder is sized by them; nothing is sent until
     /// [`ControlStreams::poll_init`].
     pub(crate) fn new(local: LocalSettings) -> Self {
-        let shared = Rc::new(RefCell::new(SharedCodecs::new(&local)));
+        let shared = Arc::new(Mutex::new(SharedCodecs::new(&local)));
         Self {
             local,
             peer: PeerSettings::default(),
@@ -218,14 +225,20 @@ impl ControlStreams {
     /// The decoder's capacity is fixed by our own SETTINGS; the encoder is
     /// created once the peer's SETTINGS bound its table (see
     /// [`ControlStreams::poll_read`]).
-    pub(crate) fn shared(&self) -> &Rc<RefCell<SharedCodecs>> {
+    pub(crate) fn shared(&self) -> &Arc<Mutex<SharedCodecs>> {
         &self.shared
     }
 
     /// Field sections the peer's encoder stream unblocked, drained for the
     /// request-stream handler.
     pub(crate) fn take_unblocked(&mut self) -> Vec<UnblockedSection> {
-        std::mem::take(&mut self.shared.borrow_mut().unblocked)
+        std::mem::take(
+            &mut self
+                .shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .unblocked,
+        )
     }
 
     /// Whether the peer's SETTINGS frame was received.
@@ -420,13 +433,17 @@ impl ControlStreams {
             if let Some(stream) = self.in_encoder.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(chunk)) => {
-                        let mut shared = self.shared.borrow_mut();
+                        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
                         match shared.decoder.feed_encoder_stream(&chunk) {
                             Ok(mut unblocked) => shared.unblocked.append(&mut unblocked),
                             Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
                         }
                         let acks = shared.decoder.take_decoder_stream();
+                        let waiters = shared.take_waiters();
                         drop(shared);
+                        for waker in waiters {
+                            waker.wake();
+                        }
                         if !acks.is_empty() {
                             self.decoder_pending.push_back(acks);
                         }
@@ -507,13 +524,17 @@ impl ControlStreams {
                         return Poll::Ready(Err(ControlError::StreamCreation));
                     }
                     if !leftover.is_empty() {
-                        let mut shared = self.shared.borrow_mut();
+                        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
                         match shared.decoder.feed_encoder_stream(&leftover) {
                             Ok(mut unblocked) => shared.unblocked.append(&mut unblocked),
                             Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
                         }
                         let acks = shared.decoder.take_decoder_stream();
+                        let waiters = shared.take_waiters();
                         drop(shared);
+                        for waker in waiters {
+                            waker.wake();
+                        }
                         if !acks.is_empty() {
                             self.decoder_pending.push_back(acks);
                         }
@@ -548,10 +569,15 @@ impl ControlStreams {
                 }
                 self.settings_received = true;
                 self.peer.apply(&settings);
-                let mut shared = self.shared.borrow_mut();
-                shared.encoder = Some(Encoder::new(self.peer.qpack_max_table_capacity(), true));
-                shared.peer_max_field_section_size = self.peer.max_field_section_size();
-                drop(shared);
+                let waiters = {
+                    let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+                    shared.encoder = Some(Encoder::new(self.peer.qpack_max_table_capacity(), true));
+                    shared.peer_max_field_section_size = self.peer.max_field_section_size();
+                    shared.take_waiters()
+                };
+                for waker in waiters {
+                    waker.wake();
+                }
                 self.events
                     .push_back(ControlEvent::Settings(self.peer.clone()));
             }
@@ -588,7 +614,12 @@ impl ControlStreams {
     /// Acknowledgment, Insert Count Increment) to the outbound decoder
     /// stream queue.
     fn queue_decoder_acks(&mut self) {
-        let acks = self.shared.borrow_mut().decoder.take_decoder_stream();
+        let acks = self
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .decoder
+            .take_decoder_stream();
         if !acks.is_empty() {
             self.decoder_pending.push_back(acks);
         }
@@ -867,7 +898,8 @@ mod tests {
         assert_eq!(
             plane
                 .shared()
-                .borrow()
+                .lock()
+                .unwrap()
                 .encoder
                 .as_ref()
                 .expect("encoder")
@@ -1136,7 +1168,7 @@ mod tests {
 
         let events = drain_events(&mut plane, &mut conn).expect("encoder stream is valid");
         assert!(events.is_empty());
-        assert_eq!(plane.shared().borrow().decoder.inserted(), 1);
+        assert_eq!(plane.shared().lock().unwrap().decoder.inserted(), 1);
         // Nothing was blocked, so nothing was unblocked, and a plain insert
         // needs no acknowledgement yet.
         assert!(plane.take_unblocked().is_empty());

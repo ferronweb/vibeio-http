@@ -1,11 +1,11 @@
-//! Configuration options for the native HTTP/3 connection driver.
-
-use crate::h3::settings::LocalSettings;
-
 /// Configuration options for the HTTP/3 connection handler.
 ///
 /// Use the builder-style methods to customise behaviour, then pass the finished
 /// value to [`Http3::new`](super::Http3::new).
+///
+/// > **Note:** The underlying [`h3`] crate is still experimental. The API may
+/// > change in future releases and there may be occasional bugs. Use with care
+/// > in production environments.
 ///
 /// # Examples
 ///
@@ -15,7 +15,7 @@ use crate::h3::settings::LocalSettings;
 ///     .accept_timeout(Some(std::time::Duration::from_secs(60)));
 /// ```
 pub struct Http3Options {
-    pub(super) local_settings: LocalSettings,
+    pub(super) h3: h3::server::Builder,
     pub(super) accept_timeout: Option<std::time::Duration>,
     pub(super) handshake_timeout: Option<std::time::Duration>,
     pub(super) send_continue_response: bool,
@@ -23,7 +23,8 @@ pub struct Http3Options {
 }
 
 impl Http3Options {
-    /// Creates a new `Http3Options` with the following defaults:
+    /// Creates a new `Http3Options` from an `h3` server builder with the
+    /// following defaults:
     ///
     /// | Option | Default |
     /// |---|---|
@@ -31,20 +32,11 @@ impl Http3Options {
     /// | `handshake_timeout` | 30 seconds |
     /// | `send_continue_response` | `true` |
     /// | `send_date_header` | `true` |
-    /// | `qpack_max_table_capacity` | `0` (RFC 9204 default) |
-    /// | `qpack_blocked_streams` | `0` (RFC 9204 default) |
-    /// | `max_field_section_size` | unlimited (RFC 9114 default) |
-    /// | `enable_connect_protocol` | `false` |
     ///
-    /// The QPACK/limit settings are advertised to the peer in this
-    /// endpoint's SETTINGS frame and bound its codecs: the decoder's
-    /// dynamic-table capacity and blocked-stream budget come from
-    /// `qpack_max_table_capacity` and `qpack_blocked_streams`; the peer's
-    /// encoder is limited by them in turn. `max_field_section_size` bounds
-    /// how large a field section this endpoint will accept.
-    pub fn new() -> Self {
+    /// The `h3` builder is used as-is and is not modified by this method.
+    pub fn new(h3: h3::server::Builder) -> Self {
         Self {
-            local_settings: LocalSettings::default(),
+            h3,
             accept_timeout: Some(std::time::Duration::from_secs(30)),
             handshake_timeout: Some(std::time::Duration::from_secs(30)),
             send_continue_response: true,
@@ -52,43 +44,14 @@ impl Http3Options {
         }
     }
 
-    /// Sets the maximum dynamic-table capacity this endpoint will grant the
-    /// peer's QPACK encoder via `SETTINGS_QPACK_MAX_TABLE_CAPACITY` (RFC
-    /// 9204 Section 5).
+    /// Returns a mutable reference to the underlying `h3::server::Builder`.
     ///
-    /// This is also the capacity this endpoint's own QPACK decoder uses. It
-    /// must not exceed 2^30 - 1. Defaults to **`0`** (no dynamic table).
-    pub fn qpack_max_table_capacity(mut self, capacity: u64) -> Self {
-        self.local_settings.qpack_max_table_capacity = capacity;
-        self
-    }
-
-    /// Sets how many field sections this endpoint will keep blocked while
-    /// waiting for dynamic-table entries via
-    /// `SETTINGS_QPACK_BLOCKED_STREAMS` (RFC 9204 Section 5).
+    /// Use this to tune HTTP/3 protocol settings exposed by the [`h3`] crate.
     ///
-    /// Defaults to **`0`**.
-    pub fn qpack_blocked_streams(mut self, max: u64) -> Self {
-        self.local_settings.qpack_blocked_streams = max;
-        self
-    }
-
-    /// Sets the maximum field-section size this endpoint will accept via
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section 7.2.4.1).
-    ///
-    /// Pass `None` for unlimited (the RFC default).
-    pub fn max_field_section_size(mut self, max: Option<u64>) -> Self {
-        self.local_settings.max_field_section_size = max;
-        self
-    }
-
-    /// Advertises support for the Extended CONNECT method via
-    /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 9114 Section 7.2.4.1).
-    ///
-    /// Defaults to **`false`**.
-    pub fn enable_connect_protocol(mut self, enable: bool) -> Self {
-        self.local_settings.enable_connect_protocol = enable;
-        self
+    /// > **Note:** The [`h3`] crate is still experimental and its builder API
+    /// > may change in future releases.
+    pub fn h3_builder(&mut self) -> &mut h3::server::Builder {
+        &mut self.h3
     }
 
     /// Sets the timeout for waiting on the next accepted HTTP/3 request
@@ -103,7 +66,7 @@ impl Http3Options {
     }
 
     /// Sets the timeout for the initial HTTP/3 connection setup (QUIC
-    /// handshake and stream setup).
+    /// handshake and `h3` connection build).
     ///
     /// If the setup does not complete within this duration, the handler
     /// returns an I/O timeout error. Pass `None` to disable this timeout.
@@ -135,6 +98,6 @@ impl Http3Options {
 
 impl Default for Http3Options {
     fn default() -> Self {
-        Self::new()
+        Self::new(h3::server::builder())
     }
 }

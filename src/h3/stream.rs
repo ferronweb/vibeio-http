@@ -28,10 +28,9 @@
 //! `Pending`.
 #![allow(dead_code)] // consumed by the connection driver (step 15)
 
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::rc::Rc;
-use std::task::{Context, Poll};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::ready;
@@ -105,6 +104,14 @@ impl From<TransportError> for StreamError {
     }
 }
 
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for StreamError {}
+
 fn map_frame_error(err: FrameError) -> StreamError {
     match err {
         // A malformed frame payload anywhere is H3_FRAME_ERROR.
@@ -141,6 +148,11 @@ pub(crate) struct SharedCodecs {
     /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE` once its SETTINGS
     /// frame arrived; `None` means unlimited.
     pub(crate) peer_max_field_section_size: Option<u64>,
+    /// Wakers of request-stream tasks parked on shared codec state: a
+    /// field section blocked on a dynamic-table entry, or the send side
+    /// waiting for the peer's SETTINGS to create the encoder. Keyed by
+    /// stream ID; the control plane wakes them when the state changes.
+    pub(crate) waiters: HashMap<u64, Waker>,
 }
 
 impl SharedCodecs {
@@ -155,7 +167,17 @@ impl SharedCodecs {
             encoder_stream: VecDeque::new(),
             unblocked: Vec::new(),
             peer_max_field_section_size: None,
+            waiters: HashMap::new(),
         }
+    }
+
+    /// Drains and returns every waiter parked on shared codec state, so
+    /// the caller can wake them after releasing the lock.
+    ///
+    /// Waking a waiter whose section is still blocked is harmless: it
+    /// re-polls, finds nothing, and re-registers.
+    pub(crate) fn take_waiters(&mut self) -> Vec<Waker> {
+        self.waiters.drain().map(|(_, waker)| waker).collect()
     }
 }
 
@@ -172,7 +194,7 @@ pub(crate) struct RequestStream {
     stream: Box<dyn BidiStream>,
     stream_id: u64,
     frame_decoder: FrameDecoder,
-    shared: Rc<RefCell<SharedCodecs>>,
+    shared: Arc<Mutex<SharedCodecs>>,
 
     // Receive state.
     awaiting_headers: bool,
@@ -196,7 +218,7 @@ impl RequestStream {
     /// Wraps an accepted request stream. `stream.id()` is its QUIC stream
     /// ID, used to correlate QPACK state (blocked field sections, section
     /// acknowledgements).
-    pub(crate) fn new(stream: Box<dyn BidiStream>, shared: Rc<RefCell<SharedCodecs>>) -> Self {
+    pub(crate) fn new(stream: Box<dyn BidiStream>, shared: Arc<Mutex<SharedCodecs>>) -> Self {
         let stream_id = stream.id();
         Self {
             stream,
@@ -234,7 +256,7 @@ impl RequestStream {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Request<()>>, StreamError>> {
         if self.headers_blocked {
-            let section = take_unblocked_for(&self.shared, self.stream_id);
+            let section = take_unblocked_for(&self.shared, self.stream_id, cx);
             if let Some(section) = section {
                 self.headers_blocked = false;
                 self.awaiting_headers = false;
@@ -342,7 +364,7 @@ impl RequestStream {
             return Poll::Ready(header_map(lines).map(Some));
         }
         if self.trailers_blocked {
-            if let Some(section) = take_unblocked_for(&self.shared, self.stream_id) {
+            if let Some(section) = take_unblocked_for(&self.shared, self.stream_id, cx) {
                 self.trailers_blocked = false;
                 self.trailers_done = true;
                 return Poll::Ready(header_map(section.headers).map(Some));
@@ -394,14 +416,16 @@ impl RequestStream {
     ///
     /// The field section is encoded with the shared encoder (queuing its
     /// encoder-stream instructions) and must fit the peer's
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE`. Only one response may be sent.
+    /// `SETTINGS_MAX_FIELD_SECTION_SIZE`. Informational responses (1xx:
+    /// 100 Continue, 103 Early Hints) may precede the final one; only one
+    /// final response may be sent.
     pub(crate) fn poll_send_response(
         &mut self,
         cx: &mut Context<'_>,
         status: StatusCode,
         headers: &HeaderMap,
     ) -> Poll<Result<(), StreamError>> {
-        if self.sent_headers {
+        if self.sent_headers && !status.is_informational() {
             // RFC 9114 Section 4.1: a second response on the same stream
             // is invalid; the server resets it.
             return Poll::Ready(Err(StreamError::Message));
@@ -421,7 +445,9 @@ impl RequestStream {
             ));
         }
         let bytes = self.encode_headered_byte(&lines)?;
-        self.sent_headers = true;
+        if !status.is_informational() {
+            self.sent_headers = true;
+        }
         self.poll_write(cx, bytes)
     }
 
@@ -493,7 +519,7 @@ impl RequestStream {
     /// field-section size limit, and frames it as HEADERS.
     fn encode_headered_byte(&mut self, lines: &[(Bytes, Bytes)]) -> Result<Bytes, StreamError> {
         {
-            let shared = self.shared.borrow();
+            let shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             if shared.encoder.is_none() {
                 // The peer's SETTINGS (which bound its dynamic table) has
                 // not arrived; its encoder is unusable (RFC 9204
@@ -501,7 +527,7 @@ impl RequestStream {
                 return Err(StreamError::Message);
             }
         }
-        let mut shared = self.shared.borrow_mut();
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         let encoder = shared.encoder.as_mut().expect("encoder ensured");
         let section = encoder.encode_section(lines);
         let size = section.block.len() as u64;
@@ -520,7 +546,8 @@ impl RequestStream {
     /// it blocked when a dynamic table entry is missing.
     fn decode_block(&self, block: &[u8]) -> Result<Option<Vec<(Bytes, Bytes)>>, StreamError> {
         self.shared
-            .borrow_mut()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .decoder
             .decode_block(block, self.stream_id, now())
             .map_err(StreamError::Qpack)
@@ -591,15 +618,24 @@ impl RequestStream {
 
 /// Takes the oldest unblocked field section for `stream_id`.
 fn take_unblocked_for(
-    shared: &Rc<RefCell<SharedCodecs>>,
+    shared: &Arc<Mutex<SharedCodecs>>,
     stream_id: u64,
+    cx: &mut Context<'_>,
 ) -> Option<UnblockedSection> {
-    let mut shared = shared.borrow_mut();
-    let index = shared
+    let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+    match shared
         .unblocked
         .iter()
-        .position(|section| section.stream_id == stream_id)?;
-    Some(shared.unblocked.remove(index))
+        .position(|section| section.stream_id == stream_id)
+    {
+        Some(index) => Some(shared.unblocked.remove(index)),
+        // No unblocked section yet: park this task until the control
+        // plane feeds the peer's encoder stream and unblocks it.
+        None => {
+            shared.waiters.insert(stream_id, cx.waker().clone());
+            None
+        }
+    }
 }
 
 /// The monotonic clock the QPACK decoder records blocked sections with.
@@ -871,19 +907,19 @@ mod tests {
 
     /// A shared codec pair where the encoder is already usable (the peer's
     /// SETTINGS arrived).
-    fn shared_with_encoder() -> Rc<RefCell<SharedCodecs>> {
+    fn shared_with_encoder() -> Arc<Mutex<SharedCodecs>> {
         let mut shared = SharedCodecs::new(&local_settings());
         shared.encoder = Some(Encoder::new(4096, true));
-        Rc::new(RefCell::new(shared))
+        Arc::new(Mutex::new(shared))
     }
 
     /// Returns the encoder for hand-encoding wire blocks, plus the shared
     /// handle.
-    fn shared_and_peer_encoder() -> (Rc<RefCell<SharedCodecs>>, Encoder) {
+    fn shared_and_peer_encoder() -> (Arc<Mutex<SharedCodecs>>, Encoder) {
         let mut shared = SharedCodecs::new(&local_settings());
         shared.encoder = Some(Encoder::new(4096, true));
         let peer_encoder = Encoder::new(4096, true);
-        (Rc::new(RefCell::new(shared)), peer_encoder)
+        (Arc::new(Mutex::new(shared)), peer_encoder)
     }
 
     fn request_lines(method: &str, path: &str) -> Vec<(Bytes, Bytes)> {
@@ -910,7 +946,8 @@ mod tests {
         let mut wire = BytesMut::new();
         let section = enc.encode_section(&request_lines("POST", "/submit"));
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -923,7 +960,8 @@ mod tests {
             Bytes::from_static(b"sum"),
         )]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -974,7 +1012,8 @@ mod tests {
         let mut wire = BytesMut::new();
         let section = enc.encode_section(&request_lines("GET", "/index"));
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1060,14 +1099,16 @@ mod tests {
         let mut wire = BytesMut::new();
         let section = enc.encode_section(&request_lines("PUT", "/x"));
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
         let section = enc.encode_section(&[(Bytes::from_static(b"x-a"), Bytes::from_static(b"1"))]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1093,7 +1134,8 @@ mod tests {
         let mut wire = BytesMut::new();
         let section = enc.encode_section(&request_lines("GET", "/x"));
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1101,7 +1143,8 @@ mod tests {
         let section =
             enc.encode_section(&[(Bytes::from_static(b":status"), Bytes::from_static(b"200"))]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1124,14 +1167,16 @@ mod tests {
         let mut wire = BytesMut::new();
         let section = enc.encode_section(&request_lines("GET", "/x"));
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
         let section = enc.encode_section(&[]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1160,14 +1205,16 @@ mod tests {
         let mut wire = BytesMut::new();
         let section = enc.encode_section(&request_lines("GET", "/x"));
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
         let section = enc.encode_section(&[]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1221,7 +1268,7 @@ mod tests {
         // The control plane feeds the peer's encoder stream (as it would
         // on the QPACK encoder stream).
         let unblocked = {
-            let mut shared = shared.borrow_mut();
+            let mut shared = shared.lock().unwrap();
             shared
                 .decoder
                 .feed_encoder_stream(&section.encoder_stream)
@@ -1229,7 +1276,7 @@ mod tests {
         };
         assert_eq!(unblocked.len(), 1);
         assert_eq!(unblocked[0].stream_id, 33);
-        shared.borrow_mut().unblocked.extend(unblocked);
+        shared.lock().unwrap().unblocked.extend(unblocked);
 
         let req = match request.poll_headers(&mut cx) {
             Poll::Ready(Ok(Some(request))) => request,
@@ -1265,7 +1312,7 @@ mod tests {
 
         // The encoder produced encoder-stream instructions for the control
         // plane.
-        assert!(!shared.borrow().encoder_stream.is_empty());
+        assert!(!shared.lock().unwrap().encoder_stream.is_empty());
 
         // The wire carries one HEADERS frame with a QPACK-encoded field
         // section (never empty: it encodes `:status` and the headers).
@@ -1319,7 +1366,7 @@ mod tests {
 
     #[test]
     fn response_before_peer_settings_is_message_error() {
-        let shared = Rc::new(RefCell::new(SharedCodecs::new(&local_settings())));
+        let shared = Arc::new(Mutex::new(SharedCodecs::new(&local_settings())));
         let stream = MockBidi::new(47);
         let mut request = RequestStream::new(Box::new(stream), shared);
         let mut cx = cx();
@@ -1336,7 +1383,7 @@ mod tests {
         // of shrinking to a dynamic-table reference.
         shared.encoder = Some(Encoder::new(0, true));
         shared.peer_max_field_section_size = Some(10);
-        let shared = Rc::new(RefCell::new(shared));
+        let shared = Arc::new(Mutex::new(shared));
         let stream = MockBidi::new(49);
         let mut request = RequestStream::new(Box::new(stream), shared);
         let mut cx = cx();
@@ -1380,7 +1427,8 @@ mod tests {
             (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
         ]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1410,7 +1458,8 @@ mod tests {
             (Bytes::from_static(b":frobnicate"), Bytes::from_static(b"1")),
         ]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1441,7 +1490,8 @@ mod tests {
             ),
         ]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1472,7 +1522,8 @@ mod tests {
             ),
         ]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1512,7 +1563,8 @@ mod tests {
             ),
         ]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1544,7 +1596,8 @@ mod tests {
             (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
         ]);
         shared
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");

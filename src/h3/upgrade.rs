@@ -1,81 +1,89 @@
-// Copyright (c) 2014-2026 Sean McArthur
-// Portions of this file are derived from `hyper` (https://github.com/hyperium/hyper).
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
+//! HTTP/3 request-stream upgrade to raw bidirectional I/O (CONNECT /
+//! WebTransport-style handoff).
+//!
+//! After the server sends its final response, the application may take the
+//! underlying request stream over as raw [`tokio::io`] I/O. The request
+//! stream is shared with the driver through an async [`futures_util::lock::Mutex`],
+//! so the receive half becomes an [`AsyncRead`] (`H3Upgraded`) while the
+//! send half keeps writing through the same handle, driven by the
+//! [`UpgradedSendStreamTask`] until the other side hangs up.
+//!
+//! The pattern (a bounded kanal bridge plus an error oneshot) mirrors the
+//! original `hyper`/`h3` upgrade implementation.
 
 use std::{
     future::Future,
     pin::Pin,
-    task::{ready, Context, Poll},
+    sync::Arc,
+    task::{Context, Poll},
 };
 
 use bytes::{Buf, Bytes};
-use h3::{
-    quic::{RecvStream, SendStream},
-    server::RequestStream,
-};
+use futures_util::lock::Mutex;
+use futures_util::FutureExt;
 use tokio::io::{AsyncWrite, ReadBuf};
 
 use crate::h3::h3_stream_error_to_io;
+use crate::h3::stream::{RequestStream, StreamError};
 
-#[inline]
-pub(super) fn pair<SSend, SRecv>(
-    send_stream: RequestStream<SSend, bytes::Bytes>,
-    recv_stream: RequestStream<SRecv, bytes::Bytes>,
-) -> (H3Upgraded<SRecv>, UpgradedSendStreamTask<SSend>) {
+/// Splits a shared request stream into read and write halves for an
+/// upgraded connection.
+///
+/// The returned `H3Upgraded` reads the remaining request body (and any
+/// bytes the peer keeps sending) through the stream's receive path; the
+/// returned task writes the consumer's output on the send path until the
+/// consumer closes it.
+pub(super) fn pair(inner: Arc<Mutex<RequestStream>>) -> (H3Upgraded, UpgradedSendStreamTask) {
     let (tx, rx) = kanal::bounded_async(1);
     let (error_tx, error_rx) = oneshot::async_channel();
 
     (
         H3Upgraded {
             send_stream: UpgradedSendStreamBridge { tx, error_rx },
-            recv_stream,
+            inner: inner.clone(),
             buf: Bytes::new(),
         },
         UpgradedSendStreamTask {
-            h3_tx: send_stream,
-            h3_tx_fut: None,
+            inner,
+            send_fut: None,
             rx,
             error_tx: Some(error_tx),
         },
     )
 }
 
-pub(super) struct H3Upgraded<SR> {
+/// The read half of an upgraded stream.
+pub(super) struct H3Upgraded {
     send_stream: UpgradedSendStreamBridge,
-    recv_stream: RequestStream<SR, bytes::Bytes>,
+    inner: Arc<Mutex<RequestStream>>,
     buf: Bytes,
 }
 
-impl<SR: RecvStream> tokio::io::AsyncRead for H3Upgraded<SR> {
+impl tokio::io::AsyncRead for H3Upgraded {
+    #[inline]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         read_buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
+        // The request may not have been fully read when the upgrade happened;
+        // drain whatever the stream still holds as raw bytes.
         if self.buf.is_empty() {
             self.buf = loop {
-                match ready!(self.recv_stream.poll_recv_data(cx)) {
-                    Ok(None) => return Poll::Ready(Ok(())),
-                    Ok(Some(buf)) if !buf.has_remaining() => continue,
-                    Ok(Some(mut buf)) => {
+                let mut guard = match self.inner.lock().poll_unpin(cx) {
+                    Poll::Ready(guard) => guard,
+                    Poll::Pending => return Poll::Pending,
+                };
+                match guard.poll_recv_data(cx) {
+                    Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Ok(Some(buf))) if !buf.has_remaining() => continue,
+                    Poll::Ready(Ok(Some(mut buf))) => {
                         break buf.copy_to_bytes(buf.remaining());
                     }
-                    Err(e) => {
-                        return Poll::Ready(if e.is_h3_no_error() {
-                            Ok(())
-                        } else {
-                            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
-                        })
+                    Poll::Ready(Err(e)) => {
+                        return Poll::Ready(Err(h3_stream_error_to_io(e)));
                     }
+                    Poll::Pending => return Poll::Pending,
                 }
             };
         }
@@ -86,7 +94,13 @@ impl<SR: RecvStream> tokio::io::AsyncRead for H3Upgraded<SR> {
     }
 }
 
-impl<SR> AsyncWrite for H3Upgraded<SR> {
+struct UpgradedSendStreamBridge {
+    tx: kanal::AsyncSender<Box<[u8]>>,
+    error_rx: oneshot::AsyncReceiver<std::io::Error>,
+}
+
+impl AsyncWrite for H3Upgraded {
+    #[inline]
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -101,8 +115,8 @@ impl<SR> AsyncWrite for H3Upgraded<SR> {
             Poll::Ready(Ok(())) => return Poll::Ready(Ok(n)),
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(_task_dropped)) => {
-                // if the task dropped, check if there was an error
-                // otherwise i guess its a broken pipe
+                // If the task dropped, check whether it did so with an error;
+                // otherwise it is a broken pipe.
             }
         };
         match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
@@ -133,37 +147,47 @@ impl<SR> AsyncWrite for H3Upgraded<SR> {
     }
 }
 
-struct UpgradedSendStreamBridge {
-    tx: kanal::AsyncSender<Box<[u8]>>,
-    error_rx: oneshot::AsyncReceiver<std::io::Error>,
-}
-
-pub struct UpgradedSendStreamTask<S> {
-    h3_tx: RequestStream<S, bytes::Bytes>,
+/// Drives the send half of an upgraded stream: forwards the consumer's
+/// writes from the kanal bridge onto the request stream and finishes it
+/// when the consumer closes, propagating any stream error back.
+pub(super) struct UpgradedSendStreamTask {
+    inner: Arc<Mutex<RequestStream>>,
     #[allow(clippy::type_complexity)]
-    h3_tx_fut: Option<Pin<Box<dyn Future<Output = Result<(), h3::error::StreamError>>>>>,
+    send_fut: Option<Pin<Box<dyn Future<Output = Result<(), StreamError>>>>>,
     rx: kanal::AsyncReceiver<Box<[u8]>>,
     error_tx: Option<oneshot::Sender<std::io::Error>>,
 }
 
-impl<S: SendStream<bytes::Bytes> + 'static> UpgradedSendStreamTask<S> {
+impl UpgradedSendStreamTask {
+    /// One send-data step: consumes `data` on the shared request stream.
+    async fn send_data(inner: Arc<Mutex<RequestStream>>, data: Bytes) -> Result<(), StreamError> {
+        let mut guard = inner.lock().await;
+        // `Bytes::clone` is a refcount bump; the peer's flow control shows up
+        // as `Pending` on the inner poll.
+        std::future::poll_fn(move |cx| guard.poll_send_data(cx, data.clone())).await
+    }
+
+    /// Finishes the send half (`FIN`) once the consumer closed its write side.
+    async fn finish(inner: Arc<Mutex<RequestStream>>) -> Result<(), StreamError> {
+        let mut guard = inner.lock().await;
+        std::future::poll_fn(|cx| guard.poll_finish(cx)).await
+    }
+
     #[inline]
     fn tick(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
 
-        // this is a manual `select()` over 3 "futures", so we always need
-        // to be sure they are ready and/or we are waiting notification of
-        // one of the sides hanging up, so the task doesn't live around
-        // longer than it's meant to.
+        // Manual `select()` over the in-flight send future and the consumer's
+        // write channel, so the task lives no longer than necessary.
         loop {
-            if let Some(mut fut) = this.h3_tx_fut.take() {
+            if let Some(mut fut) = this.send_fut.take() {
                 match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(())) => {}
                     Poll::Ready(Err(e)) => {
                         return Poll::Ready(Err(h3_stream_error_to_io(e)));
                     }
                     Poll::Pending => {
-                        this.h3_tx_fut = Some(fut);
+                        this.send_fut = Some(fut);
                         return Poll::Pending;
                     }
                 }
@@ -171,26 +195,13 @@ impl<S: SendStream<bytes::Bytes> + 'static> UpgradedSendStreamTask<S> {
 
             match std::pin::pin!(this.rx.recv()).poll(cx) {
                 Poll::Ready(Ok(cursor)) => {
-                    // Safety: "send_fut" would not outlive "this.h3_tx"
-                    let send_fut = unsafe {
-                        std::mem::transmute::<
-                            &mut RequestStream<S, bytes::Bytes>,
-                            &'static mut RequestStream<S, bytes::Bytes>,
-                        >(&mut this.h3_tx)
-                    }
-                    .send_data(Bytes::from_owner(cursor));
-                    this.h3_tx_fut = Some(Box::pin(send_fut));
+                    this.send_fut = Some(Box::pin(Self::send_data(
+                        this.inner.clone(),
+                        Bytes::from_owner(cursor),
+                    )));
                 }
                 Poll::Ready(Err(_)) => {
-                    // Safety: "finish_fut" would not outlive "this.h3_tx"
-                    let finish_fut = unsafe {
-                        std::mem::transmute::<
-                            &mut RequestStream<S, bytes::Bytes>,
-                            &'static mut RequestStream<S, bytes::Bytes>,
-                        >(&mut this.h3_tx)
-                    }
-                    .finish();
-                    this.h3_tx_fut = Some(Box::pin(finish_fut));
+                    this.send_fut = Some(Box::pin(Self::finish(this.inner.clone())));
                 }
                 Poll::Pending => {
                     return Poll::Pending;
@@ -200,7 +211,7 @@ impl<S: SendStream<bytes::Bytes> + 'static> UpgradedSendStreamTask<S> {
     }
 }
 
-impl<S: SendStream<bytes::Bytes> + 'static> Future for UpgradedSendStreamTask<S> {
+impl Future for UpgradedSendStreamTask {
     type Output = ();
 
     #[inline]
@@ -209,17 +220,11 @@ impl<S: SendStream<bytes::Bytes> + 'static> Future for UpgradedSendStreamTask<S>
             Poll::Ready(Ok(())) => Poll::Ready(()),
             Poll::Ready(Err(err)) => {
                 if let Some(tx) = self.error_tx.take() {
-                    let _oh_well = tx.send(err);
+                    let _ = tx.send(err);
                 }
                 Poll::Ready(())
             }
             Poll::Pending => Poll::Pending,
         }
-    }
-}
-
-impl<S> Drop for UpgradedSendStreamTask<S> {
-    fn drop(&mut self) {
-        let _ = self.h3_tx_fut.take();
     }
 }
