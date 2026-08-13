@@ -1,5 +1,11 @@
 # `vibeio-http` change log
 
+## `vibeio-http` UNRELEASED
+
+**Not yet released**
+
+- Replaced the HTTP/2 protocol implementation with an in-house one.
+
 ## `vibeio-http` 0.3.5
 
 **Released in August 6, 2026**
