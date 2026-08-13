@@ -27,10 +27,9 @@ pub enum QpackError {
 impl QpackError {
     /// The HTTP/3 CONNECTION_CLOSE error code (RFC 9204 Section 6).
     ///
-    /// Consumed by the HTTP/3 layer, which is why the expectation errors
-    /// once that lands.
-    #[expect(dead_code)]
-    pub(crate) fn code(self) -> u16 {
+    /// Consumed by the HTTP/3 layer and by the error-module tests that
+    /// pin the `0x02xx` family against the `0x01xx` HTTP/3 family.
+    pub fn code(self) -> u16 {
         match self {
             QpackError::DecompressionFailed => 0x0200,
             QpackError::EncoderStream => 0x0201,

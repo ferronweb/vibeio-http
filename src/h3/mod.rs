@@ -1,8 +1,11 @@
 mod date;
+mod error;
 mod options;
 pub mod qpack;
-mod transport;
+pub mod transport;
 mod upgrade;
+
+pub use error::{H3Error, TransportError};
 
 use futures_util::FutureExt;
 pub use options::*;
