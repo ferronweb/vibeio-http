@@ -1108,7 +1108,7 @@ where
             .streams
             .iter_mut()
             .filter_map(|(id, entry)| {
-                let mut msgs = Vec::new();
+                let mut msgs = Vec::with_capacity(entry.msg_rx.len());
                 while let Ok(Some(msg)) = entry.msg_rx.try_recv() {
                     msgs.push(msg);
                 }
