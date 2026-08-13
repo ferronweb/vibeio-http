@@ -65,9 +65,11 @@ pub struct Setting {
     pub value: u32,
 }
 
-/// A parsed frame. Payloads are owned copies; the connection layer
-/// reassembles field blocks from the `block` fragments and applies stream
-/// semantics. Padding, when present, is validated and stripped.
+/// A parsed frame. Payloads are zero-copy views over the decoder's
+/// buffer (kept alive by `Bytes` refcounting until the frame is
+/// dropped); the connection layer reassembles field blocks from the
+/// `block` fragments and applies stream semantics. Padding, when
+/// present, is validated and stripped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     Data {
@@ -246,18 +248,18 @@ fn parse_frame(
         DATA_TYPE => {
             require_stream(stream_id)?;
             let end_stream = flags & FLAG_END_STREAM != 0;
-            let _padding = take_padding(&mut body, flags & FLAG_PADDED != 0)?;
+            let pad_len = take_padding(&mut body, flags & FLAG_PADDED != 0)?;
             Frame::Data {
                 stream_id,
                 end_stream,
-                data: body.to_vec().into(),
+                data: payload_slice(&payload, body, pad_len),
             }
         }
         HEADERS_TYPE => {
             require_stream(stream_id)?;
             let end_stream = flags & FLAG_END_STREAM != 0;
             let end_headers = flags & FLAG_END_HEADERS != 0;
-            let _padding = take_padding(&mut body, flags & FLAG_PADDED != 0)?;
+            let pad_len = take_padding(&mut body, flags & FLAG_PADDED != 0)?;
             let priority = if flags & FLAG_PRIORITY != 0 {
                 Some(read_priority(&mut body, stream_id)?)
             } else {
@@ -271,7 +273,7 @@ fn parse_frame(
                 end_stream,
                 end_headers,
                 priority,
-                block: body.to_vec().into(),
+                block: payload_slice(&payload, body, pad_len),
             }
         }
         PRIORITY_TYPE => {
@@ -339,7 +341,7 @@ fn parse_frame(
         PUSH_PROMISE_TYPE => {
             require_stream(stream_id)?;
             let end_headers = flags & FLAG_END_HEADERS != 0;
-            let _padding = take_padding(&mut body, flags & FLAG_PADDED != 0)?;
+            let pad_len = take_padding(&mut body, flags & FLAG_PADDED != 0)?;
             if body.len() < 4 {
                 return Err(H2Error::frame_size(
                     "PUSH_PROMISE frame payload must be at least 4 octets",
@@ -354,11 +356,12 @@ fn parse_frame(
             if !end_headers {
                 decoder.block_stream = Some(stream_id);
             }
+            body = &body[4..];
             Frame::PushPromise {
                 stream_id,
                 end_headers,
                 promised_stream_id,
-                block: body[4..].to_vec().into(),
+                block: payload_slice(&payload, body, pad_len),
             }
         }
         PING_TYPE => {
@@ -391,7 +394,7 @@ fn parse_frame(
             Frame::GoAway {
                 last_stream_id,
                 error_code,
-                debug: body[8..].to_vec().into(),
+                debug: payload.slice(8..),
             }
         }
         WINDOW_UPDATE_TYPE => {
@@ -411,14 +414,13 @@ fn parse_frame(
         }
         CONTINUATION_TYPE => {
             let end_headers = flags & FLAG_END_HEADERS != 0;
-            let block = body.to_vec().into();
             if end_headers {
                 decoder.block_stream = None;
             }
             Frame::Continuation {
                 stream_id,
                 end_headers,
-                block,
+                block: payload,
             }
         }
         _ => Frame::Unknown {
@@ -430,6 +432,15 @@ fn parse_frame(
     };
 
     Ok(frame)
+}
+
+/// A zero-copy view of `payload` covering exactly the range `body`
+/// points at: the leading octets were trimmed by padding/priority
+/// fields and `pad_len` trailing octets by padding.
+#[inline]
+fn payload_slice(payload: &Bytes, body: &[u8], pad_len: usize) -> Bytes {
+    let start = payload.len() - pad_len - body.len();
+    payload.slice(start..start + body.len())
 }
 
 /// Reads the pad-length octet when `padded` is set and strips that many
@@ -582,16 +593,17 @@ impl FrameWriter {
         if end_headers {
             flags |= FLAG_END_HEADERS;
         }
-        let mut payload = Vec::new();
-        if let Some(p) = priority {
+        let extra = if priority.is_some() { 5 } else { 0 };
+        if extra != 0 {
             flags |= FLAG_PRIORITY;
-            let dep = p.dependency & 0x7fff_ffff | if p.exclusive { 0x8000_0000 } else { 0 };
-            payload.extend_from_slice(&dep.to_be_bytes());
-            payload.push(p.weight);
         }
-        payload.extend_from_slice(block);
-        FrameWriter::header(out, payload.len(), HEADERS_TYPE, flags, stream_id);
-        out.extend_from_slice(&payload);
+        FrameWriter::header(out, block.len() + extra, HEADERS_TYPE, flags, stream_id);
+        if let Some(p) = priority {
+            let dep = p.dependency & 0x7fff_ffff | if p.exclusive { 0x8000_0000 } else { 0 };
+            out.extend_from_slice(&dep.to_be_bytes());
+            out.push(p.weight);
+        }
+        out.extend_from_slice(block);
     }
 
     /// Writes a field block as a HEADERS frame (optionally with
@@ -622,13 +634,11 @@ impl FrameWriter {
 
     #[inline]
     pub fn write_priority(&self, out: &mut Vec<u8>, stream_id: u32, priority: Priority) {
-        let mut payload = Vec::with_capacity(5);
         let dep =
             priority.dependency & 0x7fff_ffff | if priority.exclusive { 0x8000_0000 } else { 0 };
-        payload.extend_from_slice(&dep.to_be_bytes());
-        payload.push(priority.weight);
         FrameWriter::header(out, 5, PRIORITY_TYPE, 0, stream_id);
-        out.extend_from_slice(&payload);
+        out.extend_from_slice(&dep.to_be_bytes());
+        out.push(priority.weight);
     }
 
     #[inline]
@@ -639,13 +649,11 @@ impl FrameWriter {
 
     #[inline]
     pub fn write_settings(&self, out: &mut Vec<u8>, settings: &[Setting]) {
-        let mut payload = Vec::with_capacity(settings.len() * 6);
+        FrameWriter::header(out, settings.len() * 6, SETTINGS_TYPE, 0, 0);
         for setting in settings {
-            payload.extend_from_slice(&setting.id.to_be_bytes());
-            payload.extend_from_slice(&setting.value.to_be_bytes());
+            out.extend_from_slice(&setting.id.to_be_bytes());
+            out.extend_from_slice(&setting.value.to_be_bytes());
         }
-        FrameWriter::header(out, payload.len(), SETTINGS_TYPE, 0, 0);
-        out.extend_from_slice(&payload);
     }
 
     #[inline]
@@ -661,17 +669,15 @@ impl FrameWriter {
         promised_stream_id: u32,
         block: &[u8],
     ) {
-        let mut payload = Vec::with_capacity(4 + block.len());
-        payload.extend_from_slice(&(promised_stream_id & 0x7fff_ffff).to_be_bytes());
-        payload.extend_from_slice(block);
         FrameWriter::header(
             out,
-            payload.len(),
+            4 + block.len(),
             PUSH_PROMISE_TYPE,
             FLAG_END_HEADERS,
             stream_id,
         );
-        out.extend_from_slice(&payload);
+        out.extend_from_slice(&(promised_stream_id & 0x7fff_ffff).to_be_bytes());
+        out.extend_from_slice(block);
     }
 
     #[inline]
@@ -694,12 +700,10 @@ impl FrameWriter {
         error_code: u32,
         debug: &[u8],
     ) {
-        let mut payload = Vec::with_capacity(8 + debug.len());
-        payload.extend_from_slice(&(last_stream_id & 0x7fff_ffff).to_be_bytes());
-        payload.extend_from_slice(&error_code.to_be_bytes());
-        payload.extend_from_slice(debug);
-        FrameWriter::header(out, payload.len(), GOAWAY_TYPE, 0, 0);
-        out.extend_from_slice(&payload);
+        FrameWriter::header(out, 8 + debug.len(), GOAWAY_TYPE, 0, 0);
+        out.extend_from_slice(&(last_stream_id & 0x7fff_ffff).to_be_bytes());
+        out.extend_from_slice(&error_code.to_be_bytes());
+        out.extend_from_slice(debug);
     }
 
     #[inline]

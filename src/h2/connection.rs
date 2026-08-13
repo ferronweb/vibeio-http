@@ -150,6 +150,14 @@ pub struct Connection<Io> {
     /// Wakes the drive loop when a stream task fills its outbound
     /// channel; the loop drains channels between reads.
     wake_tx: Option<kanal::AsyncSender<()>>,
+    /// Stream ids whose FIELD_BLOCK completed (END_HEADERS seen) and
+    /// awaits finalization; drained one per frame by
+    /// [`Connection::process_frames`].
+    complete_blocks: Vec<u32>,
+    /// Scratch buffer reused by [`Connection::drain_pending_data`] to
+    /// snapshot stream ids before pumping (avoids a per-call
+    /// allocation).
+    drain_ids: Vec<u32>,
     /// Highest stream id opened by the peer (RFC 9113 Section 5.1.1).
     highest_stream_id: u32,
     /// A connection error is pending; the loop stops after flushing.
@@ -190,6 +198,8 @@ where
             closed_streams: FxHashSet::default(),
             opts: ConnectionOptions::default(),
             wake_tx: None,
+            complete_blocks: Vec::new(),
+            drain_ids: Vec::new(),
             highest_stream_id: 0,
             closing: false,
             graceful: false,
@@ -485,9 +495,6 @@ where
                 self.flush().await?;
                 return Ok(true);
             }
-            if !self.out.is_empty() {
-                self.flush().await?;
-            }
         }
     }
 
@@ -514,7 +521,9 @@ where
                 } else {
                     entry.pending_end_stream = end_stream;
                     entry.extend_block(block);
-                    entry.field_block_complete = end_headers;
+                    if end_headers {
+                        self.complete_blocks.push(stream_id);
+                    }
                     (false, false)
                 }
             }
@@ -538,7 +547,9 @@ where
             return;
         };
         entry.extend_block(block);
-        entry.field_block_complete = end_headers;
+        if end_headers {
+            self.complete_blocks.push(stream_id);
+        }
     }
 
     /// A HEADERS block arrived on a stream with no entry: validate and
@@ -583,21 +594,23 @@ where
         entry.wake_tx = Some(self.wake_tx.as_ref().expect("wake sender").clone());
         entry.pending_end_stream = end_stream;
         entry.extend_block(block);
-        entry.field_block_complete = end_headers;
+        if end_headers {
+            self.complete_blocks.push(stream_id);
+        }
         self.streams.insert(stream_id, entry);
     }
 
     /// Removes the completed-block marker for a stream, if any.
     #[inline]
     fn take_complete_block(&mut self) -> Option<u32> {
-        let id = self
-            .streams
-            .iter()
-            .find_map(|(id, entry)| entry.field_block_complete.then_some(*id))?;
-        if let Some(entry) = self.streams.get_mut(&id) {
-            entry.field_block_complete = false;
+        while let Some(stream_id) = self.complete_blocks.pop() {
+            // The stream may have been removed in the meantime (e.g.
+            // stream_error); skip stale completions.
+            if self.streams.contains_key(&stream_id) {
+                return Some(stream_id);
+            }
         }
-        Some(id)
+        None
     }
 
     /// The field block is complete: decode it and, depending on the
@@ -890,14 +903,12 @@ where
                     // a window beyond 2^31-1 is a connection error.
                     let delta = setting.value as i64 - self.peer.initial_window_size as i64;
                     self.peer.initial_window_size = setting.value;
+                    let mut overflow = false;
                     for entry in self.streams.values_mut() {
                         entry.send_window += delta;
+                        overflow |= entry.send_window > i32::MAX as i64;
                     }
-                    if self
-                        .streams
-                        .values()
-                        .any(|entry| entry.send_window > i32::MAX as i64)
-                    {
+                    if overflow {
                         self.goaway(Reason::FlowControlError, b"initial window overflow");
                     }
                 }
@@ -1097,10 +1108,12 @@ where
     /// control windows opened up.
     #[inline]
     fn drain_pending_data(&mut self) {
-        let ids: Vec<u32> = self.streams.keys().copied().collect();
-        for id in ids {
-            self.pump_stream_data(id);
+        let mut ids = std::mem::take(&mut self.drain_ids);
+        ids.extend(self.streams.keys().copied());
+        for id in &ids {
+            self.pump_stream_data(*id);
         }
+        self.drain_ids = ids;
     }
 
     /// Drains every stream task's outbound channel, turning messages

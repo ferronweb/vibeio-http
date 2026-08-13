@@ -113,9 +113,6 @@ pub(crate) struct StreamEntry {
     pub(crate) data_sum: u64,
     /// A trailer section was already received (only one is allowed).
     pub(crate) trailers_seen: bool,
-    /// The END_HEADERS frame closed the field block; the connection
-    /// may now decode and act on it.
-    pub(crate) field_block_complete: bool,
     /// The stream task has finished and signalled `StreamMsg::Closed`
     /// (its message channel is now empty). The stream itself lives on
     /// until `local_ended` so any flow-controlled `pending_data` can
@@ -155,7 +152,6 @@ impl StreamEntry {
             content_length: None,
             data_sum: 0,
             trailers_seen: false,
-            field_block_complete: false,
             task_done: false,
             send_window: 65535,
             pending_data: VecDeque::new(),
@@ -297,13 +293,14 @@ pub(crate) fn is_connection_specific(name: &[u8]) -> bool {
 /// `content-length` syntax (Section 8.1.2.6).
 #[inline]
 pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, MalformedRequest> {
-    let mut method: Option<Bytes> = None;
-    let mut scheme: Option<Bytes> = None;
-    let mut authority: Option<Bytes> = None;
-    let mut path: Option<Bytes> = None;
-    let mut protocol: Option<Bytes> = None;
+    let mut method: Option<&[u8]> = None;
+    let mut scheme: Option<&[u8]> = None;
+    let mut authority: Option<&[u8]> = None;
+    let mut path: Option<&[u8]> = None;
+    let mut protocol: Option<&[u8]> = None;
     let mut regular = HeaderMap::new();
-    let mut content_lengths: Vec<u64> = Vec::new();
+    let mut content_length: Option<u64> = None;
+    let mut content_length_conflict = false;
 
     let mut pseudo_phase = true;
     for header in headers {
@@ -320,31 +317,31 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
                     if method.is_some() {
                         return Err(MalformedRequest);
                     }
-                    method = Some(Bytes::copy_from_slice(value));
+                    method = Some(value);
                 }
                 b":scheme" => {
                     if scheme.is_some() {
                         return Err(MalformedRequest);
                     }
-                    scheme = Some(Bytes::copy_from_slice(value));
+                    scheme = Some(value);
                 }
                 b":authority" => {
                     if authority.is_some() {
                         return Err(MalformedRequest);
                     }
-                    authority = Some(Bytes::copy_from_slice(value));
+                    authority = Some(value);
                 }
                 b":path" => {
                     if path.is_some() {
                         return Err(MalformedRequest);
                     }
-                    path = Some(Bytes::copy_from_slice(value));
+                    path = Some(value);
                 }
                 b":protocol" => {
                     if protocol.is_some() {
                         return Err(MalformedRequest);
                     }
-                    protocol = Some(Bytes::copy_from_slice(value));
+                    protocol = Some(value);
                 }
                 // Unknown or response-defined pseudo-header (Sections
                 // 8.1.2.1).
@@ -360,7 +357,14 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
                 return Err(MalformedRequest);
             }
             if name == b"content-length" {
-                content_lengths.push(parse_content_length(value)?);
+                let value = parse_content_length(value)?;
+                if let Some(previous) = content_length {
+                    if previous != value {
+                        content_length_conflict = true;
+                    }
+                } else {
+                    content_length = Some(value);
+                }
             }
             if name.iter().any(|byte| byte.is_ascii_uppercase()) {
                 // Field names must be lowercase (Section 8.1.2.1);
@@ -374,7 +378,7 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
         }
     }
 
-    let is_connect = method.as_deref() == Some(b"CONNECT");
+    let is_connect = method == Some(&b"CONNECT"[..]);
     let Some(method) = method else {
         return Err(MalformedRequest);
     };
@@ -387,12 +391,15 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
         if scheme.is_some() || path.is_some() {
             return Err(MalformedRequest);
         }
-        let uri = Uri::from_maybe_shared(authority.clone()).map_err(|_| MalformedRequest)?;
+        if content_length_conflict {
+            return Err(MalformedRequest);
+        }
+        let uri = Uri::try_from(authority).map_err(|_| MalformedRequest)?;
         return Ok(ParsedRequest {
-            method: Method::from_bytes(&method).map_err(|_| MalformedRequest)?,
+            method: Method::from_bytes(method).map_err(|_| MalformedRequest)?,
             uri,
             headers: regular,
-            content_length: parse_content_lengths(&content_lengths)?,
+            content_length,
             expect_continue: false,
             is_connect: true,
         });
@@ -414,24 +421,19 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
     }
 
     let uri = {
-        let scheme = std::str::from_utf8(&scheme).map_err(|_| MalformedRequest)?;
+        let scheme = std::str::from_utf8(scheme).map_err(|_| MalformedRequest)?;
         let mut builder = Uri::builder();
         builder = builder.scheme(scheme);
         if let Some(authority) = authority.as_ref() {
             let authority = std::str::from_utf8(authority).map_err(|_| MalformedRequest)?;
             builder = builder.authority(authority);
         }
-        let path = std::str::from_utf8(&path).map_err(|_| MalformedRequest)?;
+        let path = std::str::from_utf8(path).map_err(|_| MalformedRequest)?;
         match builder.path_and_query(path).build() {
             Ok(uri) => uri,
             // :authority was omitted: fall back to the origin form so
             // the target URI still round-trips.
-            Err(_) => {
-                // The borrowed `path` would be dropped with the block;
-                // copy so the fallback URI outlives it.
-                #[allow(clippy::unnecessary_to_owned)]
-                Uri::from_maybe_shared(path.to_owned()).map_err(|_| MalformedRequest)?
-            }
+            Err(_) => Uri::try_from(path).map_err(|_| MalformedRequest)?,
         }
     };
 
@@ -440,11 +442,15 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"));
 
+    if content_length_conflict {
+        return Err(MalformedRequest);
+    }
+
     Ok(ParsedRequest {
-        method: Method::from_bytes(&method).map_err(|_| MalformedRequest)?,
+        method: Method::from_bytes(method).map_err(|_| MalformedRequest)?,
         uri,
         headers: regular,
-        content_length: parse_content_lengths(&content_lengths)?,
+        content_length,
         expect_continue,
         is_connect: false,
     })
@@ -459,21 +465,34 @@ pub(crate) fn te_is_trailers(value: &[u8]) -> bool {
         .is_some_and(|value| value.split(',').all(|part| part.trim() == "trailers"))
 }
 
-/// Multiple content-length fields must be identical (RFC 9110
-/// Section 8.6); any non-digit value is malformed.
+/// Parses a content-length header value into a `u64`; anything but
+/// bare digits (optionally framed by OWS) is malformed.
 #[inline]
-fn parse_content_lengths(values: &[u64]) -> Result<Option<u64>, MalformedRequest> {
-    match values {
-        [] => Ok(None),
-        [only] => Ok(Some(*only)),
-        many => {
-            if many.windows(2).all(|pair| pair[0] == pair[1]) {
-                Ok(Some(many[0]))
-            } else {
-                Err(MalformedRequest)
-            }
-        }
+pub(crate) fn parse_content_length(value: &[u8]) -> Result<u64, MalformedRequest> {
+    let start = match value
+        .iter()
+        .position(|byte| *byte != b' ' && *byte != b'\t')
+    {
+        // Empty or all-whitespace.
+        None => return Err(MalformedRequest),
+        Some(start) => start,
+    };
+    let end = value
+        .iter()
+        .rposition(|byte| *byte != b' ' && *byte != b'\t')
+        .unwrap_or(start);
+    let value = &value[start..=end];
+    if value.is_empty() || value.iter().any(|byte| !byte.is_ascii_digit()) {
+        return Err(MalformedRequest);
     }
+    let mut result: u64 = 0;
+    for &byte in value {
+        result = result
+            .checked_mul(10)
+            .and_then(|n| n.checked_add((byte - b'0') as u64))
+            .ok_or(MalformedRequest)?;
+    }
+    Ok(result)
 }
 
 /// Validates a trailer field block (RFC 9113 Section 8.1.2.1):
@@ -495,37 +514,6 @@ pub(crate) fn parse_trailers(headers: &[Header]) -> Result<HeaderMap, MalformedR
         trailers.append(name, value);
     }
     Ok(trailers)
-}
-
-/// Parses a content-length header value into a `u64`; anything but
-/// bare digits is malformed.
-///
-/// Callers fold the result into [`parse_content_lengths`].
-#[inline]
-pub(crate) fn parse_content_length(value: &[u8]) -> Result<u64, MalformedRequest> {
-    let value = value
-        .iter()
-        .copied()
-        .skip_while(|byte| *byte == b' ' || *byte == b'\t')
-        .collect::<Vec<u8>>();
-    // content-length = 1*DIGIT, and it must be a valid non-negative
-    // octet count. Reject signs, leading +, and non-digits.
-    let value = value
-        .iter()
-        .rposition(|byte| *byte != b' ' && *byte != b'\t')
-        .map(|end| &value[..end + 1])
-        .ok_or(MalformedRequest)?;
-    if value.is_empty() || value.iter().any(|byte| !byte.is_ascii_digit()) {
-        return Err(MalformedRequest);
-    }
-    let mut result: u64 = 0;
-    for byte in value {
-        result = result
-            .checked_mul(10)
-            .and_then(|n| n.checked_add((*byte - b'0') as u64))
-            .ok_or(MalformedRequest)?;
-    }
-    Ok(result)
 }
 
 /// The outcome of polling the service state of a [`StreamDriver`].
