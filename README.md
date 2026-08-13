@@ -30,7 +30,7 @@ By default, this crate enables: `h1`, `h1-zerocopy`, and `h2`.
 
 - `h1`: HTTP/1.x support
 - `h2`: HTTP/2 support
-- `h3`: HTTP/3 support (experimental, based on the `h3` crate)
+- `h3`: HTTP/3 support (experimental, native implementation of RFC 9114)
 - `h1-zerocopy`: Linux and FreeBSD-only zero-copy HTTP/1.x response sending (`splice`-based)
 
 For a smaller build, disable default features and opt in explicitly:
@@ -118,7 +118,11 @@ let handler = |mut req| async move {
 
 - handshake/accept timeouts
 - automatic `100 Continue`
-- direct access to underlying protocol builders (`h2_builder`, `h3_builder`)
+- direct access to the underlying protocol builders (`h2_builder`)
+
+The native `Http3Options` also exposes QPACK and limits settings
+(`qpack_max_table_capacity`, `qpack_blocked_streams`,
+`max_field_section_size`, ...) via builder methods.
 
 ## HTTP/1 upgrades
 

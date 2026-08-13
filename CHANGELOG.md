@@ -5,6 +5,12 @@
 **Not yet released**
 
 - Replaced the HTTP/2 protocol implementation with an in-house one.
+- Replaced the experimental HTTP/3 wrapper around the `h3` crate with a
+  native RFC 9114 implementation (QPACK, control/request stream state
+  machines, QUIC transport abstraction). The `h3` crate is no longer a
+  runtime dependency; it remains only as a dev-dependency for interop
+  tests and benchmarks. QPACK and limits are configurable through the
+  extended `Http3Options`.
 
 ## `vibeio-http` 0.3.5
 

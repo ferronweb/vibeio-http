@@ -34,12 +34,12 @@ tokio-util = { version = "0.7.18", optional = true }
 rustc-hash = { version = "2.1.3", optional = true }
 
 # HTTP/3
-h3 = { version = "0.0.8", optional = true }
 quinn = { version = "0.11", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.50.0", features = ["test-util", "full"] }
 h2 = "0.4"
+h3 = "0.0.8"
 serde_json = "1"
 criterion = "0.5"
 rcgen = "0.14"
@@ -54,5 +54,4 @@ h1 = ["httparse", "httpdate", "memchr", "tokio-util"]
 h1-zerocopy = ["h1", "vibeio/splice"]
 h2 = ["dep:rustc-hash", "httpdate", "tokio-util", "pin-project-lite"]
 h3 = ["httpdate", "tokio-util"]
-h3-legacy = ["h3", "dep:h3"]
 h3-quinn = ["h3", "dep:quinn"]

@@ -65,8 +65,6 @@ mod h1;
 mod h2;
 #[cfg(feature = "h3")]
 mod h3;
-#[cfg(feature = "h3-legacy")]
-pub mod h3_legacy;
 mod incoming;
 mod upgrade;
 
