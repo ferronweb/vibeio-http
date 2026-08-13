@@ -86,14 +86,14 @@ impl Encoder {
     pub fn encode(&mut self, headers: &[Header], out: &mut Vec<u8>) {
         if let Some(size) = self.queued_size_update.take() {
             self.table.set_max_size(size);
-            integer::encode(out, size as u32, 5, SIZE_UPDATE);
+            integer::encode(out, size as u64, 5, SIZE_UPDATE);
         }
 
         for header in headers {
             let name = header.name();
             if NEVER_INDEXED.contains(&name) {
                 match self.table.find_name(name) {
-                    Some(index) => integer::encode(out, index as u32, 4, LITERAL_NEVER_INDEXED),
+                    Some(index) => integer::encode(out, index as u64, 4, LITERAL_NEVER_INDEXED),
                     None => {
                         out.push(LITERAL_NEVER_INDEXED);
                         self.encode_string(out, name);
@@ -105,11 +105,11 @@ impl Encoder {
 
             match self.table.find(name, header.value()) {
                 Some(index) => {
-                    integer::encode(out, index as u32, 7, INDEXED);
+                    integer::encode(out, index as u64, 7, INDEXED);
                 }
                 None => {
                     match self.table.find_name(name) {
-                        Some(index) => integer::encode(out, index as u32, 6, LITERAL_WITH_INDEXING),
+                        Some(index) => integer::encode(out, index as u64, 6, LITERAL_WITH_INDEXING),
                         None => {
                             out.push(LITERAL_WITH_INDEXING);
                             self.encode_string(out, name);

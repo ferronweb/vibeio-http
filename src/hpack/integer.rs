@@ -1,7 +1,10 @@
-//! HPACK integer representation (RFC 7541 Section 5.1).
+//! Prefixed-integer representation (RFC 7541 Section 5.1, RFC 9204
+//! Section 4.1.1).
 //!
-//! Integers are encoded with an N-bit prefix (5, 6, 7, or 8 bits) followed
-//! by zero or more continuation octets carrying 7 bits each.
+//! Integers are encoded with an N-bit prefix (2 to 8 bits in QPACK, 5, 6, 7
+//! or 8 in HPACK) followed by zero or more continuation octets carrying 7
+//! bits each. QPACK implementations MUST be able to decode integers up to
+//! and including 62 bits long, so the codec operates on `u64`.
 
 use super::HpackError;
 
@@ -10,13 +13,13 @@ use super::HpackError;
 /// The low `prefix_bits` bits of `header` (which carries the representation's
 /// other bits) are replaced with the encoded value.
 #[inline]
-pub(crate) fn encode(out: &mut Vec<u8>, value: u32, prefix_bits: u8, header: u8) {
-    let mask = (1u32 << prefix_bits) - 1;
+pub(crate) fn encode(out: &mut Vec<u8>, value: u64, prefix_bits: u8, header: u8) {
+    let mask = (1u64 << prefix_bits) - 1;
     if value < mask {
-        out.push((u32::from(header) & !mask | value) as u8);
+        out.push((u64::from(header) & !mask | value) as u8);
         return;
     }
-    out.push((u32::from(header) & !mask | mask) as u8);
+    out.push((u64::from(header) & !mask | mask) as u8);
     let mut v = value - mask;
     while v >= 128 {
         out.push((v & 0x7f) as u8 | 0x80);
@@ -28,32 +31,41 @@ pub(crate) fn encode(out: &mut Vec<u8>, value: u32, prefix_bits: u8, header: u8)
 /// Decodes an `prefix_bits`-bit-prefixed integer.
 ///
 /// `header` is the already-consumed first octet; `off` is updated past the
-/// consumed continuation octets of `buf`. Values that would overflow 32 bits
-/// are treated as a decoding error (RFC 7541 Section 5.1).
+/// consumed continuation octets of `buf`. Values that would overflow 64 bits
+/// are treated as a decoding error (RFC 9204 Section 4.1.1 requires support
+/// for 62-bit integers).
 #[inline]
 pub(crate) fn decode(
     buf: &[u8],
     off: &mut usize,
     prefix_bits: u8,
     header: u8,
-) -> Result<u32, HpackError> {
-    let mask = (1u32 << prefix_bits) - 1;
-    let mut value = u32::from(header) & mask;
+) -> Result<u64, HpackError> {
+    let mask = (1u64 << prefix_bits) - 1;
+    let mut value = u64::from(header) & mask;
     if value < mask {
         return Ok(value);
     }
 
     let mut shift: u32 = 0;
     loop {
-        if shift > 28 {
+        // 7 bits per octet; the ninth octet (shift 56) already covers bit 62,
+        // so anything past it overflows the 62-bit QPACK limit.
+        if shift > 56 {
             return Err(HpackError::InvalidInteger);
         }
         let b = *buf.get(*off).ok_or(HpackError::InvalidInteger)?;
         *off += 1;
         value = value
-            .checked_add((u32::from(b & 0x7f)) << shift)
+            .checked_add((u64::from(b & 0x7f)) << shift)
             .ok_or(HpackError::InvalidInteger)?;
         if b & 0x80 == 0 {
+            // RFC 9204 Section 4.1.1: only integers up to 62 bits long are
+            // in scope; the shift-56 chunk can carry bit 62, so check the
+            // value itself.
+            if value >= (1 << 62) {
+                return Err(HpackError::InvalidInteger);
+            }
             return Ok(value);
         }
         shift += 7;
@@ -99,17 +111,19 @@ mod tests {
     #[test]
     fn round_trip() {
         for &(bits, value) in &[
-            (5, 0u32),
+            (5, 0u64),
             (5, 30),
             (5, 31),
             (5, 1337),
-            (5, u32::MAX - 1),
+            (5, (1 << 62) - 1),
             (6, 62),
             (6, 63),
             (6, 10_000),
             (7, 127),
             (7, 128),
             (7, 1 << 24),
+            (7, 1 << 40),
+            (7, (1 << 62) - 1),
             (8, 255),
             (8, 256),
         ] {
@@ -118,6 +132,48 @@ mod tests {
             let mut off = 1;
             assert_eq!(decode(&out, &mut off, bits, out[0]).unwrap(), value);
             assert_eq!(off, out.len(), "value {value}");
+        }
+    }
+
+    #[test]
+    fn rejects_values_beyond_62_bits() {
+        // QPACK decoders only need to support up to 62-bit integers
+        // (RFC 9204 Section 4.1.1): encoding still works for any u64, but a
+        // 64-bit value must be rejected on decode.
+        let mut out = Vec::new();
+        encode(&mut out, u64::MAX, 5, 0);
+        let mut off = 1;
+        assert_eq!(
+            decode(&out, &mut off, 5, out[0]),
+            Err(HpackError::InvalidInteger)
+        );
+        // Mid-range 63-bit values are also out of scope: 2^62 needs 63 bits.
+        out.clear();
+        encode(&mut out, 1 << 62, 5, 0);
+        let mut off = 1;
+        assert_eq!(
+            decode(&out, &mut off, 5, out[0]),
+            Err(HpackError::InvalidInteger)
+        );
+    }
+
+    #[test]
+    fn round_trip_qpack_prefix_sizes() {
+        // QPACK uses 3, 4, 5 and 6-bit prefixes (string literals, indexes).
+        for prefix_bits in 2..=8u8 {
+            let mut out = Vec::new();
+            encode(
+                &mut out,
+                2u64.pow(u32::from(prefix_bits)) + 123,
+                prefix_bits,
+                0,
+            );
+            let mut off = 1;
+            assert_eq!(
+                decode(&out, &mut off, prefix_bits, out[0]).unwrap(),
+                2u64.pow(u32::from(prefix_bits)) + 123
+            );
+            assert_eq!(off, out.len(), "prefix_bits {prefix_bits}");
         }
     }
 
@@ -133,9 +189,10 @@ mod tests {
 
     #[test]
     fn rejects_overflow() {
-        // Continuation octets that would overflow u32: 0x80 repeated five
-        // times with a 5-bit prefix.
-        let buf = [0x1f, 0xff, 0xff, 0xff, 0xff, 0x7f];
+        // Continuation octets that would overflow u64: all-ones chunks.
+        let buf = [
+            0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+        ];
         let mut off = 1;
         assert_eq!(
             decode(&buf, &mut off, 5, buf[0]),

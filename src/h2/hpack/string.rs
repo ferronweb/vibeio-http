@@ -39,11 +39,11 @@ pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman_len: Option<usize>
     if let Some(huffman_len) = huffman_len {
         // Integer prefix (<=5 octets) plus the exact Huffman body length.
         out.reserve(5usize.saturating_add(huffman_len));
-        integer::encode(out, huffman_len as u32, 7, HUFFMAN_FLAG);
+        integer::encode(out, huffman_len as u64, 7, HUFFMAN_FLAG);
         huffman::encode_with_len(value, out, huffman_len);
     } else {
         out.reserve(8 + value.len());
-        integer::encode(out, value.len() as u32, 7, 0);
+        integer::encode(out, value.len() as u64, 7, 0);
         out.extend_from_slice(value);
     }
 }
