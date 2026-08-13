@@ -7,3 +7,4 @@
 //! Populated in the QPACK steps; see `CUSTOM_HTTP3_IMPL.md`.
 
 pub(crate) mod static_table;
+pub(crate) mod table;
