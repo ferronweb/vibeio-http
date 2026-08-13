@@ -282,8 +282,15 @@ const CODES: [(u8, u32); 257] = [
 
 /// Encodes `src` using the RFC 7541 Huffman code, appending the encoded
 /// bytes (with EOS-prefix padding to the octet boundary) to `dst`.
+///
+/// The accumulator holds at most 37 bits (a 7-bit leftover plus the 30-bit
+/// longest code), so no per-byte shift can overflow. The destination is
+/// reserved up front to its worst case (`src.len() * 4 + 1` octets, since
+/// the longest code is 30 bits) so the whole literal is appended without
+/// reallocation.
 #[inline]
 pub(crate) fn encode(src: &[u8], dst: &mut Vec<u8>) {
+    dst.reserve(src.len() * 4 + 1);
     let mut bits: u64 = 0;
     let mut nbits: u32 = 0;
     for &b in src {

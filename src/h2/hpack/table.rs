@@ -80,6 +80,9 @@ const ENTRY_OVERHEAD: usize = 32;
 pub struct Header {
     name: Bytes,
     value: Bytes,
+    /// Cached RFC 7541 Section 4.1 size (overhead + name + value), so
+    /// eviction and accounting never recompute it.
+    size: usize,
 }
 
 impl Header {
@@ -88,17 +91,17 @@ impl Header {
     /// headers (`:method`, `:status`, ...).
     #[inline]
     pub fn new(name: impl Into<Bytes>, value: impl Into<Bytes>) -> Self {
-        Header {
-            name: name.into(),
-            value: value.into(),
-        }
+        let name = name.into();
+        let value = value.into();
+        let size = ENTRY_OVERHEAD + name.len() + value.len();
+        Header { name, value, size }
     }
 
     /// Size in octets as defined in RFC 7541 Section 4.1: the sum of the
     /// name and value lengths (without Huffman encoding) plus 32.
     #[inline]
     pub(crate) fn size(&self) -> usize {
-        ENTRY_OVERHEAD + self.name.len() + self.value.len()
+        self.size
     }
 
     #[inline]
@@ -242,18 +245,18 @@ impl Table {
     /// than the maximum size empties the table and is not added.
     #[inline]
     pub(crate) fn add(&mut self, header: Header) {
-        if header.size() > self.max_size {
+        if header.size > self.max_size {
             self.entries.clear();
             self.size = 0;
             return;
         }
-        while self.size + header.size() > self.max_size {
+        while self.size + header.size > self.max_size {
             match self.entries.pop_back() {
                 Some(entry) => self.size -= entry.size(),
                 None => break,
             }
         }
-        self.size += header.size();
+        self.size += header.size;
         self.entries.push_front(header);
     }
 }

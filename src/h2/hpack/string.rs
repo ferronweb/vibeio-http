@@ -12,9 +12,17 @@ pub(crate) fn should_huffman(value: &[u8]) -> bool {
 }
 
 /// Encodes a string literal (raw or Huffman-coded) into `out`.
+///
+/// When `huffman` is set, the literal is Huffman-coded (honoring the flag
+/// even for empty values); otherwise it is written verbatim. The output
+/// buffer is reserved up front so the whole literal is appended without
+/// intermediate reallocations.
 #[inline]
 pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman: bool) {
     if huffman {
+        // Integer prefix (<=5 octets) plus the Huffman body (<=4 octets
+        // per input byte, since the longest code is 30 bits).
+        out.reserve(8 + value.len() * 4);
         integer::encode(
             out,
             huffman::encoded_len(value).div_ceil(8) as u32,
@@ -23,6 +31,7 @@ pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman: bool) {
         );
         huffman::encode(value, out);
     } else {
+        out.reserve(8 + value.len());
         integer::encode(out, value.len() as u32, 7, 0);
         out.extend_from_slice(value);
     }

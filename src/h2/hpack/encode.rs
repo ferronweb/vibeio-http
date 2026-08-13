@@ -116,8 +116,10 @@ impl Encoder {
                         }
                     }
                     self.encode_string(out, header.value());
-                    self.table
-                        .add(Header::new(name.to_vec(), header.value().to_vec()));
+                    // Store the header by cloning its already-owned `Bytes`
+                    // (a refcount bump) instead of re-copying the name and
+                    // value into fresh heap allocations.
+                    self.table.add(header.clone());
                 }
             }
         }

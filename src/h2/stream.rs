@@ -972,7 +972,7 @@ where
                     Ok(data) => {
                         let msg = StreamMsg::Data {
                             data,
-                            end_stream: false,
+                            end_stream: body.is_end_stream(),
                         };
 
                         let msg_tx_fut2 = msg_tx.send(msg);
