@@ -1,11 +1,13 @@
 mod date;
 mod error;
+mod frame;
 mod options;
 pub mod qpack;
 pub mod transport;
 mod upgrade;
 
 pub use error::{H3Error, TransportError};
+pub use frame::{Frame, FrameDecoder, FrameError, Settings};
 
 use futures_util::FutureExt;
 pub use options::*;
@@ -20,7 +22,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use http::{Request, Response};
-use http_body::{Body, Frame};
+use http_body::{Body, Frame as BodyFrame};
 use http_body_util::BodyExt;
 
 use crate::{h3::date::DateCache, EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded};
@@ -71,7 +73,7 @@ where
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    ) -> Poll<Option<Result<BodyFrame<Self::Data>, Self::Error>>> {
         let mut inner = match self.inner.lock().poll_unpin(cx) {
             Poll::Ready(inner) => inner,
             Poll::Pending => return Poll::Pending,
@@ -81,7 +83,7 @@ where
             match inner.recv.poll_recv_data(cx) {
                 Poll::Ready(Ok(Some(mut data))) => {
                     let data = data.copy_to_bytes(data.remaining());
-                    return Poll::Ready(Some(Ok(Frame::data(data))));
+                    return Poll::Ready(Some(Ok(BodyFrame::data(data))));
                 }
                 Poll::Ready(Ok(None)) => inner.data_done = true,
                 Poll::Ready(Err(err)) => {
@@ -97,7 +99,7 @@ where
         }
 
         match inner.recv.poll_recv_trailers(cx) {
-            Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+            Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(BodyFrame::trailers(trailers)))),
             Poll::Ready(Ok(None)) => Poll::Ready(None),
             Poll::Ready(Err(err)) => Poll::Ready(Some(Err(h3_stream_error_to_io(err)))),
             Poll::Pending => {

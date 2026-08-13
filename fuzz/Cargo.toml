@@ -50,3 +50,10 @@ path = "fuzz_targets/qpack_encode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http3_frames"
+path = "fuzz_targets/http3_frames.rs"
+test = false
+doc = false
+bench = false
