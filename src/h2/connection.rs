@@ -1026,7 +1026,9 @@ where
                         let end = *end_stream;
                         self.writer.write_data(&mut self.out, stream_id, end, data);
                         let retire = {
-                            let entry = self.streams.get_mut(&stream_id).unwrap();
+                            let entry = self.streams.get_mut(&stream_id).expect(
+                                "stream entry exists: lookup succeeded before pump",
+                            );
                             entry.pending_data.pop_front();
                             if end {
                                 entry.local_ended = true;
@@ -1054,8 +1056,12 @@ where
             // Send `amount` bytes from the front chunk; the entry borrow
             // ends before we may remove the stream below.
             let (frame_end, all, chunk) = {
-                let entry = self.streams.get_mut(&stream_id).unwrap();
-                let (data, end_stream) = entry.pending_data.front_mut().unwrap();
+                let entry = self.streams.get_mut(&stream_id).expect(
+                    "stream entry exists: lookup succeeded before pump",
+                );
+                let (data, end_stream) = entry.pending_data.front_mut().expect(
+                    "pending chunk exists: front checked before pump",
+                );
                 let all = amount == data.len();
                 let frame_end = *end_stream && all;
                 let chunk = data.split_to(amount);

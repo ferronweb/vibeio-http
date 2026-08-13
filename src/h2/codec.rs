@@ -375,7 +375,7 @@ fn parse_frame(
             }
             Frame::Ping {
                 ack: flags & FLAG_ACK != 0,
-                payload: body[..8].try_into().unwrap(),
+                payload: body[..8].try_into().expect("PING payload is exactly 8 octets (validated above)"),
             }
         }
         GOAWAY_TYPE => {
