@@ -53,7 +53,11 @@ fi
 
 mkdir -p "$(dirname "$JUNIT")"
 echo "==> running h2spec --strict ${SPEC}"
-./h2spec/h2spec -h "$HOST" -p "$PORT" -S -j "$JUNIT" $SPEC
+if [ -x ./h2spec/h2spec ]; then
+  ./h2spec/h2spec -h "$HOST" -p "$PORT" -S -j "$JUNIT" $SPEC
+else
+  ./h2spec -h "$HOST" -p "$PORT" -S -j "$JUNIT" $SPEC
+fi
 status=$?
 echo "==> h2spec exited with code ${status} (report: ${JUNIT})"
 exit "$status"
