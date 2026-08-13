@@ -68,6 +68,9 @@ mod h3;
 mod incoming;
 mod upgrade;
 
+#[cfg(feature = "h2")]
+pub mod hpack;
+
 pub use early_hints::*;
 #[cfg(feature = "h1")]
 pub use h1::*;
