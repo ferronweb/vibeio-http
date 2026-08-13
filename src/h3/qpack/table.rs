@@ -51,6 +51,17 @@ pub(crate) struct DynamicTable {
     inserted: u64,
 }
 
+impl std::fmt::Debug for DynamicTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicTable")
+            .field("entries", &self.entries.len())
+            .field("capacity", &self.capacity)
+            .field("size", &self.size)
+            .field("inserted", &self.inserted)
+            .finish()
+    }
+}
+
 impl DynamicTable {
     /// Creates an empty table with the given initial `capacity`.
     #[inline]
@@ -124,6 +135,50 @@ impl DynamicTable {
         self.evict_to_fit(capacity);
     }
 
+    /// Number of entries that inserting an entry of the given `size` would
+    /// evict from the dropping point (oldest first), or 0 if it fits.
+    ///
+    /// The encoder uses this to decide whether an insert would invalidate
+    /// references to older entries made earlier in the same field section:
+    /// eviction only removes the oldest entries, so an insert is safe while
+    /// every evicted absolute index is below the smallest referenced index.
+    #[inline]
+    pub(crate) fn would_evict(&self, size: u64) -> u64 {
+        let need_freed = size.saturating_sub(self.capacity - self.size);
+        if need_freed == 0 {
+            return 0;
+        }
+        let mut freed = 0u64;
+        let mut evicted = 0u64;
+        for (_, value) in self.entries.iter().rev() {
+            freed += (value.len() as u64) + 32;
+            evicted += 1;
+            if freed >= need_freed {
+                break;
+            }
+        }
+        evicted
+    }
+
+    /// Finds the most recently inserted entry matching `name` and `value`.
+    ///
+    /// Returns the entry's absolute index; entries are matched newest first
+    /// (RFC 9204 Section 3.2.5.1).
+    pub(crate) fn find(&self, name: &[u8], value: &[u8]) -> Option<u64> {
+        self.find_name(name)
+            .filter(|&abs| self.get_absolute(abs).is_some_and(|(_, v)| v == value))
+    }
+
+    /// Finds the most recently inserted entry whose name matches `name`.
+    ///
+    /// Returns the entry's absolute index.
+    pub(crate) fn find_name(&self, name: &[u8]) -> Option<u64> {
+        self.entries
+            .iter()
+            .position(|(n, _)| n == name)
+            .map(|i| self.inserted - 1 - i as u64)
+    }
+
     /// Inserts a new entry at the insertion point, evicting oldest entries
     /// as needed.
     ///
@@ -182,7 +237,7 @@ impl DynamicTable {
     /// Returns the (name, value) pair at deque position `i` (0 = most
     /// recently inserted).
     #[inline]
-    fn entry_at(&self, i: u64) -> Option<(&[u8], &[u8])> {
+    pub(crate) fn entry_at(&self, i: u64) -> Option<(&[u8], &[u8])> {
         let i = usize::try_from(i).ok()?;
         let (name, value) = self.entries.get(i)?;
         Some((name.as_ref(), value.as_ref()))

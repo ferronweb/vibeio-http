@@ -1,0 +1,643 @@
+//! QPACK encoder (RFC 9204 Sections 4.3 and 4.5).
+//!
+//! Consumption: the HTTP/3 layer drives the encoder per connection (it feeds
+//! field sections and drains the encoder stream); until that lands, the whole
+//! module is dead in non-test builds, which is why `dead_code` is expected
+//! here. It errors again once the encoder is used, reminding us to remove the
+//! expectation.
+//!
+//! The encoder owns the shared dynamic table (Section 4.2): it alone adds
+//! entries, and it emits an unframed sequence of instructions on the encoder
+//! stream (Section 4.3) describing every mutation. Field sections are encoded
+//! as a Required Insert Count, a Base, and one or more field line
+//! representations (Section 4.5).
+//!
+//! The encoder fixes the Base at the dynamic table insertion count before
+//! encoding a section, so every reference to entries that existed before the
+//! section is relative, and entries inserted while encoding the section are
+//! referenced with post-Base indexes (Section 4.5.1.2 recommends exactly this:
+//! Base equal to the Required Insert Count, which makes the Sign bit and the
+//! Delta Base zero whenever nothing new is referenced).
+//!
+//! Inserts are speculative but bounded: an entry is only inserted when it
+//! fits and when the eviction it would cause cannot invalidate an index
+//! already referenced by the section being encoded.
+//!
+//! Huffman encoding follows RFC 9204 Section 4.1.2: a string is Huffman
+//! encoded when that is shorter, matching HPACK practice.
+#![expect(dead_code)]
+
+use bytes::Bytes;
+
+use crate::h3::qpack::static_table;
+use crate::h3::qpack::table::DynamicTable;
+use crate::hpack::{huffman, integer};
+
+/// `001` + 5-bit capacity: Set Dynamic Table Capacity (RFC 9204 4.3.1).
+const SET_CAPACITY: u8 = 0b0010_0000;
+/// `1 T` + 6-bit name index: Insert with Name Reference (RFC 9204 4.3.2).
+const INSERT_WITH_NAME_REF: u8 = 0b1000_0000;
+/// `01` + H + 5-bit name length: Insert with Literal Name (RFC 9204 4.3.3).
+const INSERT_WITH_LITERAL_NAME: u8 = 0b0100_0000;
+/// `000` + 5-bit relative index: Duplicate (RFC 9204 4.3.4).
+const DUPLICATE: u8 = 0b0000_0000;
+
+/// `1 T` + 6-bit index: Indexed Field Line (RFC 9204 4.5.2).
+const INDEXED: u8 = 0b1000_0000;
+/// `0001` + 4-bit post-Base index: Indexed Field Line with Post-Base Index
+/// (RFC 9204 4.5.3).
+const INDEXED_POST_BASE: u8 = 0b0001_0000;
+/// `01 N T` + 4-bit name index: Literal Field Line with Name Reference
+/// (RFC 9204 4.5.4).
+const LITERAL_NAME_REF: u8 = 0b0100_0000;
+/// `0000 N` + 3-bit post-Base name index: Literal Field Line with Post-Base
+/// Name Reference (RFC 9204 4.5.5).
+const LITERAL_POST_BASE_NAME_REF: u8 = 0b0000_0000;
+/// `001 N` + H + 3-bit name length: Literal Field Line with Literal Name
+/// (RFC 9204 4.5.6).
+const LITERAL_LITERAL_NAME: u8 = 0b0010_0000;
+
+/// Field names that must never be added to the dynamic table and must always
+/// be sent as literal field lines with the N bit set (RFC 9204 Section 7.1).
+const NEVER_INDEXED: [&[u8]; 3] = [b"authorization", b"proxy-authorization", b"cookie"];
+
+/// Result of encoding one field section: the encoded field section carried on
+/// the request/response stream, and any encoder stream instructions queued
+/// while encoding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EncodedSection {
+    /// Encoded field section prefix plus field lines (RFC 9204 Section 4.5.1).
+    pub(crate) block: Bytes,
+    /// Encoder stream instructions (RFC 9204 Section 4.3).
+    pub(crate) encoder_stream: Bytes,
+}
+
+/// QPACK encoder: dynamic table owner and field section encoder.
+#[derive(Debug)]
+pub(crate) struct Encoder {
+    dynamic: DynamicTable,
+    /// Upper bound on the dynamic table capacity allowed by the decoder's
+    /// SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204 Section 5).
+    max_capacity: u64,
+    /// Whether string literals are Huffman encoded when that is shorter.
+    huffman: bool,
+}
+
+impl Encoder {
+    /// Creates an encoder bound to a decoder that advertised the given
+    /// `max_capacity` in SETTINGS_QPACK_MAX_TABLE_CAPACITY.
+    pub(crate) fn new(max_capacity: u64, huffman: bool) -> Self {
+        Self {
+            dynamic: DynamicTable::new(0),
+            max_capacity,
+            huffman,
+        }
+    }
+
+    /// The maximum dynamic table capacity permitted by the decoder.
+    #[inline]
+    pub(crate) fn max_capacity(&self) -> u64 {
+        self.max_capacity
+    }
+
+    /// Encodes `headers` into an encoded field section plus the encoder
+    /// stream instructions the decoder needs to process it.
+    ///
+    /// The dynamic table is used only when the decoder allows a capacity of
+    /// at least one entry (RFC 9204 Section 3.2.3): a maximum capacity below
+    /// 32 bytes cannot hold any entry and disables the dynamic table.
+    pub(crate) fn encode_section(&mut self, headers: &[(Bytes, Bytes)]) -> EncodedSection {
+        self.encode_section_with_base(headers, self.dynamic.inserted())
+    }
+
+    /// The insert count a decoder must have reached to process the most
+    /// recently encoded section.
+    #[inline]
+    pub(crate) fn required_insert_count(&self) -> u64 {
+        self.dynamic.inserted()
+    }
+
+    fn encode_section_with_base(
+        &mut self,
+        headers: &[(Bytes, Bytes)],
+        base: u64,
+    ) -> EncodedSection {
+        let usable = self.max_capacity >= 32;
+        let mut encoder_stream = Vec::new();
+
+        let mut block = Vec::new();
+        // Smallest absolute index referenced by the section so far; an insert
+        // is skipped when its eviction would reach it.
+        let mut min_rel_ref: Option<u64> = None;
+        // Required Insert Count: total inserts the decoder must have
+        // processed to decode this section (RFC 9204 Section 4.5.1.1).
+        let mut ric = base;
+
+        for (name, value) in headers {
+            let sensitive = NEVER_INDEXED.contains(&name.as_ref());
+
+            if sensitive {
+                // Section 7.1: sensitive field lines are always literal with
+                // N=1 and never stored in the dynamic table.
+                self.encode_literal(name, value, true, &mut block);
+                continue;
+            }
+
+            // Full match, dynamic table first (newest first), then static.
+            if usable {
+                if let Some(abs) = self.dynamic.find(name, value) {
+                    self.encode_indexed(abs, base, &mut block, &mut ric, &mut min_rel_ref);
+                    continue;
+                }
+            }
+            if let Some(idx) = static_table::find(name, value) {
+                // Indexed Field Line, static table (T=1).
+                integer::encode(&mut block, idx as u64, 6, INDEXED | 0x40);
+                continue;
+            }
+
+            if usable {
+                if let Some(abs) = self.dynamic.find_name(name) {
+                    if abs >= base {
+                        // Post-Base name reference (4.5.5). Only reachable on
+                        // the vector path, which fixes Base below the insert
+                        // count.
+                        self.encode_literal_post_base_name_ref(
+                            abs,
+                            base,
+                            value,
+                            &mut block,
+                            &mut ric,
+                            &mut min_rel_ref,
+                        );
+                    } else {
+                        // Literal with Name Reference, dynamic table (T=0).
+                        self.encode_literal_with_name_ref(
+                            abs,
+                            base,
+                            value,
+                            &mut block,
+                            &mut ric,
+                            &mut min_rel_ref,
+                        );
+                    }
+                    continue;
+                }
+            }
+            if let Some(idx) = static_table::find_name(name) {
+                // Literal with Name Reference, static table (T=1).
+                self.encode_literal_with_static_name_ref(idx, value, &mut block);
+                continue;
+            }
+
+            // No name match anywhere: emit a literal name, and insert the
+            // entry so later sections can reference it (Section 4.4).
+            let size = DynamicTable::entry_size(name, value);
+            let safe = match min_rel_ref {
+                None => true,
+                Some(min) => {
+                    // An insert only evicts the oldest entries: the absolute
+                    // index of the first surviving entry is the insert count
+                    // minus the current length plus the number evicted. It
+                    // must stay above every referenced index.
+                    self.dynamic.inserted() - self.dynamic.len() as u64
+                        + self.dynamic.would_evict(size)
+                        <= min
+                }
+            };
+            if usable && size <= self.max_capacity && safe {
+                // Set Dynamic Table Capacity (4.3.1), emitted lazily right
+                // before the first insert of this section.
+                if self.dynamic.capacity() != self.max_capacity {
+                    integer::encode(&mut encoder_stream, self.max_capacity, 5, SET_CAPACITY);
+                    self.dynamic.set_capacity(self.max_capacity);
+                }
+                let abs = self.dynamic.next_absolute();
+                // Insert with Literal Name (4.3.3).
+                self.push_string(&mut encoder_stream, name, 5, INSERT_WITH_LITERAL_NAME);
+                self.push_string(&mut encoder_stream, value, 8, 0);
+                let _ = self.dynamic.insert(name.clone(), value.clone());
+                // The fresh entry is referenced with a post-Base index.
+                self.encode_indexed(abs, base, &mut block, &mut ric, &mut min_rel_ref);
+            } else {
+                self.encode_literal(name, value, false, &mut block);
+            }
+        }
+
+        // Encoded Field Section Prefix (RFC 9204 4.5.1).
+        let mut prefix = Vec::new();
+        self.encode_prefix(&mut prefix, ric, base);
+        prefix.extend_from_slice(&block);
+
+        EncodedSection {
+            block: Bytes::from(prefix),
+            encoder_stream: Bytes::from(encoder_stream),
+        }
+    }
+
+    /// Encodes the Required Insert Count and the Base (RFC 9204 4.5.1).
+    fn encode_prefix(&self, out: &mut Vec<u8>, ric: u64, base: u64) {
+        // Required Insert Count (4.5.1.1): 0 stays 0, otherwise it is wrapped
+        // modulo 2 * MaxEntries, where MaxEntries = floor(MaxCapacity / 32).
+        let max_entries = self.max_capacity / 32;
+        let enc_ric = if ric == 0 || max_entries == 0 {
+            0
+        } else {
+            (ric % (2 * max_entries)) + 1
+        };
+        integer::encode(out, enc_ric, 8, 0);
+        // Base (4.5.1.2): Sign=0 when Base >= Ric (Delta = Base - Ric);
+        // Sign=1 when Base < Ric (Delta = Ric - Base - 1).
+        if base >= ric {
+            integer::encode(out, base - ric, 7, 0);
+        } else {
+            integer::encode(out, ric - base - 1, 7, 0x80);
+        }
+    }
+
+    /// Encodes an indexed reference to a dynamic table entry.
+    fn encode_indexed(
+        &self,
+        abs: u64,
+        base: u64,
+        block: &mut Vec<u8>,
+        ric: &mut u64,
+        min_rel_ref: &mut Option<u64>,
+    ) {
+        *ric = (*ric).max(abs + 1);
+        if abs >= base {
+            // Post-Base index (4.5.3).
+            integer::encode(block, abs - base, 4, INDEXED_POST_BASE);
+        } else {
+            // Relative index (4.5.2): Base - Absolute - 1.
+            integer::encode(block, base - abs - 1, 6, INDEXED);
+        }
+        *min_rel_ref = Some(min_rel_ref.map_or(abs, |m| m.min(abs)));
+    }
+
+    /// Encodes a literal field line with a dynamic name reference (T=0).
+    fn encode_literal_with_name_ref(
+        &self,
+        abs: u64,
+        base: u64,
+        value: &[u8],
+        block: &mut Vec<u8>,
+        ric: &mut u64,
+        min_rel_ref: &mut Option<u64>,
+    ) {
+        *ric = (*ric).max(abs + 1);
+        let rel = base - abs - 1;
+        integer::encode(block, rel, 4, LITERAL_NAME_REF);
+        *min_rel_ref = Some(min_rel_ref.map_or(abs, |m| m.min(abs)));
+        self.push_string(block, value, 8, 0);
+    }
+
+    /// Encodes a literal field line with a post-Base name reference (4.5.5).
+    fn encode_literal_post_base_name_ref(
+        &self,
+        abs: u64,
+        base: u64,
+        value: &[u8],
+        block: &mut Vec<u8>,
+        ric: &mut u64,
+        min_rel_ref: &mut Option<u64>,
+    ) {
+        *ric = (*ric).max(abs + 1);
+        integer::encode(block, abs - base, 3, LITERAL_POST_BASE_NAME_REF);
+        *min_rel_ref = Some(min_rel_ref.map_or(abs, |m| m.min(abs)));
+        self.push_string(block, value, 8, 0);
+    }
+
+    /// Encodes a literal field line with a static name reference (T=1).
+    fn encode_literal_with_static_name_ref(&self, idx: usize, value: &[u8], block: &mut Vec<u8>) {
+        integer::encode(block, idx as u64, 4, LITERAL_NAME_REF | 0x10);
+        self.push_string(block, value, 8, 0);
+    }
+
+    /// Encodes a literal field line with a literal name (4.5.6), preferring a
+    /// static name reference when one exists.
+    fn encode_literal(&self, name: &[u8], value: &[u8], sensitive: bool, block: &mut Vec<u8>) {
+        if let Some(idx) = static_table::find_name(name) {
+            integer::encode(
+                block,
+                idx as u64,
+                4,
+                LITERAL_NAME_REF | 0x10 | (u8::from(sensitive) << 4),
+            );
+        } else {
+            // `001 N` + H + 3-bit name length.
+            self.push_string(
+                block,
+                name,
+                4,
+                LITERAL_LITERAL_NAME | (u8::from(sensitive) << 4),
+            );
+        }
+        self.push_string(block, value, 8, 0);
+    }
+
+    /// Encodes an N-bit prefix string literal (RFC 9204 Section 4.1.2):
+    /// `header` carries the bits preceding the string, the Huffman flag is
+    /// set when Huffman encoding is shorter, and the length is encoded with
+    /// an (N-1)-bit prefix.
+    fn push_string(&self, out: &mut Vec<u8>, value: &[u8], prefix: u8, header: u8) {
+        let huffman_bits = huffman::encoded_len(value);
+        let huffman = self.huffman && huffman_bits < value.len() * 8;
+        let len = if huffman {
+            huffman_bits.div_ceil(8) as u64
+        } else {
+            value.len() as u64
+        };
+        integer::encode(
+            out,
+            len,
+            prefix - 1,
+            header | (u8::from(huffman) << (prefix - 1)),
+        );
+        if huffman {
+            huffman::encode_with_len(value, out, len as usize);
+        } else {
+            out.extend_from_slice(value);
+        }
+    }
+
+    /// Inserts an entry with a literal name on the encoder stream (4.3.3)
+    /// and mirrors it in the local table. Returns the instruction, or `None`
+    /// when the entry does not fit in the dynamic table.
+    pub(crate) fn insert_literal(&mut self, name: &[u8], value: &[u8]) -> Option<Bytes> {
+        if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
+            return None;
+        }
+        let mut out = Vec::new();
+        self.push_string(&mut out, name, 5, INSERT_WITH_LITERAL_NAME);
+        self.push_string(&mut out, value, 8, 0);
+        let res = self
+            .dynamic
+            .insert(Bytes::copy_from_slice(name), Bytes::copy_from_slice(value));
+        debug_assert!(res.is_ok(), "insert_literal: entry passed the size check");
+        res.ok()?;
+        Some(Bytes::from(out))
+    }
+
+    /// Inserts an entry with a name reference on the encoder stream (4.3.2),
+    /// preferring the dynamic table (T=0) then the static table (T=1), and
+    /// mirrors it in the local table. Returns the instruction, or `None`
+    /// when the name is not indexed anywhere or the entry does not fit.
+    pub(crate) fn insert_with_name_ref(&mut self, name: &[u8], value: &[u8]) -> Option<Bytes> {
+        if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
+            return None;
+        }
+        let mut out = Vec::new();
+        let (name_idx, pattern) = self
+            .dynamic
+            .find_name(name)
+            .map(|abs| (abs, INSERT_WITH_NAME_REF))
+            .or_else(|| {
+                static_table::find_name(name).map(|idx| (idx as u64, INSERT_WITH_NAME_REF | 0x40))
+            })?;
+        if pattern == INSERT_WITH_NAME_REF {
+            integer::encode(&mut out, self.dynamic.inserted() - name_idx - 1, 6, pattern);
+        } else {
+            integer::encode(&mut out, name_idx, 6, pattern);
+        }
+        self.push_string(&mut out, value, 8, 0);
+        let res = self
+            .dynamic
+            .insert(Bytes::copy_from_slice(name), Bytes::copy_from_slice(value));
+        debug_assert!(
+            res.is_ok(),
+            "insert_with_name_ref: entry passed the size check"
+        );
+        res.ok()?;
+        Some(Bytes::from(out))
+    }
+
+    /// Duplicates the entry at the given relative index (4.3.4) and mirrors
+    /// it in the local table. Returns the instruction, or `None` when the
+    /// index is out of range or the copy does not fit.
+    pub(crate) fn duplicate(&mut self, relative: u64) -> Option<Bytes> {
+        if relative >= self.dynamic.len() as u64 {
+            return None;
+        }
+        // The relative index is the deque position: 0 is the most recently
+        // inserted entry.
+        let (name, value) = self.dynamic.entry_at(relative)?;
+        if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
+            return None;
+        }
+        let mut out = Vec::new();
+        integer::encode(&mut out, relative, 5, DUPLICATE);
+        let res = self
+            .dynamic
+            .insert(Bytes::copy_from_slice(name), Bytes::copy_from_slice(value));
+        debug_assert!(res.is_ok(), "duplicate: entry passed the size check");
+        res.ok()?;
+        Some(Bytes::from(out))
+    }
+
+    /// Sets the dynamic table capacity (4.3.1), evicting as needed. Returns
+    /// the instruction, or `None` when the capacity is unchanged or exceeds
+    /// the decoder's maximum.
+    pub(crate) fn set_capacity(&mut self, capacity: u64) -> Option<Bytes> {
+        if capacity > self.max_capacity || capacity == self.dynamic.capacity() {
+            return None;
+        }
+        let mut out = Vec::new();
+        integer::encode(&mut out, capacity, 5, SET_CAPACITY);
+        self.dynamic.set_capacity(capacity);
+        Some(Bytes::from(out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hdr(name: &str, value: &str) -> (Bytes, Bytes) {
+        (
+            Bytes::copy_from_slice(name.as_bytes()),
+            Bytes::copy_from_slice(value.as_bytes()),
+        )
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn vector_b1_static_name_ref() {
+        // RFC 9204 B.1: literal field line with a static name reference. The
+        // decoder advertises capacity 0, so the dynamic table is unused.
+        let mut enc = Encoder::new(0, false);
+        let out = enc.encode_section(&[hdr(":path", "/index.html")]);
+        assert_eq!(hex(&out.block), "0000510b2f696e6465782e68746d6c");
+        assert!(out.encoder_stream.is_empty());
+    }
+
+    #[test]
+    fn vector_b2_dynamic_post_base() {
+        // RFC 9204 B.2: Set Capacity 220, two inserts with static name
+        // references, then a field section referencing them post-Base
+        // (Required Insert Count = 2, Sign = 1, Delta Base = 1).
+        let mut enc = Encoder::new(220, false);
+        assert_eq!(hex(&enc.set_capacity(220).unwrap()), "3fbd01");
+        let authority = enc
+            .insert_with_name_ref(b":authority", b"www.example.com")
+            .unwrap();
+        assert_eq!(hex(&authority), "c00f7777772e6578616d706c652e636f6d");
+        let path = enc.insert_with_name_ref(b":path", b"/sample/path").unwrap();
+        assert_eq!(hex(&path), "c10c2f73616d706c652f70617468");
+
+        // Vector path: Base fixed at 0 (the acknowledged count), so the two
+        // entries are referenced post-Base.
+        let block = enc.encode_section_with_base(
+            &[
+                hdr(":authority", "www.example.com"),
+                hdr(":path", "/sample/path"),
+            ],
+            0,
+        );
+        assert_eq!(hex(&block.block), "03811011");
+    }
+
+    #[test]
+    fn vector_b3_insert_literal_name() {
+        // RFC 9204 B.3: Insert with Literal Name (custom-key/custom-value).
+        let mut enc = Encoder::new(220, false);
+        enc.set_capacity(220);
+        let ins = enc.insert_literal(b"custom-key", b"custom-value").unwrap();
+        assert_eq!(
+            hex(&ins),
+            "4a637573746f6d2d6b65790c637573746f6d2d76616c7565"
+        );
+        assert_eq!(enc.dynamic.len(), 1);
+        assert_eq!(
+            enc.dynamic.get_absolute(0),
+            Some((b"custom-key".as_slice(), b"custom-value".as_slice()))
+        );
+    }
+
+    #[test]
+    fn vector_b4_duplicate_and_relative() {
+        // RFC 9204 B.4: duplicate entry 2, then an indexed field line
+        // relative to Base 4 (Required Insert Count = 4, Sign = 0, Delta
+        // Base = 0).
+        let mut enc = Encoder::new(220, false);
+        enc.set_capacity(220);
+        enc.insert_with_name_ref(b":authority", b"www.example.com");
+        enc.insert_with_name_ref(b":path", b"/sample/path");
+        enc.insert_literal(b"custom-key", b"custom-value");
+        assert_eq!(hex(&enc.duplicate(2).unwrap()), "02");
+        assert_eq!(enc.dynamic.len(), 4);
+
+        let block = enc.encode_section_with_base(&[hdr(":authority", "www.example.com")], 4);
+        assert_eq!(hex(&block.block), "050080");
+    }
+
+    #[test]
+    fn fresh_name_inserted_then_referenced() {
+        // A name that matches nothing is inserted with a literal name
+        // instruction, then the section references it post-Base.
+        let mut enc = Encoder::new(220, false);
+        let out = enc.encode_section(&[hdr("custom-key", "custom-value")]);
+        assert_eq!(
+            hex(&out.encoder_stream),
+            "3fbd014a637573746f6d2d6b65790c637573746f6d2d76616c7565"
+        );
+        // Required Insert Count = 1 -> (1 mod 12) + 1 = 2; Base = 0 < Ric ->
+        // Sign = 1, Delta = Ric - Base - 1 = 0; post-Base index 0.
+        assert_eq!(hex(&out.block), "028010");
+        assert_eq!(enc.dynamic.len(), 1);
+    }
+
+    #[test]
+    fn indexed_static_full_match() {
+        let mut enc = Encoder::new(0, false);
+        let out = enc.encode_section(&[hdr(":method", "GET")]);
+        let idx = static_table::find(b":method", b"GET").unwrap() as u8;
+        assert_eq!(hex(&out.block), format!("0000{:02x}", 0xc0 | idx));
+    }
+
+    #[test]
+    fn relative_ref_from_fixed_base() {
+        // Entries inserted beforehand are referenced relative to Base = the
+        // insert count; nothing new is inserted, so Sign = 0, Delta = 0.
+        let mut enc = Encoder::new(220, false);
+        enc.set_capacity(220);
+        enc.insert_with_name_ref(b":authority", b"www.example.com");
+        enc.insert_with_name_ref(b":path", b"/sample/path");
+        let out = enc.encode_section(&[hdr(":path", "/sample/path")]);
+        // Required Insert Count = 2 -> (2 mod 12) + 1 = 3; relative index of
+        // absolute 1 from Base 2 is 0.
+        assert_eq!(hex(&out.block), "030080");
+        assert!(out.encoder_stream.is_empty());
+    }
+
+    #[test]
+    fn huffman_used_when_shorter() {
+        let mut enc = Encoder::new(0, true);
+        let out = enc.encode_section(&[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")]);
+        let block = out.block.as_ref();
+        assert_eq!(&block[..2], &[0x00, 0x00]);
+        // Literal with Name Reference, static :path (0x51).
+        assert_eq!(block[2], 0x51);
+        // The value length octet has the H bit set and encodes fewer bytes.
+        assert_ne!(block[3] & 0x80, 0);
+        assert!(block[3] & 0x7f < 42);
+        // The block must decode back to the original value.
+        let mut dec = Vec::new();
+        huffman::decode(&block[4..], &mut dec).unwrap();
+        assert_eq!(dec, b"www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn sensitive_never_indexed() {
+        let mut enc = Encoder::new(220, false);
+        let out = enc.encode_section(&[hdr("authorization", "Bearer xyz")]);
+        // No encoder stream instruction: the field is never stored.
+        assert!(out.encoder_stream.is_empty());
+        // Literal with Literal Name, N=1: the N bit (0x10) is set.
+        assert_ne!(out.block.as_ref()[2] & 0x10, 0);
+        assert!(enc.dynamic.is_empty());
+    }
+
+    #[test]
+    fn insert_skipped_when_it_would_evict_referenced_entry() {
+        // A 100-byte table holds exactly one 43-byte entry. The section
+        // references it, and the second field (71 bytes) does not fit
+        // without evicting it, so the insert is skipped and the field is
+        // sent as a literal name.
+        let mut enc = Encoder::new(100, false);
+        enc.set_capacity(100);
+        enc.insert_with_name_ref(b":authority", b"www.example.com");
+        let out = enc.encode_section(&[
+            hdr(":authority", "www.example.com"),
+            hdr("x-custom", "0123456789012345678901234567890123456789"),
+        ]);
+        let block = out.block.as_ref();
+        // First field line: Indexed, dynamic, relative index 0 (0x80).
+        assert_eq!(block[2], 0x80);
+        // Second field line: literal with literal name (starts `001`).
+        assert_eq!(block[3] & 0xe0, 0x20);
+        // No Insert with Literal Name instruction was queued.
+        assert!(out.encoder_stream.is_empty());
+        assert_eq!(enc.dynamic.len(), 1);
+    }
+
+    #[test]
+    fn no_duplicate_set_capacity_instruction() {
+        let mut enc = Encoder::new(220, false);
+        enc.set_capacity(220);
+        let out = enc.encode_section(&[hdr(":path", "/sample/path")]);
+        assert!(out.encoder_stream.is_empty());
+    }
+
+    #[test]
+    fn empty_section() {
+        let mut enc = Encoder::new(220, false);
+        let out = enc.encode_section(&[]);
+        // Prefix only: Required Insert Count 0, Sign 0, Delta Base 0.
+        assert_eq!(hex(&out.block), "0000");
+        assert!(out.encoder_stream.is_empty());
+    }
+}
