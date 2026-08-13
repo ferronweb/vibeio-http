@@ -162,7 +162,7 @@ fn corpus_decodes() {
             if let Some(size) = case.header_table_size {
                 decoder.queue_size_update(size as usize);
             }
-            let got = decoder.decode(&case.wire);
+            let got = decoder.decode(&case.wire, &mut 0);
             let expected: Vec<(String, String)> = case.headers.clone();
             total += 1;
             match got {
@@ -232,7 +232,7 @@ fn corpus_encode_round_trips() {
             encoder.encode(&headers, &mut wire);
 
             let expected: Vec<(String, String)> = case.headers.clone();
-            let got = decoder.decode(&wire);
+            let got = decoder.decode(&wire, &mut 0);
             total += 1;
             match got {
                 Ok(headers) => {

@@ -619,7 +619,10 @@ where
         };
         let block = entry.take_block();
         let end_stream = entry.pending_end_stream;
-        let decoded = match self.request_decoder.decode(&block) {
+        let decoded = match self
+            .request_decoder
+            .decode(&block, &mut entry.header_list_size)
+        {
             Ok(headers) => headers,
             Err(e) => {
                 if matches!(e, HpackError::HeaderListTooLarge) {

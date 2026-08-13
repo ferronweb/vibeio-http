@@ -160,7 +160,7 @@ mod tests {
     fn decode(encoder: &Encoder, wire: &[u8]) -> Vec<(String, String)> {
         let mut decoder = Decoder::new(encoder.table().max_size());
         decoder
-            .decode(wire)
+            .decode(wire, &mut 0)
             .unwrap()
             .into_iter()
             .map(|h| {

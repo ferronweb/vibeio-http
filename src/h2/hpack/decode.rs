@@ -75,7 +75,7 @@ impl Decoder {
     /// Decodes a complete header block. The dynamic table is updated
     /// across calls.
     #[inline]
-    pub fn decode(&mut self, buf: &[u8]) -> Result<Vec<Header>, HpackError> {
+    pub fn decode(&mut self, buf: &[u8], list_size: &mut usize) -> Result<Vec<Header>, HpackError> {
         if let Some(size) = self.queued_size_update.take() {
             self.max_table_size = size;
             // The table capacity itself is driven by size-update
@@ -85,10 +85,6 @@ impl Decoder {
 
         let mut off = 0usize;
         let mut headers = Vec::new();
-        // A header-list limit applies to one header block, not to the whole
-        // connection. Keeping this local also avoids carrying mutable state
-        // between independent decodes.
-        let mut list_size = 0usize;
         // Size updates must precede any header field representation
         // (RFC 7541 Section 6.3).
         let mut can_resize = true;
@@ -104,8 +100,8 @@ impl Decoder {
                     can_resize = false;
                     let index = integer::decode(buf, &mut off, 7, byte)? as usize;
                     let entry = self.table.get(index).ok_or(HpackError::InvalidIndex)?;
-                    list_size += entry.name().len() + entry.value().len();
-                    if list_size > self.max_header_list_size {
+                    *list_size += entry.name().len() + entry.value().len();
+                    if *list_size > self.max_header_list_size {
                         return Err(HpackError::HeaderListTooLarge);
                     }
                     headers.push(entry);
@@ -136,8 +132,8 @@ impl Decoder {
 
                     let (_, value) = string::decode(buf, &mut off, self.max_header_list_size)?;
 
-                    list_size += name.len() + value.len();
-                    if list_size > self.max_header_list_size {
+                    *list_size += name.len() + value.len();
+                    if *list_size > self.max_header_list_size {
                         return Err(HpackError::HeaderListTooLarge);
                     }
 
@@ -207,7 +203,7 @@ mod tests {
     fn decode_one(wire: &[u8]) -> Vec<(String, String)> {
         let mut decoder = Decoder::new(4096);
         decoder
-            .decode(wire)
+            .decode(wire, &mut 0)
             .unwrap()
             .into_iter()
             .map(|h| {
@@ -267,14 +263,14 @@ mod tests {
     #[test]
     fn table_state_after_representations() {
         let mut decoder = Decoder::new(4096);
-        let _ = decoder.decode(&[0x82]).unwrap();
+        let _ = decoder.decode(&[0x82], &mut 0).unwrap();
         assert_eq!(decoder.table().dynamic_len(), 0);
         // 0x40 + custom-key + custom-header adds an entry.
         let wire = [
             0x40, 0x0a, b'c', b'u', b's', b't', b'o', b'm', b'-', b'k', b'e', b'y', 0x0d, b'c',
             b'u', b's', b't', b'o', b'm', b'-', b'h', b'e', b'a', b'd', b'e', b'r',
         ];
-        let _ = decoder.decode(&wire).unwrap();
+        let _ = decoder.decode(&wire, &mut 0).unwrap();
         assert_eq!(decoder.table().dynamic_len(), 1);
         assert_eq!(decoder.table().get(62).unwrap().name(), b"custom-key");
     }
@@ -316,7 +312,7 @@ mod tests {
     #[test]
     fn c3_c4_sequential_requests() {
         let block = |d: &mut Decoder, wire: &str| {
-            d.decode(&hex_to_bytes(wire))
+            d.decode(&hex_to_bytes(wire), &mut 0)
                 .unwrap()
                 .into_iter()
                 .map(|h| {
@@ -396,7 +392,7 @@ mod tests {
     fn c5_response_walkthrough() {
         let mut decoder = Decoder::new(256);
         let block = |d: &mut Decoder, wire: &str| {
-            d.decode(&hex_to_bytes(wire))
+            d.decode(&hex_to_bytes(wire), &mut 0)
                 .unwrap()
                 .into_iter()
                 .map(|h| {
@@ -459,7 +455,7 @@ mod tests {
     fn c6_response_walkthrough() {
         let mut decoder = Decoder::new(256);
         let block = |d: &mut Decoder, wire: &str| {
-            d.decode(&hex_to_bytes(wire))
+            d.decode(&hex_to_bytes(wire), &mut 0)
                 .unwrap()
                 .into_iter()
                 .map(|h| {
@@ -518,7 +514,7 @@ mod tests {
         let mut decoder = Decoder::new(4096);
         // 0x3f + continuation: size update to 4096.
         let wire = [0x3f, 0xe1, 0x1f, 0x82];
-        let out = decoder.decode(&wire).unwrap();
+        let out = decoder.decode(&wire, &mut 0).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(decoder.table().max_size(), 4096);
     }
@@ -528,7 +524,7 @@ mod tests {
         let mut decoder = Decoder::new(4096);
         // Indexed (0x82) then size update (0x20).
         assert!(matches!(
-            decoder.decode(&[0x82, 0x20]),
+            decoder.decode(&[0x82, 0x20], &mut 0),
             Err(HpackError::InvalidMaxSize)
         ));
     }
@@ -538,7 +534,7 @@ mod tests {
         let mut decoder = Decoder::new(128);
         // Size update to 4096 while the protocol allows only 128.
         assert!(matches!(
-            decoder.decode(&[0x3f, 0xe1, 0x1f]),
+            decoder.decode(&[0x3f, 0xe1, 0x1f], &mut 0),
             Err(HpackError::InvalidMaxSize)
         ));
     }
@@ -554,7 +550,7 @@ mod tests {
         let mut decoder = Decoder::new(4096);
         // Index 200 (0x7f is only 127; use 0xc8 + continuation for 200).
         assert!(matches!(
-            decoder.decode(&[0x7f, 0x49]),
+            decoder.decode(&[0x7f, 0x49], &mut 0),
             Err(HpackError::InvalidIndex)
         ));
     }
@@ -569,7 +565,7 @@ mod tests {
             0x40, 0x01, b'x', 0x0a, b'y', b'y', b'y', b'y', b'y', b'y', b'y', b'y', b'y', b'y',
         ];
         assert!(matches!(
-            decoder.decode(&wire),
+            decoder.decode(&wire, &mut 0),
             Err(HpackError::HeaderListTooLarge)
         ));
     }
@@ -580,13 +576,13 @@ mod tests {
         // maps to exactly one representation, so there is no invalid
         // byte to test against.
         let mut decoder = Decoder::new(4096);
-        decoder.decode(&[0x30]).unwrap();
+        decoder.decode(&[0x30], &mut 0).unwrap();
         assert_eq!(decoder.table().max_size(), 16);
     }
 
     fn decode(wire: &[u8]) -> Result<Vec<Header>, HpackError> {
         let mut decoder = Decoder::new(4096);
-        decoder.decode(wire)
+        decoder.decode(wire, &mut 0)
     }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {

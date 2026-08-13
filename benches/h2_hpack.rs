@@ -44,7 +44,7 @@ fn bench_decode(c: &mut Criterion) {
     c.bench_function("hpack_decode", |b| {
         b.iter(|| {
             let mut decoder = Decoder::new(4096);
-            decoder.decode(&block).expect("decode")
+            decoder.decode(&block, &mut 0).expect("decode")
         });
     });
 }
