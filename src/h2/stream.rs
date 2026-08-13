@@ -350,7 +350,6 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
         } else {
             pseudo_phase = false;
             if is_connection_specific(name) {
-                // Section 8.1.2.2.
                 return Err(MalformedRequest);
             }
             if name == b"te" && !te_is_trailers(value) {
@@ -415,8 +414,6 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
         return Err(MalformedRequest);
     };
     if path.is_empty() {
-        // Section 8.1.2.3: must not be empty for http/https URIs ('*'
-        // is the asterisk form).
         return Err(MalformedRequest);
     }
 

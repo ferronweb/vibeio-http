@@ -479,8 +479,6 @@ where
                     increment,
                 } => self.handle_window_update(stream_id, increment),
                 Frame::PushPromise { .. } => {
-                    // A server must not receive PUSH_PROMISE (RFC 9113
-                    // Section 8.2.1): connection error PROTOCOL_ERROR.
                     self.goaway(Reason::ProtocolError, b"push promise to server");
                 }
                 Frame::Unknown { .. } => {}
@@ -529,8 +527,6 @@ where
             }
         };
         if remote_ended {
-            // Trailing frames after the request ended (RFC 9113
-            // Section 6.2): stream error STREAM_CLOSED.
             self.stream_error(stream_id, Reason::StreamClosed);
         } else if start_new {
             self.open_request_stream(stream_id, end_stream, end_headers, block);
@@ -563,8 +559,6 @@ where
         block: &[u8],
     ) {
         if stream_id == 0 || stream_id.is_multiple_of(2) {
-            // The server initiates odd streams only (RFC 9113
-            // Section 5.1.1): connection error PROTOCOL_ERROR.
             self.goaway(Reason::ProtocolError, b"headers on invalid stream");
             return;
         }
@@ -576,9 +570,6 @@ where
         }
         self.highest_stream_id = stream_id;
         if self.streams.len() as u32 >= self.opts.max_concurrent_streams {
-            // Advertising is a limit the peer must respect; refuse
-            // politely instead of opening the stream (RFC 9113
-            // Section 5.1.2).
             self.writer
                 .write_reset(&mut self.out, stream_id, Reason::RefusedStream.code());
             return;
@@ -683,8 +674,6 @@ where
         let parsed = match super::stream::parse_request(&decoded) {
             Ok(parsed) => parsed,
             Err(MalformedRequest) => {
-                // Malformed requests are stream errors (RFC 9113
-                // Section 8.1.2.6).
                 self.stream_error(stream_id, Reason::ProtocolError);
                 return;
             }
@@ -890,9 +879,6 @@ where
         for setting in settings {
             match setting.id {
                 0x01 => {
-                    // SETTINGS_HEADER_TABLE_SIZE: the peer's decode
-                    // table, i.e. our encode table (RFC 9113
-                    // Section 6.5.2, RFC 7541 Section 4.2).
                     self.peer.header_table_size = setting.value;
                     self.encoder.queue_size_update(setting.value as usize);
                 }
