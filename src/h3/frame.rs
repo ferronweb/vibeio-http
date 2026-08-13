@@ -375,7 +375,10 @@ fn take_varint(buf: &mut BytesMut) -> Result<u64, FrameError> {
 /// Returns `Ok(None)` when `buf` is shorter than the encoding; `Err` when
 /// the encoding is non-minimal (a protocol violation, per RFC 9000 Section
 /// 16, surfaced as `H3_FRAME_ERROR`).
-fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameError> {
+///
+/// The control plane uses this to read uni stream type varints before a
+/// stream is assigned its role.
+pub(crate) fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameError> {
     let Some(&first) = buf.first() else {
         return Ok(None);
     };
