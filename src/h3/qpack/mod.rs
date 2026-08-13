@@ -6,6 +6,8 @@
 //!
 //! Populated in the QPACK steps; see `CUSTOM_HTTP3_IMPL.md`.
 
+pub(crate) mod decoder;
 pub(crate) mod encoder;
+pub(crate) mod error;
 pub(crate) mod static_table;
 pub(crate) mod table;

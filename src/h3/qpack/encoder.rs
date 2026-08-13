@@ -129,9 +129,12 @@ impl Encoder {
         // Smallest absolute index referenced by the section so far; an insert
         // is skipped when its eviction would reach it.
         let mut min_rel_ref: Option<u64> = None;
-        // Required Insert Count: total inserts the decoder must have
-        // processed to decode this section (RFC 9204 Section 4.5.1.1).
-        let mut ric = base;
+        // Required Insert Count: one larger than the largest absolute index
+        // of all dynamic table entries referenced by the section, and 0 when
+        // none are referenced (RFC 9204 Section 2.1.2). It only grows with
+        // dynamic references, so a section that happens to reference only
+        // static entries does not inflate it.
+        let mut ric = 0u64;
 
         for (name, value) in headers {
             let sensitive = NEVER_INDEXED.contains(&name.as_ref());
@@ -598,7 +601,7 @@ mod tests {
         assert!(out.encoder_stream.is_empty());
         // Literal with Literal Name, N=1: the N bit (0x10) is set.
         assert_ne!(out.block.as_ref()[2] & 0x10, 0);
-        assert!(enc.dynamic.is_empty());
+        assert_eq!(enc.dynamic.len(), 0);
     }
 
     #[test]
@@ -638,6 +641,22 @@ mod tests {
         let out = enc.encode_section(&[]);
         // Prefix only: Required Insert Count 0, Sign 0, Delta Base 0.
         assert_eq!(hex(&out.block), "0000");
+        assert!(out.encoder_stream.is_empty());
+    }
+
+    #[test]
+    fn static_only_section_announces_zero_ric() {
+        // A section that references only static entries must announce a
+        // Required Insert Count of 0 even when the dynamic table is
+        // non-empty (RFC 9204 Section 2.1.2: it is one larger than the
+        // largest referenced absolute index, so 0 when none are referenced).
+        let mut enc = Encoder::new(220, false);
+        enc.set_capacity(220);
+        enc.insert_with_name_ref(b":authority", b"www.example.com");
+        let out = enc.encode_section(&[hdr(":method", "GET")]);
+        // Prefix: RIC 0, Base = insert count 1 (Sign 0, Delta 1); then the
+        // static index of ":method GET" (17) as an Indexed Field Line.
+        assert_eq!(hex(&out.block), "0001d1");
         assert!(out.encoder_stream.is_empty());
     }
 }

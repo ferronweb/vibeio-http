@@ -17,10 +17,7 @@
 //!
 //! Consumption: the encoder adds entries (Section 4.3) and the decoder
 //! materializes them from encoder-stream instructions; both use the same
-//! structure. The lookup helpers are first used by the encoder, which is
-//! why `dead_code` fires until then; it errors again once they are used,
-//! reminding us to remove the expectation.
-#![expect(dead_code)]
+//! structure.
 
 use std::collections::VecDeque;
 
@@ -82,6 +79,7 @@ impl DynamicTable {
 
     /// The current sum of entry sizes.
     #[inline]
+    #[cfg(test)]
     pub(crate) fn size(&self) -> u64 {
         self.size
     }
@@ -90,12 +88,6 @@ impl DynamicTable {
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    /// Whether the table is empty.
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// Absolute index of the most recently inserted entry, or `0` when the
@@ -158,6 +150,28 @@ impl DynamicTable {
             }
         }
         evicted
+    }
+
+    /// Number of entries that would be evicted from the dropping point if
+    /// the capacity were reduced to `target` (0 when nothing would be
+    /// evicted).
+    ///
+    /// The decoder uses this to reject a capacity reduction that would
+    /// evict entries with an absolute index at or above its Known Received
+    /// Count (RFC 9204 Section 2.1.1).
+    #[inline]
+    pub(crate) fn evict_for_capacity(&self, target: u64) -> u64 {
+        let mut size = 0u64;
+        let mut survivors = 0u64;
+        for (name, value) in self.entries.iter() {
+            let entry_size = Self::entry_size(name, value);
+            if size + entry_size > target {
+                break;
+            }
+            size += entry_size;
+            survivors += 1;
+        }
+        self.len() as u64 - survivors
     }
 
     /// Finds the most recently inserted entry matching `name` and `value`.
@@ -276,7 +290,7 @@ mod tests {
     #[test]
     fn insert_assigns_increasing_absolute_indices() {
         let mut table = DynamicTable::new(1000);
-        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
         assert_eq!(table.inserted(), 0);
         assert_eq!(table.next_absolute(), 0);
 
@@ -332,7 +346,7 @@ mod tests {
             insert(&mut table, "a", "a"),
             Err(InsertError::EntryTooLarge)
         );
-        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
         assert_eq!(table.inserted(), 0);
     }
 
@@ -352,7 +366,7 @@ mod tests {
         // Setting 0 clears the table; a later increase works with an empty
         // table.
         table.set_capacity(0);
-        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
         assert_eq!(table.size(), 0);
         table.set_capacity(1000);
         insert(&mut table, "fresh", "entry").unwrap();

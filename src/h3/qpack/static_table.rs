@@ -10,10 +10,8 @@
 //! value match exactly), and values preserve their exact byte case
 //! (e.g. `:method` values are uppercase).
 //!
-//! The lookup functions are consumed by the QPACK encoder and decoder, which
-//! land in later steps; `dead_code` fires in the meantime (and after the
-//! encoder lands) as a reminder to remove this expectation.
-#![expect(dead_code)]
+//! The lookup functions are consumed by the QPACK encoder (`find`,
+//! `find_name`) and decoder (`get`).
 
 /// Number of entries in the static table (indices `0..99`).
 pub(crate) const STATIC_TABLE_SIZE: usize = 99;
