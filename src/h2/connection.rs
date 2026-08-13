@@ -1026,9 +1026,10 @@ where
                         let end = *end_stream;
                         self.writer.write_data(&mut self.out, stream_id, end, data);
                         let retire = {
-                            let entry = self.streams.get_mut(&stream_id).expect(
-                                "stream entry exists: lookup succeeded before pump",
-                            );
+                            let entry = self
+                                .streams
+                                .get_mut(&stream_id)
+                                .expect("stream entry exists: lookup succeeded before pump");
                             entry.pending_data.pop_front();
                             if end {
                                 entry.local_ended = true;
@@ -1056,12 +1057,14 @@ where
             // Send `amount` bytes from the front chunk; the entry borrow
             // ends before we may remove the stream below.
             let (frame_end, all, chunk) = {
-                let entry = self.streams.get_mut(&stream_id).expect(
-                    "stream entry exists: lookup succeeded before pump",
-                );
-                let (data, end_stream) = entry.pending_data.front_mut().expect(
-                    "pending chunk exists: front checked before pump",
-                );
+                let entry = self
+                    .streams
+                    .get_mut(&stream_id)
+                    .expect("stream entry exists: lookup succeeded before pump");
+                let (data, end_stream) = entry
+                    .pending_data
+                    .front_mut()
+                    .expect("pending chunk exists: front checked before pump");
                 let all = amount == data.len();
                 let frame_end = *end_stream && all;
                 let chunk = data.split_to(amount);
@@ -1131,12 +1134,13 @@ where
             let mut msgs_iter = msgs.into_iter().peekable();
             while let Some(mut msg) = msgs_iter.next() {
                 if let (
-                        StreamMsg::Data { end_stream, .. },
-                        Some(StreamMsg::Data {
-                            data,
-                            end_stream: true,
-                        }),
-                    ) = (&mut msg, msgs_iter.peek()) {
+                    StreamMsg::Data { end_stream, .. },
+                    Some(StreamMsg::Data {
+                        data,
+                        end_stream: true,
+                    }),
+                ) = (&mut msg, msgs_iter.peek())
+                {
                     if data.is_empty() {
                         *end_stream = true;
                         msgs_iter.next(); // Discard the blank end_stream message
