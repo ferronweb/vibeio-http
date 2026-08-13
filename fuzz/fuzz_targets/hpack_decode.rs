@@ -13,7 +13,7 @@ use vibeio_http::hpack::Decoder;
 
 fuzz_target!(|data: &[u8]| {
     let mut decoder = Decoder::new(4096);
-    match decoder.decode(data) {
+    match decoder.decode(data, &mut 0) {
         Ok(headers) => {
             // The dynamic table must stay internally consistent after a
             // successful decode: every referenced entry resolves.
