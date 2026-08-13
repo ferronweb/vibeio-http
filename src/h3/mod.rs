@@ -1,5 +1,7 @@
 mod date;
 mod options;
+mod qpack;
+mod transport;
 mod upgrade;
 
 use futures_util::FutureExt;
