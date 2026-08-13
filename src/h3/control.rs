@@ -601,8 +601,6 @@ mod tests {
     use crate::h3::frame::{Settings as FrameSettings, SETTINGS_QPACK_MAX_TABLE_CAPACITY};
     use crate::h3::transport::{Accept, Connection, OpenStreams, RecvStream, SendStream};
     use futures_util::task::noop_waker_ref;
-    use std::cell::RefCell;
-    use std::rc::Rc;
 
     fn cx() -> Context<'static> {
         Context::from_waker(noop_waker_ref())
@@ -610,7 +608,7 @@ mod tests {
 
     /// Shared send log: every stream this endpoint opens records the bytes
     /// written to it, in order.
-    type SendLog = Rc<RefCell<Vec<Bytes>>>;
+    type SendLog = std::sync::Arc<std::sync::Mutex<Vec<Bytes>>>;
 
     /// In-memory uni stream: the test feeds peer data into `inbound`; bytes
     /// this endpoint sends land in the shared log and per-stream
@@ -618,7 +616,7 @@ mod tests {
     /// marker means the peer finished the stream. `inbound` is shared so a
     /// stream can be fed even after it was moved into the plane.
     struct MockStream {
-        inbound: Rc<RefCell<VecDeque<Option<Bytes>>>>,
+        inbound: std::sync::Arc<std::sync::Mutex<VecDeque<Option<Bytes>>>>,
         outbound: VecDeque<Bytes>,
         log: SendLog,
     }
@@ -626,7 +624,7 @@ mod tests {
     impl MockStream {
         fn new(log: SendLog) -> Self {
             Self {
-                inbound: Rc::new(RefCell::new(VecDeque::new())),
+                inbound: std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
                 outbound: VecDeque::new(),
                 log,
             }
@@ -634,17 +632,18 @@ mod tests {
 
         fn feed(&mut self, bytes: &[u8]) {
             self.inbound
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push_back(Some(Bytes::copy_from_slice(bytes)));
         }
 
         fn finish(&mut self) {
-            self.inbound.borrow_mut().push_back(None);
+            self.inbound.lock().unwrap().push_back(None);
         }
 
         /// A handle to the inbound queue, to feed the stream after it has
         /// been moved into the plane.
-        fn sink(&self) -> Rc<RefCell<VecDeque<Option<Bytes>>>> {
+        fn sink(&self) -> std::sync::Arc<std::sync::Mutex<VecDeque<Option<Bytes>>>> {
             self.inbound.clone()
         }
 
@@ -662,7 +661,7 @@ mod tests {
             &mut self,
             _cx: &mut Context<'_>,
         ) -> Poll<Result<Option<Bytes>, TransportError>> {
-            match self.inbound.borrow_mut().pop_front() {
+            match self.inbound.lock().unwrap().pop_front() {
                 Some(chunk) => Poll::Ready(Ok(chunk)),
                 None => Poll::Pending,
             }
@@ -680,7 +679,7 @@ mod tests {
             data: &[u8],
         ) -> Poll<Result<(), TransportError>> {
             let bytes = Bytes::copy_from_slice(data);
-            self.log.borrow_mut().push(bytes.clone());
+            self.log.lock().unwrap().push(bytes.clone());
             self.outbound.push_back(bytes);
             Poll::Ready(Ok(()))
         }
@@ -722,7 +721,7 @@ mod tests {
             Self {
                 peer_unis: VecDeque::new(),
                 opened: 0,
-                log: Rc::new(RefCell::new(Vec::new())),
+                log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 shutdown_code: None,
             }
         }
@@ -833,7 +832,7 @@ mod tests {
         init_with(&mut plane, &mut conn);
 
         assert_eq!(conn.opened, 3);
-        let log = conn.log.borrow();
+        let log = conn.log.lock().unwrap();
         assert_eq!(log.len(), 1, "only SETTINGS is written at init");
         assert_eq!(
             log[0],
@@ -1087,7 +1086,8 @@ mod tests {
         assert!(plane.pending_uni.is_some());
 
         // The second byte completes type 16128, which is unknown.
-        sink.borrow_mut()
+        sink.lock()
+            .unwrap()
             .push_back(Some(Bytes::from_static(&[0x00])));
         let err = drain_events(&mut plane, &mut conn).unwrap_err();
         assert!(matches!(err, ControlError::StreamCreation));
@@ -1209,7 +1209,7 @@ mod tests {
         assert!(plane.poll_flush(&mut cx).is_ready());
 
         {
-            let log = conn.log.borrow();
+            let log = conn.log.lock().unwrap();
             assert_eq!(log.len(), 2);
             assert_eq!(log[1], encode_frames(&[Frame::Goaway(7)]));
         }
@@ -1225,7 +1225,7 @@ mod tests {
         plane.send_cancel_push(1);
         assert!(plane.poll_flush(&mut cx).is_ready());
         {
-            let log = conn.log.borrow();
+            let log = conn.log.lock().unwrap();
             assert_eq!(log.len(), 3);
             assert_eq!(
                 log[2],

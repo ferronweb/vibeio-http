@@ -34,7 +34,7 @@ use crate::h3::error::TransportError;
 /// `Ok(None)` is returned (the peer closed its sending side with `FIN`).
 /// A `TransportError::Reset` is returned when the peer resets the stream
 /// instead.
-pub trait RecvStream: Unpin {
+pub trait RecvStream: Unpin + Send {
     /// Polls for the next chunk of data on the stream.
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, TransportError>>;
 
@@ -47,7 +47,7 @@ pub trait RecvStream: Unpin {
 }
 
 /// The send half of a QUIC stream.
-pub trait SendStream: Unpin {
+pub trait SendStream: Unpin + Send {
     /// Polls to send `data` on the stream, consuming it entirely.
     ///
     /// `Poll::Pending` means the stream's flow-control window is exhausted;

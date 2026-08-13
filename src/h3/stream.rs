@@ -771,7 +771,7 @@ mod tests {
     /// moving the stream into a `Box<dyn BidiStream>`.
     struct MockBidi {
         inbound: VecDeque<Option<Bytes>>,
-        outbound: Rc<RefCell<VecDeque<Bytes>>>,
+        outbound: std::sync::Arc<std::sync::Mutex<VecDeque<Bytes>>>,
         id: u64,
         reset_code: Option<u64>,
         stop_code: Option<u64>,
@@ -780,10 +780,13 @@ mod tests {
 
     impl MockBidi {
         fn new(id: u64) -> Self {
-            Self::with_sink(id, Rc::new(RefCell::new(VecDeque::new())))
+            Self::with_sink(
+                id,
+                std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            )
         }
 
-        fn with_sink(id: u64, outbound: Rc<RefCell<VecDeque<Bytes>>>) -> Self {
+        fn with_sink(id: u64, outbound: std::sync::Arc<std::sync::Mutex<VecDeque<Bytes>>>) -> Self {
             Self {
                 inbound: VecDeque::new(),
                 outbound,
@@ -826,7 +829,8 @@ mod tests {
             data: &[u8],
         ) -> Poll<Result<(), TransportError>> {
             self.outbound
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push_back(Bytes::copy_from_slice(data));
             Poll::Ready(Ok(()))
         }
@@ -1244,7 +1248,7 @@ mod tests {
     #[test]
     fn send_response_encodes_headers_and_queue_encoder_stream() {
         let shared = shared_with_encoder();
-        let sink = Rc::new(RefCell::new(VecDeque::new()));
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let mut request = RequestStream::new(
             Box::new(MockBidi::with_sink(41, sink.clone())),
             shared.clone(),
@@ -1265,7 +1269,11 @@ mod tests {
 
         // The wire carries one HEADERS frame with a QPACK-encoded field
         // section (never empty: it encodes `:status` and the headers).
-        let outbound = sink.borrow_mut().pop_front().expect("response wrote bytes");
+        let outbound = sink
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("response wrote bytes");
         let mut decoder = FrameDecoder::new();
         decoder.extend(outbound);
         match decoder.next_frame().expect("valid frame").expect("a frame") {

@@ -4,6 +4,8 @@ mod error;
 mod frame;
 mod options;
 pub mod qpack;
+#[cfg(feature = "h3-quinn")]
+pub mod quinn;
 mod settings;
 mod stream;
 pub mod transport;
