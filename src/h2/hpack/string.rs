@@ -5,31 +5,42 @@ use super::{huffman, integer, HpackError};
 /// The Huffman-flag bit in the string literal length octet.
 const HUFFMAN_FLAG: u8 = 0x80;
 
+/// The length in octets of the Huffman form of `value`.
+#[inline]
+#[cfg(test)]
+pub(crate) fn huffman_encoded_len(value: &[u8]) -> usize {
+    huffman::encoded_len(value).div_ceil(8)
+}
+
+/// The Huffman byte length when the Huffman bit sequence is shorter than the
+/// raw literal. HPACK's selection rule compares the unpadded bit lengths, so
+/// a same-size-on-the-wire literal can still use Huffman coding.
+#[inline]
+pub(crate) fn huffman_encoded_len_if_shorter(value: &[u8]) -> Option<usize> {
+    let bit_len = huffman::encoded_len(value);
+    (bit_len < value.len().saturating_mul(8)).then(|| bit_len.div_ceil(8))
+}
+
 /// Whether Huffman encoding shortens `value` enough to be worthwhile.
+#[cfg(test)]
 #[inline]
 pub(crate) fn should_huffman(value: &[u8]) -> bool {
-    !value.is_empty() && huffman::encoded_len(value) < value.len() * 8
+    !value.is_empty() && huffman_encoded_len_if_shorter(value).is_some()
 }
 
 /// Encodes a string literal (raw or Huffman-coded) into `out`.
 ///
-/// When `huffman` is set, the literal is Huffman-coded (honoring the flag
-/// even for empty values); otherwise it is written verbatim. The output
+/// When `huffman_len` is present, the literal is Huffman-coded (honoring the
+/// flag even for empty values); otherwise it is written verbatim. The output
 /// buffer is reserved up front so the whole literal is appended without
 /// intermediate reallocations.
 #[inline]
-pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman: bool) {
-    if huffman {
-        // Integer prefix (<=5 octets) plus the Huffman body (<=4 octets
-        // per input byte, since the longest code is 30 bits).
-        out.reserve(8 + value.len() * 4);
-        integer::encode(
-            out,
-            huffman::encoded_len(value).div_ceil(8) as u32,
-            7,
-            HUFFMAN_FLAG,
-        );
-        huffman::encode(value, out);
+pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman_len: Option<usize>) {
+    if let Some(huffman_len) = huffman_len {
+        // Integer prefix (<=5 octets) plus the exact Huffman body length.
+        out.reserve(5usize.saturating_add(huffman_len));
+        integer::encode(out, huffman_len as u32, 7, HUFFMAN_FLAG);
+        huffman::encode_with_len(value, out, huffman_len);
     } else {
         out.reserve(8 + value.len());
         integer::encode(out, value.len() as u32, 7, 0);
@@ -56,7 +67,7 @@ pub(crate) fn decode(
     *off = end;
 
     if first & HUFFMAN_FLAG != 0 {
-        let mut value = Vec::with_capacity(len / 2 + 1);
+        let mut value = Vec::new();
         huffman::decode(slice, &mut value)?;
         if value.len() > max_length {
             return Err(HpackError::InvalidString);
@@ -84,7 +95,7 @@ mod tests {
             (&[0u8; 3], true),
         ] {
             let mut out = Vec::new();
-            encode(&mut out, value, huffman);
+            encode(&mut out, value, huffman.then(|| huffman_encoded_len(value)));
             let mut off = 0;
             let (was_huffman, decoded) = decode(&out, &mut off, 1024).unwrap();
             assert_eq!(was_huffman, huffman);
@@ -96,7 +107,7 @@ mod tests {
     #[test]
     fn empty_huffman_flag_keeps_flag() {
         let mut out = Vec::new();
-        encode(&mut out, b"", true);
+        encode(&mut out, b"", Some(0));
         assert_eq!(out, [0x80]);
         let mut off = 0;
         assert_eq!(decode(&out, &mut off, 16).unwrap(), (true, vec![]));
@@ -105,7 +116,7 @@ mod tests {
     #[test]
     fn decode_enforces_max_length() {
         let mut out = Vec::new();
-        encode(&mut out, b"toolong", false);
+        encode(&mut out, b"toolong", None);
         let mut off = 0;
         assert!(matches!(
             decode(&out, &mut off, 3),
@@ -116,7 +127,11 @@ mod tests {
         // bits than 4 bytes? No — pick a value that expands: use a string
         // of 5-bit symbols which packs >4 chars into 4 bytes.
         let mut out = Vec::new();
-        encode(&mut out, b"0123456789", true);
+        encode(
+            &mut out,
+            b"0123456789",
+            Some(huffman_encoded_len(b"0123456789")),
+        );
         let mut off = 0;
         // Wire length < 10 but decoded length is 10.
         assert!(decode(&out, &mut off, 9).is_err());

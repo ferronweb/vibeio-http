@@ -9,6 +9,7 @@ use super::{
     table::{Header, Table},
     HpackError,
 };
+use bytes::Bytes;
 
 /// The representation prefixes defined in RFC 7541 Section 6.
 const INDEXED: u8 = 0b1000_0000;
@@ -30,8 +31,6 @@ pub struct Decoder {
     /// A size update queued by the protocol layer (SETTINGS) and applied
     /// at the start of the next decode.
     queued_size_update: Option<usize>,
-    /// A tracked total size of a decoded header list.
-    list_size: usize,
     /// Cap on the total size of a decoded header list (sum of name and
     /// value octets). Exceeding it is an error.
     max_header_list_size: usize,
@@ -46,7 +45,6 @@ impl Decoder {
             table: Table::with_max_size(max_table_size),
             max_table_size,
             queued_size_update: None,
-            list_size: 0,
             max_header_list_size: usize::MAX,
         }
     }
@@ -87,6 +85,10 @@ impl Decoder {
 
         let mut off = 0usize;
         let mut headers = Vec::new();
+        // A header-list limit applies to one header block, not to the whole
+        // connection. Keeping this local also avoids carrying mutable state
+        // between independent decodes.
+        let mut list_size = 0usize;
         // Size updates must precede any header field representation
         // (RFC 7541 Section 6.3).
         let mut can_resize = true;
@@ -102,7 +104,10 @@ impl Decoder {
                     can_resize = false;
                     let index = integer::decode(buf, &mut off, 7, byte)? as usize;
                     let entry = self.table.get(index).ok_or(HpackError::InvalidIndex)?;
-                    self.list_size += entry.name().len() + entry.value().len();
+                    list_size += entry.name().len() + entry.value().len();
+                    if list_size > self.max_header_list_size {
+                        return Err(HpackError::HeaderListTooLarge);
+                    }
                     headers.push(entry);
                 }
                 Representation::LiteralWithIndexing
@@ -123,16 +128,16 @@ impl Decoder {
                     // Name: from the table when index > 0, else literal.
                     let name = if index == 0 {
                         let (_, name) = string::decode(buf, &mut off, self.max_header_list_size)?;
-                        name
+                        Bytes::from(name)
                     } else {
                         let entry = self.table.get(index).ok_or(HpackError::InvalidIndex)?;
-                        entry.name().to_vec()
+                        Bytes::copy_from_slice(&entry.name())
                     };
 
                     let (_, value) = string::decode(buf, &mut off, self.max_header_list_size)?;
 
-                    self.list_size += name.len() + value.len();
-                    if self.list_size > self.max_header_list_size {
+                    list_size += name.len() + value.len();
+                    if list_size > self.max_header_list_size {
                         return Err(HpackError::HeaderListTooLarge);
                     }
 

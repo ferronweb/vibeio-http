@@ -127,8 +127,11 @@ impl Encoder {
 
     #[inline]
     fn encode_string(&self, out: &mut Vec<u8>, value: &[u8]) {
-        let huffman = self.use_huffman && string::should_huffman(value);
-        string::encode(out, value, huffman);
+        let huffman_len = self
+            .use_huffman
+            .then(|| string::huffman_encoded_len_if_shorter(value))
+            .flatten();
+        string::encode(out, value, huffman_len);
     }
 }
 

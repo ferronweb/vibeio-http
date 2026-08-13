@@ -283,28 +283,44 @@ const CODES: [(u8, u32); 257] = [
 /// Encodes `src` using the RFC 7541 Huffman code, appending the encoded
 /// bytes (with EOS-prefix padding to the octet boundary) to `dst`.
 ///
-/// The accumulator holds at most 37 bits (a 7-bit leftover plus the 30-bit
-/// longest code), so no per-byte shift can overflow. The destination is
-/// reserved up front to its worst case (`src.len() * 4 + 1` octets, since
-/// the longest code is 30 bits) so the whole literal is appended without
-/// reallocation.
+/// The bit accumulator is drained in 32-bit chunks. It therefore holds at
+/// most 61 bits (a 31-bit remainder plus the 30-bit longest code), which
+/// avoids a byte-at-a-time drain for every input symbol.
 #[inline]
+#[cfg(test)]
 pub(crate) fn encode(src: &[u8], dst: &mut Vec<u8>) {
-    dst.reserve(src.len() * 4 + 1);
+    let encoded_len = encoded_len(src).div_ceil(8);
+    dst.reserve(encoded_len);
+    encode_with_len(src, dst, encoded_len);
+}
+
+/// Encodes `src` when its encoded byte length is already known.
+///
+/// String-literal encoding calculates this length to choose between raw and
+/// Huffman forms, so accepting it here avoids a second pass over the input.
+#[inline]
+pub(crate) fn encode_with_len(src: &[u8], dst: &mut Vec<u8>, encoded_len: usize) {
+    let dst_start = dst.len();
     let mut bits: u64 = 0;
     let mut nbits: u32 = 0;
     for &b in src {
         let (len, code) = CODES[b as usize];
         bits = (bits << len) | u64::from(code);
         nbits += u32::from(len);
-        while nbits >= 8 {
-            nbits -= 8;
-            dst.push((bits >> nbits) as u8);
+
+        if nbits >= 32 {
+            nbits -= 32;
+            dst.extend_from_slice(&((bits >> nbits) as u32).to_be_bytes());
+            bits &= (1u64 << nbits) - 1;
         }
     }
     if nbits > 0 {
-        dst.push(((bits << (8 - nbits)) | ((1 << (8 - nbits)) - 1)) as u8);
+        let byte_len = nbits.div_ceil(8) as usize;
+        let padded = (bits << (32 - nbits)) | ((1u64 << (32 - nbits)) - 1);
+        let bytes = (padded as u32).to_be_bytes();
+        dst.extend_from_slice(&bytes[..byte_len]);
     }
+    debug_assert_eq!(dst.len() - dst_start, encoded_len);
 }
 
 /// The number of bits needed to Huffman-encode `src`.
@@ -323,28 +339,32 @@ pub(crate) fn encoded_len(src: &[u8]) -> usize {
 #[inline]
 pub(crate) fn decode(src: &[u8], dst: &mut Vec<u8>) -> Result<(), HpackError> {
     dst.clear();
+    // The shortest HPACK Huffman code is five bits, so this is enough for
+    // every valid input while avoiding the repeated growth caused by the old
+    // `src.len() / 2` estimate.
+    dst.reserve(
+        src.len()
+            .saturating_add(src.len() / 2)
+            .saturating_add(src.len() / 8)
+            .saturating_add(1),
+    );
     let mut state: usize = 0;
     let mut accepted = true;
     for &byte in src {
         // High nibble, then low nibble (Huffman bits are most-significant first).
-        let next = HUFF_DFA[state * 16 + (byte >> 4) as usize];
-        if next.1 & 0x04 != 0 {
+        let high = HUFF_DFA[state * 16 + (byte >> 4) as usize];
+        let low = HUFF_DFA[high.0 as usize * 16 + (byte & 0x0f) as usize];
+        if (high.1 | low.1) & 0x04 != 0 {
             return Err(HpackError::InvalidHuffman);
         }
-        if next.1 & 0x02 != 0 {
-            dst.push(next.2);
+        if high.1 & 0x02 != 0 {
+            dst.push(high.2);
         }
-        state = next.0 as usize;
-
-        let next = HUFF_DFA[state * 16 + (byte & 0x0f) as usize];
-        if next.1 & 0x04 != 0 {
-            return Err(HpackError::InvalidHuffman);
+        if low.1 & 0x02 != 0 {
+            dst.push(low.2);
         }
-        if next.1 & 0x02 != 0 {
-            dst.push(next.2);
-        }
-        accepted = next.1 & 0x01 != 0;
-        state = next.0 as usize;
+        accepted = low.1 & 0x01 != 0;
+        state = low.0 as usize;
     }
     if !accepted {
         return Err(HpackError::InvalidHuffman);

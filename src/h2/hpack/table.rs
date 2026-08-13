@@ -245,18 +245,18 @@ impl Table {
     /// than the maximum size empties the table and is not added.
     #[inline]
     pub(crate) fn add(&mut self, header: Header) {
-        if header.size > self.max_size {
+        if header.size() > self.max_size {
             self.entries.clear();
             self.size = 0;
             return;
         }
-        while self.size + header.size > self.max_size {
+        while self.size + header.size() > self.max_size {
             match self.entries.pop_back() {
                 Some(entry) => self.size -= entry.size(),
                 None => break,
             }
         }
-        self.size += header.size;
+        self.size += header.size();
         self.entries.push_front(header);
     }
 }
