@@ -1120,7 +1120,23 @@ where
             })
             .collect();
         for (stream_id, msgs) in pending {
-            for msg in msgs {
+            let mut msgs_iter = msgs.into_iter().peekable();
+            while let Some(mut msg) = msgs_iter.next() {
+                match (&mut msg, msgs_iter.peek()) {
+                    (
+                        StreamMsg::Data { end_stream, .. },
+                        Some(StreamMsg::Data {
+                            data,
+                            end_stream: true,
+                        }),
+                    ) => {
+                        if data.is_empty() {
+                            *end_stream = true;
+                            msgs_iter.next(); // Discard the blank end_stream message
+                        }
+                    }
+                    _ => {}
+                }
                 self.handle_stream_msg(stream_id, msg);
             }
         }
