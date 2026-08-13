@@ -142,6 +142,27 @@ pub enum Frame {
 }
 
 impl Frame {
+    /// Whether this is one of the known HTTP/3 frame types (RFC 9114
+    /// Section 7.2).
+    ///
+    /// The decoder never surfaces unknown or reserved (grease) frame types
+    /// — they are consumed and skipped (Section 7.2.8) — so every frame it
+    /// returns is by construction a known type. This method documents the
+    /// request-stream rule (Section 4.1) that after the trailers only
+    /// unknown frames may still appear.
+    pub fn is_known(&self) -> bool {
+        matches!(
+            self,
+            Frame::Data(_)
+                | Frame::Headers(_)
+                | Frame::Settings(_)
+                | Frame::CancelPush(_)
+                | Frame::PushPromise { .. }
+                | Frame::Goaway(_)
+                | Frame::MaxPushId(_)
+        )
+    }
+
     /// Serializes this frame (type, length, payload) into `dst`.
     pub fn encode(&self, dst: &mut BytesMut) {
         match self {

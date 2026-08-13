@@ -5,6 +5,7 @@ mod frame;
 mod options;
 pub mod qpack;
 mod settings;
+mod stream;
 pub mod transport;
 mod upgrade;
 

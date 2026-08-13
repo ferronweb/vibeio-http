@@ -37,6 +37,13 @@ use crate::h3::error::TransportError;
 pub trait RecvStream: Unpin {
     /// Polls for the next chunk of data on the stream.
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, TransportError>>;
+
+    /// The QUIC stream ID (RFC 9000 Section 2.1).
+    ///
+    /// Each bidirectional stream is a distinct HTTP/3 request stream, and
+    /// the HTTP/3 layer keys QPACK state (blocked field sections, section
+    /// acknowledgements) by stream ID.
+    fn id(&self) -> u64;
 }
 
 /// The send half of a QUIC stream.
@@ -158,6 +165,10 @@ mod tests {
             _cx: &mut Context<'_>,
         ) -> Poll<Result<Option<Bytes>, TransportError>> {
             Poll::Ready(Ok(self.data.take()))
+        }
+
+        fn id(&self) -> u64 {
+            0
         }
     }
 
