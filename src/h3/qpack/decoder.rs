@@ -72,11 +72,11 @@ const LITERAL_LITERAL_NAME: u8 = 0b0010_0000;
 /// A field section that was buffered as blocked and has since been decoded
 /// after an encoder stream update.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UnblockedSection {
+pub struct UnblockedSection {
     /// The stream the encoded field section was received on.
-    pub(crate) stream_id: u64,
+    pub stream_id: u64,
     /// The decoded header list.
-    pub(crate) headers: Vec<(Bytes, Bytes)>,
+    pub headers: Vec<(Bytes, Bytes)>,
 }
 
 /// A field section buffered because its Required Insert Count had not been
@@ -91,7 +91,7 @@ struct BlockedSection {
 
 /// QPACK decoder: dynamic table mirror and field section decoder.
 #[derive(Debug)]
-pub(crate) struct Decoder {
+pub struct Decoder {
     dynamic: DynamicTable,
     /// The maximum dynamic table capacity advertised by this decoder in
     /// SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204 Section 3.2.3).
@@ -118,7 +118,7 @@ impl Decoder {
     /// Creates a decoder that advertised `max_capacity` in
     /// SETTINGS_QPACK_MAX_TABLE_CAPACITY and `max_blocked_streams` in
     /// SETTINGS_QPACK_BLOCKED_STREAMS.
-    pub(crate) fn new(max_capacity: u64, max_blocked_streams: usize) -> Self {
+    pub fn new(max_capacity: u64, max_blocked_streams: usize) -> Self {
         Self {
             dynamic: DynamicTable::new(0),
             max_capacity,
@@ -133,25 +133,25 @@ impl Decoder {
     /// encoder stream so far; the decoder's Insert Count (RFC 9204
     /// Section 2.1.1).
     #[inline]
-    pub(crate) fn inserted(&self) -> u64 {
+    pub fn inserted(&self) -> u64 {
         self.dynamic.inserted()
     }
 
     /// The Known Received Count: insertions and duplications the decoder has
     /// acknowledged or incremented (RFC 9204 Section 2.1.4).
     #[inline]
-    pub(crate) fn known_received(&self) -> u64 {
+    pub fn known_received(&self) -> u64 {
         self.known_received
     }
 
     /// The number of field sections currently buffered as blocked.
     #[inline]
-    pub(crate) fn pending_blocked(&self) -> usize {
+    pub fn pending_blocked(&self) -> usize {
         self.blocked.len()
     }
 
     /// Takes the accumulated decoder stream instructions.
-    pub(crate) fn take_decoder_stream(&mut self) -> Bytes {
+    pub fn take_decoder_stream(&mut self) -> Bytes {
         Bytes::from(std::mem::take(&mut self.decoder_stream))
     }
 
@@ -162,10 +162,7 @@ impl Decoder {
     /// in arrival order. The Section Acknowledgment for each is queued in
     /// the decoder stream, together with a coalesced Insert Count Increment
     /// when the table grew beyond the acknowledged count.
-    pub(crate) fn feed_encoder_stream(
-        &mut self,
-        buf: &[u8],
-    ) -> Result<Vec<UnblockedSection>, QpackError> {
+    pub fn feed_encoder_stream(&mut self, buf: &[u8]) -> Result<Vec<UnblockedSection>, QpackError> {
         let mut off = 0;
         while off < buf.len() {
             let header = buf[off];
@@ -281,7 +278,7 @@ impl Decoder {
     /// order are never decoded early: a section on a stream with buffered
     /// blocked sections joins the queue even when it could be decoded
     /// already (RFC 9204 Section 2.2.1 requires in-order processing).
-    pub(crate) fn decode_block(
+    pub fn decode_block(
         &mut self,
         buf: &[u8],
         stream_id: u64,
@@ -313,7 +310,7 @@ impl Decoder {
     /// Notifies that `stream_id` was reset or abandoned: buffered blocked
     /// sections for it are dropped and a Stream Cancellation instruction is
     /// queued (RFC 9204 Section 2.2.2.2). Returns the instruction.
-    pub(crate) fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
+    pub fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
         self.blocked.retain(|b| b.stream_id != stream_id);
         let mut out = Vec::new();
         integer::encode(&mut out, stream_id, 6, STREAM_CANCELLATION);
@@ -324,7 +321,7 @@ impl Decoder {
     /// Drops blocked sections older than `max_age` in the caller's clock
     /// units, queueing one Stream Cancellation per affected stream. Returns
     /// the instructions.
-    pub(crate) fn expire_blocked(&mut self, now: u64, max_age: u64) -> Bytes {
+    pub fn expire_blocked(&mut self, now: u64, max_age: u64) -> Bytes {
         let mut out = Vec::new();
         let mut cancelled = Vec::new();
         self.blocked.retain(|b| {

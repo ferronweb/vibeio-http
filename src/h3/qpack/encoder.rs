@@ -65,16 +65,16 @@ const NEVER_INDEXED: [&[u8]; 3] = [b"authorization", b"proxy-authorization", b"c
 /// the request/response stream, and any encoder stream instructions queued
 /// while encoding it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EncodedSection {
+pub struct EncodedSection {
     /// Encoded field section prefix plus field lines (RFC 9204 Section 4.5.1).
-    pub(crate) block: Bytes,
+    pub block: Bytes,
     /// Encoder stream instructions (RFC 9204 Section 4.3).
-    pub(crate) encoder_stream: Bytes,
+    pub encoder_stream: Bytes,
 }
 
 /// QPACK encoder: dynamic table owner and field section encoder.
 #[derive(Debug)]
-pub(crate) struct Encoder {
+pub struct Encoder {
     dynamic: DynamicTable,
     /// Upper bound on the dynamic table capacity allowed by the decoder's
     /// SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204 Section 5).
@@ -86,7 +86,7 @@ pub(crate) struct Encoder {
 impl Encoder {
     /// Creates an encoder bound to a decoder that advertised the given
     /// `max_capacity` in SETTINGS_QPACK_MAX_TABLE_CAPACITY.
-    pub(crate) fn new(max_capacity: u64, huffman: bool) -> Self {
+    pub fn new(max_capacity: u64, huffman: bool) -> Self {
         Self {
             dynamic: DynamicTable::new(0),
             max_capacity,
@@ -96,7 +96,7 @@ impl Encoder {
 
     /// The maximum dynamic table capacity permitted by the decoder.
     #[inline]
-    pub(crate) fn max_capacity(&self) -> u64 {
+    pub fn max_capacity(&self) -> u64 {
         self.max_capacity
     }
 
@@ -106,7 +106,7 @@ impl Encoder {
     /// The dynamic table is used only when the decoder allows a capacity of
     /// at least one entry (RFC 9204 Section 3.2.3): a maximum capacity below
     /// 32 bytes cannot hold any entry and disables the dynamic table.
-    pub(crate) fn encode_section(&mut self, headers: &[(Bytes, Bytes)]) -> EncodedSection {
+    pub fn encode_section(&mut self, headers: &[(Bytes, Bytes)]) -> EncodedSection {
         self.encode_section_with_base(headers, self.dynamic.inserted())
     }
 
@@ -441,7 +441,7 @@ impl Encoder {
     /// Sets the dynamic table capacity (4.3.1), evicting as needed. Returns
     /// the instruction, or `None` when the capacity is unchanged or exceeds
     /// the decoder's maximum.
-    pub(crate) fn set_capacity(&mut self, capacity: u64) -> Option<Bytes> {
+    pub fn set_capacity(&mut self, capacity: u64) -> Option<Bytes> {
         if capacity > self.max_capacity || capacity == self.dynamic.capacity() {
             return None;
         }

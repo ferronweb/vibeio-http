@@ -4,10 +4,16 @@
 //! streams, and blocked-stream handling. The Huffman code and prefix-integer
 //! representation are shared with HPACK via [`crate::hpack`].
 //!
-//! Populated in the QPACK steps; see `CUSTOM_HTTP3_IMPL.md`.
+//! This module is consumed by the HTTP/3 layer (pending) and directly by the
+//! fixture corpus in `tests/`; see `CUSTOM_HTTP3_IMPL.md`.
 
-pub(crate) mod decoder;
-pub(crate) mod encoder;
-pub(crate) mod error;
+pub mod decoder;
+pub mod encoder;
+pub mod error;
+
+pub use decoder::{Decoder, UnblockedSection};
+pub use encoder::{EncodedSection, Encoder};
+pub use error::QpackError;
+
 pub(crate) mod static_table;
 pub(crate) mod table;

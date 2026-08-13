@@ -1,0 +1,1023 @@
+{
+  "description": "Real-world netbsd header lists encoded by the nghttp3 qpack example tool",
+  "source": "nghttp3 e4988cdb1ca9c5bfb2a591a5b132ddcadf5c739a examples/qpack_encode.cc; ls-qpack 91567706c41c0d97ab8dc576873ecd472d7869fa test/qifs/netbsd.qif",
+  "table_capacity": 4096,
+  "max_blocked_streams": 100,
+  "delay_encoder_stream": true,
+  "cases": [
+    {
+      "seqno": 0,
+      "stream_id": 0,
+      "wire": "3fe11fc08bf1e3c2f51531a245cf64dfff20bbd07f66a281b0dae053fae46aa43f8429a77a8102e0fb5391aa71afb53cb8d7da9677b8dbcb83fb531149d4ec0801000200a984d61653f961b79707ddb0497ca589d34d1f43aeba0c41a4c7a98f33a69a3fdf9a68fa1d75d0620d263d4c79a68fbed00177febe58f9fbed00177bff098b2d4b70ddf45abefb4005dbdf8a9bd9abfa5242cb40d25f"
+    },
+    {
+      "seqno": 1,
+      "stream_id": 1,
+      "wire": "0684d1d610c1111213142f0021eaa8a4498f5788ea52d6b0e83772ffff1f2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "upgrade-insecure-requests",
+          "1"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 2,
+      "stream_id": 0,
+      "wire": "dd8e497ca582211f5f2c7cfdf6800b87cd919d29aee30c78f1e17a8a98d122e7b2663f"
+    },
+    {
+      "seqno": 3,
+      "stream_id": 2,
+      "wire": "0881d1d6845188626a0f18e85c884783108180112f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/global.css"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "text/css,*/*;q=0.1"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 4,
+      "stream_id": 3,
+      "wire": "0800d1d6865188626a0f18e85fa23f85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/global.js"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 5,
+      "stream_id": 4,
+      "wire": "0800d1d686518e6243d43498f521890f51ec42fd1185dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/donations/donors.js"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 6,
+      "stream_id": 5,
+      "wire": "0800d1d686519360d48e62a18d254dddd7d64523a282d8bd754d85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/NetBSD-smaller.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 7,
+      "stream_id": 6,
+      "wire": "0800d1d686519760d48e62a1890fe2aa0e3916310f52c7b0754c55ebaa6f85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/download-icon-orange.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 8,
+      "stream_id": 7,
+      "wire": "0800d1d686519660d48e62a1845b5d67b12b1887a963d83aa62af5d53785dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/support-icon-orange.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 9,
+      "stream_id": 8,
+      "wire": "0800d1d686519860d48e62a1821e9a6da8c9f4b1887a963d83aa62af5d537f85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/community-icon-orange.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 10,
+      "stream_id": 9,
+      "wire": "0800d1d686519660d48e62a1890bdcb41eb58c43d4b1ec1d53157aea9b85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/develop-icon-orange.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 11,
+      "stream_id": 10,
+      "wire": "0800d1d686519560d48e62a1890f50d2558c43d4b1ec1d53157aea9b85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/donate-icon-orange.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 12,
+      "stream_id": 11,
+      "wire": "0800d1d686519260d48e62a18a0d57543158fd563a1798d2ff85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/links/paypal.gif"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 13,
+      "stream_id": 12,
+      "wire": "0800d1d686519f60d48e62a18a0d57543084d86acab4740c9d5690f50d2559148e8a17aea9bf85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/links/stripe-black-donate-small.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 14,
+      "stream_id": 13,
+      "wire": "0800d1d686519360d48e62a18a0d57543041ca5aec2a10bd754d85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/links/cafepress.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 15,
+      "stream_id": 14,
+      "wire": "0800d1d686519360d48e62a18f05424b65541e63c48a57aea9bf85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/westernlogo_sm.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 16,
+      "stream_id": 15,
+      "wire": "0800d1d686518f60d48e62a1821e8b698cc35fa5737f85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/columbia.jpg"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 17,
+      "stream_id": 16,
+      "wire": "0800d1d686518d60d48e62a1894684d1e97aea9b85dd8382802f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/fastly.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 18,
+      "stream_id": 0,
+      "wire": "cd989d29aee30c78f1e17a8a98d122e7b26626a0f18e85c8847f"
+    },
+    {
+      "seqno": 19,
+      "stream_id": 17,
+      "wire": "0980d1d686519460d48e62a18a87dee8ec5a6b07218b5257aea9bf85dd8382102f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "http"
+        ],
+        [
+          ":authority",
+          "www.netbsd.org"
+        ],
+        [
+          ":path",
+          "/images/navBar-gradient.png"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/global.css"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    },
+    {
+      "seqno": 20,
+      "stream_id": 0,
+      "wire": "c090f1e3c2f58fd563a0f1f4291285c87a7f"
+    },
+    {
+      "seqno": 21,
+      "stream_id": 18,
+      "wire": "0a80d1d710519860b545c373066234d4c469aa245b1a0961a32c5bb42f31a586dd84df815588d7cf5e182f6f585f2f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "headers": [
+        [
+          ":method",
+          "GET"
+        ],
+        [
+          ":scheme",
+          "https"
+        ],
+        [
+          ":authority",
+          "www.paypalobjects.com"
+        ],
+        [
+          ":path",
+          "/en_US/i/btn/btn_subscribe_SM.gif"
+        ],
+        [
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "accept-language",
+          "en-US,en;q=0.5"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate, br"
+        ],
+        [
+          "referer",
+          "http://www.netbsd.org/"
+        ],
+        [
+          "cookie",
+          "PYPF=CT-2"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "pragma",
+          "no-cache"
+        ],
+        [
+          "cache-control",
+          "no-cache"
+        ]
+      ]
+    }
+  ]
+}

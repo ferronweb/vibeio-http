@@ -1,6 +1,6 @@
 mod date;
 mod options;
-mod qpack;
+pub mod qpack;
 mod transport;
 mod upgrade;
 

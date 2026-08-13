@@ -1,0 +1,42 @@
+{
+  "description": "RFC 9204 Appendix B.2-B.5: set capacity, name-ref inserts, post-base refs, speculative insert, duplicate, relative refs (stream-delay variant exercises blocking)",
+  "source": "RFC 9204 Appendix B.2, B.3, B.4, B.5 (errata checked), https://www.rfc-editor.org/rfc/rfc9204.html",
+  "table_capacity": 220,
+  "max_blocked_streams": 100,
+  "cases": [
+    {
+      "seqno": 0,
+      "stream_id": 0,
+      "wire": "3fbd01c00f7777772e6578616d706c652e636f6dc10c2f73616d706c652f70617468"
+    },
+    {
+      "seqno": 1,
+      "stream_id": 4,
+      "wire": "03811011",
+      "headers": [
+        [":authority", "www.example.com"],
+        [":path", "/sample/path"]
+      ]
+    },
+    {
+      "seqno": 2,
+      "stream_id": 0,
+      "wire": "4a637573746f6d2d6b65790c637573746f6d2d76616c7565"
+    },
+    {
+      "seqno": 3,
+      "stream_id": 0,
+      "wire": "02"
+    },
+    {
+      "seqno": 4,
+      "stream_id": 8,
+      "wire": "050080c181",
+      "headers": [
+        [":authority", "www.example.com"],
+        [":path", "/"],
+        ["custom-key", "custom-value"]
+      ]
+    }
+  ]
+}

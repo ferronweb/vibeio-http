@@ -1,0 +1,16 @@
+{
+  "description": "RFC 9204 Appendix B.1: literal field line with static name reference, no dynamic table",
+  "source": "RFC 9204 Appendix B.1 (errata checked), https://www.rfc-editor.org/rfc/rfc9204.html",
+  "table_capacity": 0,
+  "max_blocked_streams": 100,
+  "cases": [
+    {
+      "seqno": 0,
+      "stream_id": 1,
+      "wire": "0000510b2f696e6465782e68746d6c",
+      "headers": [
+        [":path", "/index.html"]
+      ]
+    }
+  ]
+}

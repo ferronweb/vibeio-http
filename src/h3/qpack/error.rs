@@ -10,7 +10,7 @@
 /// two by processing of the peer's respective QPACK stream. All three are
 /// fatal for the connection: there is no way to resynchronize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QpackError {
+pub enum QpackError {
     /// `QPACK_DECOMPRESSION_FAILED` (0x0200): a field section could not be
     /// decoded, or references an entry that is evicted or out of range.
     DecompressionFailed,
@@ -20,10 +20,7 @@ pub(crate) enum QpackError {
     /// `QPACK_DECODER_STREAM_ERROR` (0x0202): a decoder stream instruction
     /// was malformed. Kept so [`QpackError::code`] mirrors the full error
     /// family; this implementation only *emits* decoder stream instructions,
-    /// it never parses them, so the variant is never constructed. It errors
-    /// if the decoder stream of a peer is ever parsed, which is the reminder
-    /// to remove this expectation.
-    #[expect(dead_code)]
+    /// it never parses them, so the variant is never constructed.
     DecoderStream,
 }
 
