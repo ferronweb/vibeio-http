@@ -388,7 +388,7 @@ where
                                 && is_100_continue
                                 && send_continue_body
                                     .as_ref()
-                                    .map_or(false, |b| b.load(std::sync::atomic::Ordering::Relaxed))
+                                    .is_some_and(|b| b.load(std::sync::atomic::Ordering::Relaxed))
                             {
                                 continue_sent = true;
                                 return Poll::Ready(None);
