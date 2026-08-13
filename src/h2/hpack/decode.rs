@@ -127,7 +127,7 @@ impl Decoder {
                         Bytes::from(name)
                     } else {
                         let entry = self.table.get(index).ok_or(HpackError::InvalidIndex)?;
-                        Bytes::copy_from_slice(&entry.name())
+                        Bytes::copy_from_slice(entry.name())
                     };
 
                     let (_, value) = string::decode(buf, &mut off, self.max_header_list_size)?;

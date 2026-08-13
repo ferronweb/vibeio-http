@@ -489,7 +489,7 @@ where
             // field block per frame arrival; act on it while the
             // handler closure is in scope.
             if let Some(id) = self.take_complete_block() {
-                self.finalize_field_block(id, &request_fn).await;
+                self.finalize_field_block(id, request_fn).await;
             }
             if self.closing {
                 self.flush().await?;
@@ -1138,20 +1138,17 @@ where
         for (stream_id, msgs) in pending {
             let mut msgs_iter = msgs.into_iter().peekable();
             while let Some(mut msg) = msgs_iter.next() {
-                match (&mut msg, msgs_iter.peek()) {
-                    (
+                if let (
                         StreamMsg::Data { end_stream, .. },
                         Some(StreamMsg::Data {
                             data,
                             end_stream: true,
                         }),
-                    ) => {
-                        if data.is_empty() {
-                            *end_stream = true;
-                            msgs_iter.next(); // Discard the blank end_stream message
-                        }
+                    ) = (&mut msg, msgs_iter.peek()) {
+                    if data.is_empty() {
+                        *end_stream = true;
+                        msgs_iter.next(); // Discard the blank end_stream message
                     }
-                    _ => {}
                 }
                 self.handle_stream_msg(stream_id, msg);
             }
