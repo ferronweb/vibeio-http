@@ -270,8 +270,8 @@ impl Fixture {
     /// push and unknown streams are drained and dropped.
     async fn pump_server_unis(&mut self) {
         loop {
-            let accept = tokio::time::timeout(Duration::from_millis(250), self.conn.accept_uni())
-                .await;
+            let accept =
+                tokio::time::timeout(Duration::from_millis(250), self.conn.accept_uni()).await;
             let Ok(uni) = accept else { break };
             let mut recv = uni.expect("server uni stream");
             let mut type_byte = [0u8; 1];
@@ -838,9 +838,9 @@ async fn fixture_client_dynamic_table_unblocks() {
         let mut data = Vec::new();
         while let Some(frame) = reader.next(&mut recv).await {
             match frame {
-                Frame::Headers(block) => sections.push(field_map(
-                    fixture.decode_dynamic(&block, stream_id).await,
-                )),
+                Frame::Headers(block) => {
+                    sections.push(field_map(fixture.decode_dynamic(&block, stream_id).await))
+                }
                 Frame::Data(chunk) => data.extend_from_slice(&chunk),
                 other => panic!("unexpected frame on request stream: {other:?}"),
             }
@@ -869,11 +869,7 @@ async fn fixture_client_dynamic_table_unblocks() {
 /// carry the non-static `x-dyn-token` name, so every response forces the
 /// server's encoder to emit inserts (and, from the second response on, to
 /// reference the entries it inserted for earlier responses).
-async fn dyn_exchange(
-    fixture: &mut Fixture,
-    path: &str,
-    expect_token: &str,
-) -> Vec<u8> {
+async fn dyn_exchange(fixture: &mut Fixture, path: &str, expect_token: &str) -> Vec<u8> {
     let (mut send, mut recv) = fixture
         .request_open(&pseudo(&[
             (":method", "GET"),
@@ -890,9 +886,9 @@ async fn dyn_exchange(
     let mut data = Vec::new();
     while let Some(frame) = reader.next(&mut recv).await {
         match frame {
-            Frame::Headers(block) => sections.push(field_map(
-                fixture.decode_dynamic(&block, stream_id).await,
-            )),
+            Frame::Headers(block) => {
+                sections.push(field_map(fixture.decode_dynamic(&block, stream_id).await))
+            }
             Frame::Data(chunk) => data.extend_from_slice(&chunk),
             other => panic!("unexpected frame on request stream: {other:?}"),
         }

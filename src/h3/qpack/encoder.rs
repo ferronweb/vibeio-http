@@ -38,8 +38,8 @@ use std::collections::VecDeque;
 
 use bytes::Bytes;
 
-use crate::h3::qpack::{static_table, QpackError};
 use crate::h3::qpack::table::DynamicTable;
+use crate::h3::qpack::{static_table, QpackError};
 use crate::hpack::{huffman, integer};
 
 /// `001` + 5-bit capacity: Set Dynamic Table Capacity (RFC 9204 4.3.1).
@@ -251,9 +251,7 @@ impl Encoder {
             // the section references and everything the decoder still
             // needs (RFC 9204 Section 2.1.1): evicting below that floor is
             // what the decoder's mirror of this table permits.
-            let boundary = min_rel_ref
-                .unwrap_or(u64::MAX)
-                .min(self.evictable_floor());
+            let boundary = min_rel_ref.unwrap_or(u64::MAX).min(self.evictable_floor());
             let safe = self.dynamic.inserted() - self.dynamic.len() as u64
                 + self.dynamic.would_evict(size)
                 <= boundary;
@@ -564,8 +562,8 @@ impl Encoder {
                 // (and any continuation bytes) are the Stream ID, so this
                 // arm must catch every byte with the high bit set, including
                 // IDs at or above 64 whose prefix byte is `0xC0`.
-                let stream_id =
-                    integer::decode(buf, &mut off, 7, header).map_err(|_| QpackError::DecoderStream)?;
+                let stream_id = integer::decode(buf, &mut off, 7, header)
+                    .map_err(|_| QpackError::DecoderStream)?;
                 let pos = self
                     .pending_refs
                     .iter()
@@ -574,8 +572,8 @@ impl Encoder {
                 self.pending_refs.remove(pos);
             } else if header & 0x40 != 0 {
                 // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
-                let stream_id =
-                    integer::decode(buf, &mut off, 6, header).map_err(|_| QpackError::DecoderStream)?;
+                let stream_id = integer::decode(buf, &mut off, 6, header)
+                    .map_err(|_| QpackError::DecoderStream)?;
                 let before = self.pending_refs.len();
                 self.pending_refs.retain(|(id, _)| *id != stream_id);
                 if self.pending_refs.len() == before {
@@ -585,8 +583,8 @@ impl Encoder {
                 // `00` + 6-bit increment: Insert Count Increment (4.4.3).
                 // A zero increment is forbidden, and the total may not
                 // exceed the number of inserts sent.
-                let increment =
-                    integer::decode(buf, &mut off, 6, header).map_err(|_| QpackError::DecoderStream)?;
+                let increment = integer::decode(buf, &mut off, 6, header)
+                    .map_err(|_| QpackError::DecoderStream)?;
                 if increment == 0
                     || self.known_received.saturating_add(increment) > self.dynamic.inserted()
                 {
@@ -759,7 +757,10 @@ mod tests {
     #[test]
     fn huffman_used_when_shorter() {
         let mut enc = Encoder::new(0, true);
-        let out = enc.encode_section(0, &[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")]);
+        let out = enc.encode_section(
+            0,
+            &[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")],
+        );
         let block = out.block.as_ref();
         assert_eq!(&block[..2], &[0x00, 0x00]);
         // Literal with Name Reference, static :path (0x51).
@@ -793,10 +794,13 @@ mod tests {
         let mut enc = Encoder::new(100, false);
         enc.set_capacity(100);
         enc.insert_with_name_ref(b":authority", b"www.example.com");
-        let out = enc.encode_section(0, &[
-            hdr(":authority", "www.example.com"),
-            hdr("x-custom", "0123456789012345678901234567890123456789"),
-        ]);
+        let out = enc.encode_section(
+            0,
+            &[
+                hdr(":authority", "www.example.com"),
+                hdr("x-custom", "0123456789012345678901234567890123456789"),
+            ],
+        );
         let block = out.block.as_ref();
         // First field line: Indexed, dynamic, relative index 0 (0x80).
         assert_eq!(block[2], 0x80);

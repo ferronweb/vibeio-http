@@ -794,22 +794,16 @@ mod tests {
         assert_eq!(unblocked[0].headers.as_slice(), response.as_slice());
 
         // A second section referencing the entries from the first.
-        let s2 = enc.encode_section(0, &[
-            hdr(":status", "200"),
-            hdr("x-custom-header", "hello-world"),
-        ]);
+        let s2 = enc.encode_section(
+            0,
+            &[hdr(":status", "200"), hdr("x-custom-header", "hello-world")],
+        );
         let unblocked2 = dec.feed_encoder_stream(&s2.encoder_stream).unwrap();
         assert!(unblocked2.is_empty());
-        let out2 = dec
-            .decode_block(&s2.block, 1, 0)
-            .unwrap()
-            .expect("decodes");
+        let out2 = dec.decode_block(&s2.block, 1, 0).unwrap().expect("decodes");
         assert_eq!(
             out2,
-            &[
-                hdr(":status", "200"),
-                hdr("x-custom-header", "hello-world")
-            ][..]
+            &[hdr(":status", "200"), hdr("x-custom-header", "hello-world")][..]
         );
     }
 
@@ -907,7 +901,10 @@ mod tests {
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_with_name_ref(b":path", b"/sample/path").unwrap());
         let block = enc
-            .encode_section(0, &[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")])
+            .encode_section(
+                0,
+                &[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")],
+            )
             .block;
 
         let mut dec = Decoder::new(220, 8);
@@ -1319,8 +1316,7 @@ mod tests {
         let es = [
             0x3f, 0x39, // Set Dynamic Table Capacity 88
             0x41, b'a', 0x01, b'a', // Insert with Literal Name (a,a)
-            0x41, b'b', 0x01, b'b',
-            0x41, b'c', 0x01, b'c',
+            0x41, b'b', 0x01, b'b', 0x41, b'c', 0x01, b'c',
         ];
         assert_eq!(dec.feed_encoder_stream(&es), Err(QpackError::EncoderStream));
     }
@@ -1352,14 +1348,15 @@ mod tests {
         let es = [
             0x3f, 0xbd, 0x01, // Set Dynamic Table Capacity 220
             0x41, b'a', 0x01, b'a', // Insert with Literal Name (a,a)
-            0x41, b'b', 0x01, b'b',
-            0x3f, 0x03, // Set Dynamic Table Capacity 34
+            0x41, b'b', 0x01, b'b', 0x3f, 0x03, // Set Dynamic Table Capacity 34
         ];
         assert_eq!(dec.feed_encoder_stream(&es), Err(QpackError::EncoderStream));
 
         // The same reduction is fine once the entries are acknowledged.
         let mut dec = Decoder::new(220, 8);
-        let first = [0x3f, 0xbd, 0x01, 0x41, b'a', 0x01, b'a', 0x41, b'b', 0x01, b'b'];
+        let first = [
+            0x3f, 0xbd, 0x01, 0x41, b'a', 0x01, b'a', 0x41, b'b', 0x01, b'b',
+        ];
         assert!(dec.feed_encoder_stream(&first).unwrap().is_empty());
         assert!(dec.feed_encoder_stream(&[0x3f, 0x03]).unwrap().is_empty());
         assert_eq!(dec.dynamic.len(), 1);
@@ -1397,13 +1394,14 @@ mod tests {
         let mut dec = Decoder::new(220, 8);
         // Set Dynamic Table Capacity 220, insert (a,a), (b,b), (c,c), then
         // reduce the capacity to 34 so only c survives.
-    assert!(dec
-        .feed_encoder_stream(&[
-            0x3f, 0xbd, 0x01, 0x41, b'a', 0x01, b'a', 0x41, b'b', 0x01, b'b', 0x41, b'c', 0x01, b'c',
-        ])
-        .unwrap()
-        .is_empty());
-    assert!(dec.feed_encoder_stream(&[0x3f, 0x03]).unwrap().is_empty());
+        assert!(dec
+            .feed_encoder_stream(&[
+                0x3f, 0xbd, 0x01, 0x41, b'a', 0x01, b'a', 0x41, b'b', 0x01, b'b', 0x41, b'c', 0x01,
+                b'c',
+            ])
+            .unwrap()
+            .is_empty());
+        assert!(dec.feed_encoder_stream(&[0x3f, 0x03]).unwrap().is_empty());
         assert_eq!(dec.dynamic.len(), 1);
         assert_eq!(
             dec.dynamic.get_absolute(2),
@@ -1515,10 +1513,13 @@ mod tests {
         // Two sections referencing entries inserted by the first, with a
         // static-only section in between.
         let mut enc = Encoder::new(300, false);
-        let first = enc.encode_section(0, &[
-            hdr("custom-key", "custom-value"),
-            hdr("x-more", "0123456789"),
-        ]);
+        let first = enc.encode_section(
+            0,
+            &[
+                hdr("custom-key", "custom-value"),
+                hdr("x-more", "0123456789"),
+            ],
+        );
         let second = enc.encode_section(0, &[hdr("custom-key", "custom-value")]);
         let third = enc.encode_section(0, &[hdr(":method", "GET")]);
 

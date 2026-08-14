@@ -1069,10 +1069,13 @@ mod tests {
         Frame::Data(Bytes::from_static(b"hello")).encode(&mut wire);
         let body2 = Bytes::from_static(b"world");
         Frame::Data(body2).encode(&mut wire);
-        let section = enc.encode_section(0, &[(
-            Bytes::from_static(b"x-checksum"),
-            Bytes::from_static(b"sum"),
-        )]);
+        let section = enc.encode_section(
+            0,
+            &[(
+                Bytes::from_static(b"x-checksum"),
+                Bytes::from_static(b"sum"),
+            )],
+        );
         shared
             .lock()
             .decoder
@@ -1216,7 +1219,8 @@ mod tests {
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
-        let section = enc.encode_section(0, &[(Bytes::from_static(b"x-a"), Bytes::from_static(b"1"))]);
+        let section =
+            enc.encode_section(0, &[(Bytes::from_static(b"x-a"), Bytes::from_static(b"1"))]);
         shared
             .lock()
             .decoder
@@ -1249,8 +1253,10 @@ mod tests {
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
-        let section =
-            enc.encode_section(0, &[(Bytes::from_static(b":status"), Bytes::from_static(b"200"))]);
+        let section = enc.encode_section(
+            0,
+            &[(Bytes::from_static(b":status"), Bytes::from_static(b"200"))],
+        );
         shared
             .lock()
             .decoder
@@ -1525,11 +1531,14 @@ mod tests {
     fn missing_method_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(0, &[
-            (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
-            (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
-            (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
-        ]);
+        let section = peer_enc.encode_section(
+            0,
+            &[
+                (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
+                (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
+                (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
+            ],
+        );
         shared
             .lock()
             .decoder
@@ -1553,13 +1562,16 @@ mod tests {
     fn unknown_pseudo_header_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(0, &[
-            (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
-            (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
-            (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
-            (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
-            (Bytes::from_static(b":frobnicate"), Bytes::from_static(b"1")),
-        ]);
+        let section = peer_enc.encode_section(
+            0,
+            &[
+                (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
+                (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
+                (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
+                (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
+                (Bytes::from_static(b":frobnicate"), Bytes::from_static(b"1")),
+            ],
+        );
         shared
             .lock()
             .decoder
@@ -1580,17 +1592,20 @@ mod tests {
     fn pseudo_header_after_regular_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(0, &[
-            (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
-            (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
-            (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
-            (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
-            (Bytes::from_static(b"host"), Bytes::from_static(b"x")),
-            (
-                Bytes::from_static(b":trailer-late"),
-                Bytes::from_static(b"1"),
-            ),
-        ]);
+        let section = peer_enc.encode_section(
+            0,
+            &[
+                (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
+                (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
+                (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
+                (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
+                (Bytes::from_static(b"host"), Bytes::from_static(b"x")),
+                (
+                    Bytes::from_static(b":trailer-late"),
+                    Bytes::from_static(b"1"),
+                ),
+            ],
+        );
         shared
             .lock()
             .decoder
@@ -1612,16 +1627,19 @@ mod tests {
         // Plain CONNECT: only :method and :authority.
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(0, &[
-            (
-                Bytes::from_static(b":method"),
-                Bytes::from_static(b"CONNECT"),
-            ),
-            (
-                Bytes::from_static(b":authority"),
-                Bytes::from_static(b"example.com:443"),
-            ),
-        ]);
+        let section = peer_enc.encode_section(
+            0,
+            &[
+                (
+                    Bytes::from_static(b":method"),
+                    Bytes::from_static(b"CONNECT"),
+                ),
+                (
+                    Bytes::from_static(b":authority"),
+                    Bytes::from_static(b"example.com:443"),
+                ),
+            ],
+        );
         shared
             .lock()
             .decoder
@@ -1647,21 +1665,24 @@ mod tests {
         // Extended CONNECT: adds :scheme and :protocol, never :path.
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(0, &[
-            (
-                Bytes::from_static(b":method"),
-                Bytes::from_static(b"CONNECT"),
-            ),
-            (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
-            (
-                Bytes::from_static(b":authority"),
-                Bytes::from_static(b"example.com"),
-            ),
-            (
-                Bytes::from_static(b":protocol"),
-                Bytes::from_static(b"webtransport"),
-            ),
-        ]);
+        let section = peer_enc.encode_section(
+            0,
+            &[
+                (
+                    Bytes::from_static(b":method"),
+                    Bytes::from_static(b"CONNECT"),
+                ),
+                (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
+                (
+                    Bytes::from_static(b":authority"),
+                    Bytes::from_static(b"example.com"),
+                ),
+                (
+                    Bytes::from_static(b":protocol"),
+                    Bytes::from_static(b"webtransport"),
+                ),
+            ],
+        );
         shared
             .lock()
             .decoder
@@ -1685,15 +1706,18 @@ mod tests {
     fn connect_with_path_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(0, &[
-            (
-                Bytes::from_static(b":method"),
-                Bytes::from_static(b"CONNECT"),
-            ),
-            (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
-            (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
-            (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
-        ]);
+        let section = peer_enc.encode_section(
+            0,
+            &[
+                (
+                    Bytes::from_static(b":method"),
+                    Bytes::from_static(b"CONNECT"),
+                ),
+                (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
+                (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
+                (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
+            ],
+        );
         shared
             .lock()
             .decoder
