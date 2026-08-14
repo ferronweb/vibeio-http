@@ -9,9 +9,9 @@
 //!
 //! The code table data below is specified by RFC 7541 Appendix B; the
 //! literal formatting is taken from the MIT-licensed `h2` crate's generated
-//! `hpack/huffman/table.rs` (https://github.com/hyperium/h2). The 4-bit
+//! `hpack/huffman/table.rs` (<https://github.com/hyperium/h2>). The 4-bit
 //! decode DFA in `huffman_table.rs` is ported from ls-hpack
-//! (https://github.com/litespeedtech/ls-hpack), which uses the same RFC
+//! (<https://github.com/litespeedtech/ls-hpack>), which uses the same RFC
 //! code table.
 
 use super::huffman_table::HUFF_DFA;
