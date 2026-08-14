@@ -703,7 +703,10 @@ where
                         cx,
                     ) {
                         Poll::Ready(()) => {}
-                        Poll::Pending => return Poll::Pending,
+                        Poll::Pending => {
+                            let _ = this.wake_tx.try_send(()); // For gRPC correctness
+                            return Poll::Pending;
+                        }
                     }
                 }
             }
