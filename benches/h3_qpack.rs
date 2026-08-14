@@ -18,11 +18,23 @@ use vibeio_http::qpack::{Decoder, Encoder};
 fn request_headers() -> Vec<(Bytes, Bytes)> {
     vec![
         (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
-        (Bytes::from_static(b":path"), Bytes::from_static(b"/index.html")),
+        (
+            Bytes::from_static(b":path"),
+            Bytes::from_static(b"/index.html"),
+        ),
         (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
-        (Bytes::from_static(b":authority"), Bytes::from_static(b"example.com")),
-        (Bytes::from_static(b"user-agent"), Bytes::from_static(b"vibeio-http/0.3")),
-        (Bytes::from_static(b"accept"), Bytes::from_static(b"text/html")),
+        (
+            Bytes::from_static(b":authority"),
+            Bytes::from_static(b"example.com"),
+        ),
+        (
+            Bytes::from_static(b"user-agent"),
+            Bytes::from_static(b"vibeio-http/0.3"),
+        ),
+        (
+            Bytes::from_static(b"accept"),
+            Bytes::from_static(b"text/html"),
+        ),
         (
             Bytes::from_static(b"accept-encoding"),
             Bytes::from_static(b"gzip, deflate, br"),

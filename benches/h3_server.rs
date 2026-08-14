@@ -83,13 +83,10 @@ where
             .build()
             .expect("vibeio runtime");
         let _ = rt.block_on(async move {
-            Http3::new(
-                vibeio_http::quinn::Connection::new(server_conn),
-                options,
-            )
-            .graceful_shutdown_token(cancel)
-            .handle(handler)
-            .await
+            Http3::new(vibeio_http::quinn::Connection::new(server_conn), options)
+                .graceful_shutdown_token(cancel)
+                .handle(handler)
+                .await
         });
     })
 }
@@ -107,9 +104,7 @@ fn handler(
     }
 }
 
-async fn issue_one(
-    send_request: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
-) {
+async fn issue_one(send_request: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>) {
     let request = Request::get("https://localhost/bench").body(()).unwrap();
     let mut stream = send_request.send_request(request).await.expect("request");
     stream.finish().await.expect("finish");
@@ -132,15 +127,9 @@ fn bench_h3_server(c: &mut Criterion) {
         .build()
         .expect("tokio runtime");
 
-    let (server_ep, client_ep, client_conn, server_conn) =
-        rt.block_on(loopback_pair());
+    let (server_ep, client_ep, client_conn, server_conn) = rt.block_on(loopback_pair());
     let cancel = CancellationToken::new();
-    let _server_thread = spawn_native_server(
-        server_conn,
-        Http3Options::default(),
-        cancel,
-        handler,
-    );
+    let _server_thread = spawn_native_server(server_conn, Http3Options::default(), cancel, handler);
 
     let (mut send_request, _driver) = rt.block_on(async {
         let (mut conn, send_request) = h3::client::builder()
