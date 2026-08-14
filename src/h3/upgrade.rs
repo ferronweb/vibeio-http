@@ -3,7 +3,7 @@
 //!
 //! After the server sends its final response, the application may take the
 //! underlying request stream over as raw [`tokio::io`] I/O. The request
-//! stream is shared with the driver through an async [`futures_util::lock::Mutex`],
+//! stream is shared with the driver through an async [`tokio::sync::Mutex`],
 //! so the receive half becomes an [`AsyncRead`] (`H3Upgraded`) while the
 //! send half keeps writing through the same handle, driven by the
 //! [`UpgradedSendStreamTask`] until the other side hangs up.
@@ -19,9 +19,9 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
-use futures_util::lock::Mutex;
 use futures_util::FutureExt;
 use tokio::io::{AsyncWrite, ReadBuf};
+use tokio::sync::Mutex;
 
 use crate::h3::h3_stream_error_to_io;
 use crate::h3::stream::{RequestStream, StreamError};
@@ -70,7 +70,7 @@ impl tokio::io::AsyncRead for H3Upgraded {
         // drain whatever the stream still holds as raw bytes.
         if self.buf.is_empty() {
             self.buf = loop {
-                let mut guard = match self.inner.lock().poll_unpin(cx) {
+                let mut guard = match std::pin::pin!(self.inner.lock()).poll_unpin(cx) {
                     Poll::Ready(guard) => guard,
                     Poll::Pending => return Poll::Pending,
                 };

@@ -1659,6 +1659,7 @@ dependencies = [
  "kanal",
  "memchr",
  "oneshot",
+ "parking_lot",
  "pin-project-lite",
  "quinn",
  "rcgen",

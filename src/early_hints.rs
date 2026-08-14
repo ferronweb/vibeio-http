@@ -1,16 +1,17 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
 use http::{HeaderMap, Request};
 use http_body::Body;
+use parking_lot::Mutex;
 
 type EarlyHintsResult = Result<(), std::io::Error>;
 pub(super) type EarlyHintsMessage = (
     HeaderMap,
-    futures_util::lock::Mutex<oneshot::Sender<EarlyHintsResult>>,
+    tokio::sync::Mutex<oneshot::Sender<EarlyHintsResult>>,
 );
 
 #[derive(Clone)]
@@ -44,12 +45,9 @@ impl EarlyHints {
     #[inline]
     async fn send(&self, headers: HeaderMap) -> EarlyHintsResult {
         let (tx, rx) = oneshot::async_channel();
-        let message = (headers, futures_util::lock::Mutex::new(tx));
+        let message = (headers, tokio::sync::Mutex::new(tx));
         let receiver_waker = {
-            let mut state = self
-                .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = self.inner.lock();
             if state.closed {
                 return Err(std::io::Error::other("early hints receiver closed"));
             }
@@ -66,10 +64,7 @@ impl EarlyHints {
 impl EarlyHintsReceiver {
     #[inline]
     pub(super) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<EarlyHintsMessage>> {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.inner.lock();
         if let Some(message) = state.queue.pop_front() {
             return Poll::Ready(Some(message));
         }
@@ -82,10 +77,7 @@ impl EarlyHintsReceiver {
     #[inline]
     pub(super) fn close(&mut self) {
         let receiver_waker = {
-            let mut state = self
-                .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = self.inner.lock();
             if state.closed {
                 None
             } else {

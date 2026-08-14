@@ -147,7 +147,7 @@ impl AsyncWrite for Upgraded {
 
 #[derive(Clone)]
 pub(super) struct Upgrade {
-    inner: Arc<futures_util::lock::Mutex<oneshot::AsyncReceiver<Upgraded>>>,
+    inner: Arc<tokio::sync::Mutex<oneshot::AsyncReceiver<Upgraded>>>,
     pub(super) upgraded: Arc<AtomicBool>,
 }
 
@@ -155,7 +155,7 @@ impl Upgrade {
     #[inline]
     pub(super) fn new(inner: oneshot::AsyncReceiver<Upgraded>) -> Self {
         Self {
-            inner: Arc::new(futures_util::lock::Mutex::new(inner)),
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
             upgraded: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -169,7 +169,7 @@ impl Future for Upgrade {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut inner = ready!(self.inner.lock().poll_unpin(cx));
+        let mut inner = ready!(std::pin::pin!(self.inner.lock()).poll_unpin(cx));
         match inner.poll_unpin(cx) {
             std::task::Poll::Ready(result) => std::task::Poll::Ready(result.ok()),
             std::task::Poll::Pending => std::task::Poll::Pending,

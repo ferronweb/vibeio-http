@@ -29,13 +29,14 @@
 #![allow(dead_code)] // consumed by the connection driver (step 15)
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::ready;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use http::{Method, Request, StatusCode, Uri, Version};
+use parking_lot::Mutex;
 
 use crate::h3::error::{H3Error, TransportError};
 use crate::h3::frame::{
@@ -522,7 +523,7 @@ impl RequestStream {
     /// field-section size limit, and frames it as HEADERS.
     fn encode_headered_byte(&mut self, lines: &[(Bytes, Bytes)]) -> Result<Bytes, StreamError> {
         {
-            let shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            let shared = self.shared.lock();
             if shared.encoder.is_none() {
                 // The peer's SETTINGS (which bound its dynamic table) has
                 // not arrived; its encoder is unusable (RFC 9204
@@ -530,7 +531,7 @@ impl RequestStream {
                 return Err(StreamError::Message);
             }
         }
-        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shared = self.shared.lock();
         let encoder = shared.encoder.as_mut().expect("encoder ensured");
         let section = encoder.encode_section(lines);
         let size = section.block.len() as u64;
@@ -550,7 +551,6 @@ impl RequestStream {
     fn decode_block(&self, block: &[u8]) -> Result<Option<Vec<(Bytes, Bytes)>>, StreamError> {
         self.shared
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .decoder
             .decode_block(block, self.stream_id, now())
             .map_err(StreamError::Qpack)
@@ -641,7 +641,7 @@ fn take_unblocked_for(
     stream_id: u64,
     cx: &mut Context<'_>,
 ) -> Option<UnblockedSection> {
-    let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let mut shared = shared.lock();
     match shared
         .unblocked
         .iter()
@@ -826,7 +826,7 @@ mod tests {
     /// moving the stream into a `Box<dyn BidiStream>`.
     struct MockBidi {
         inbound: VecDeque<Option<Bytes>>,
-        outbound: std::sync::Arc<std::sync::Mutex<VecDeque<Bytes>>>,
+        outbound: std::sync::Arc<parking_lot::Mutex<VecDeque<Bytes>>>,
         id: u64,
         reset_code: Option<u64>,
         stop_code: Option<u64>,
@@ -837,11 +837,14 @@ mod tests {
         fn new(id: u64) -> Self {
             Self::with_sink(
                 id,
-                std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
+                std::sync::Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             )
         }
 
-        fn with_sink(id: u64, outbound: std::sync::Arc<std::sync::Mutex<VecDeque<Bytes>>>) -> Self {
+        fn with_sink(
+            id: u64,
+            outbound: std::sync::Arc<parking_lot::Mutex<VecDeque<Bytes>>>,
+        ) -> Self {
             Self {
                 inbound: VecDeque::new(),
                 outbound,
@@ -883,10 +886,7 @@ mod tests {
             _cx: &mut Context<'_>,
             data: &[u8],
         ) -> Poll<Result<(), TransportError>> {
-            self.outbound
-                .lock()
-                .unwrap()
-                .push_back(Bytes::copy_from_slice(data));
+            self.outbound.lock().push_back(Bytes::copy_from_slice(data));
             Poll::Ready(Ok(()))
         }
 
@@ -966,7 +966,6 @@ mod tests {
         let section = enc.encode_section(&request_lines("POST", "/submit"));
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -980,7 +979,6 @@ mod tests {
         )]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1032,7 +1030,6 @@ mod tests {
         let section = enc.encode_section(&request_lines("GET", "/index"));
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1119,7 +1116,6 @@ mod tests {
         let section = enc.encode_section(&request_lines("PUT", "/x"));
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1127,7 +1123,6 @@ mod tests {
         let section = enc.encode_section(&[(Bytes::from_static(b"x-a"), Bytes::from_static(b"1"))]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1154,7 +1149,6 @@ mod tests {
         let section = enc.encode_section(&request_lines("GET", "/x"));
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1163,7 +1157,6 @@ mod tests {
             enc.encode_section(&[(Bytes::from_static(b":status"), Bytes::from_static(b"200"))]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1187,7 +1180,6 @@ mod tests {
         let section = enc.encode_section(&request_lines("GET", "/x"));
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1195,7 +1187,6 @@ mod tests {
         let section = enc.encode_section(&[]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1225,7 +1216,6 @@ mod tests {
         let section = enc.encode_section(&request_lines("GET", "/x"));
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1233,7 +1223,6 @@ mod tests {
         let section = enc.encode_section(&[]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1287,7 +1276,7 @@ mod tests {
         // The control plane feeds the peer's encoder stream (as it would
         // on the QPACK encoder stream).
         let unblocked = {
-            let mut shared = shared.lock().unwrap();
+            let mut shared = shared.lock();
             shared
                 .decoder
                 .feed_encoder_stream(&section.encoder_stream)
@@ -1295,7 +1284,7 @@ mod tests {
         };
         assert_eq!(unblocked.len(), 1);
         assert_eq!(unblocked[0].stream_id, 33);
-        shared.lock().unwrap().unblocked.extend(unblocked);
+        shared.lock().unblocked.extend(unblocked);
 
         let req = match request.poll_headers(&mut cx) {
             Poll::Ready(Ok(Some(request))) => request,
@@ -1314,7 +1303,7 @@ mod tests {
     #[test]
     fn send_response_encodes_headers_and_queue_encoder_stream() {
         let shared = shared_with_encoder();
-        let sink = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let sink = std::sync::Arc::new(parking_lot::Mutex::new(VecDeque::new()));
         let mut request = RequestStream::new(
             Box::new(MockBidi::with_sink(41, sink.clone())),
             shared.clone(),
@@ -1331,15 +1320,11 @@ mod tests {
 
         // The encoder produced encoder-stream instructions for the control
         // plane.
-        assert!(!shared.lock().unwrap().encoder_stream.is_empty());
+        assert!(!shared.lock().encoder_stream.is_empty());
 
         // The wire carries one HEADERS frame with a QPACK-encoded field
         // section (never empty: it encodes `:status` and the headers).
-        let outbound = sink
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("response wrote bytes");
+        let outbound = sink.lock().pop_front().expect("response wrote bytes");
         let mut decoder = FrameDecoder::new();
         decoder.extend(outbound);
         match decoder.next_frame().expect("valid frame").expect("a frame") {
@@ -1447,7 +1432,6 @@ mod tests {
         ]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1478,7 +1462,6 @@ mod tests {
         ]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1510,7 +1493,6 @@ mod tests {
         ]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1542,7 +1524,6 @@ mod tests {
         ]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1583,7 +1564,6 @@ mod tests {
         ]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
@@ -1616,7 +1596,6 @@ mod tests {
         ]);
         shared
             .lock()
-            .unwrap()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");

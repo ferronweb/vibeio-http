@@ -2,7 +2,7 @@
 //!
 //! A single connection task owns the control plane ([`control`]) and
 //! accept loops; each accepted request stream is handed to its own task
-//! through an async [`futures_util::lock::Mutex`], sharing the connection's
+//! through an async [`tokio::sync::Mutex`], sharing the connection's
 //! QPACK codecs ([`stream::SharedCodecs`]) with the driver. Requests and
 //! responses are streamed with trailers; `100 Continue` and `103 Early
 //! Hints` interim responses are supported, as are `Date` header caching
@@ -58,7 +58,7 @@ const H3_REQUEST_REJECTED: u64 = 0x010b;
 
 /// The shared handle on a request stream: the connection task, the request
 /// task, the response body, and a possible upgrade all work through it.
-type SharedRequest = Arc<futures_util::lock::Mutex<RequestStream>>;
+type SharedRequest = Arc<tokio::sync::Mutex<RequestStream>>;
 
 static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
     http::header::HeaderName::from_static("keep-alive"),
@@ -76,14 +76,14 @@ struct H3BodyState {
 }
 
 pub(crate) struct H3Body {
-    inner: futures_util::lock::Mutex<H3BodyState>,
+    inner: tokio::sync::Mutex<H3BodyState>,
 }
 
 impl H3Body {
     #[inline]
     fn new(stream: SharedRequest, send_continue_body: Option<Arc<AtomicBool>>) -> Self {
         Self {
-            inner: futures_util::lock::Mutex::new(H3BodyState {
+            inner: tokio::sync::Mutex::new(H3BodyState {
                 stream,
                 data_done: false,
                 send_continue_body,
@@ -101,14 +101,14 @@ impl Body for H3Body {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<BodyFrame<Self::Data>, Self::Error>>> {
-        let mut inner = match self.inner.lock().poll_unpin(cx) {
+        let mut inner = match std::pin::pin!(self.inner.lock()).poll_unpin(cx) {
             Poll::Ready(inner) => inner,
             Poll::Pending => return Poll::Pending,
         };
 
         if !inner.data_done {
             let done = {
-                let mut stream = match inner.stream.lock().poll_unpin(cx) {
+                let mut stream = match std::pin::pin!(inner.stream.lock()).poll_unpin(cx) {
                     Poll::Ready(stream) => stream,
                     Poll::Pending => return Poll::Pending,
                 };
@@ -133,7 +133,7 @@ impl Body for H3Body {
             }
         }
 
-        let mut stream = match inner.stream.lock().poll_unpin(cx) {
+        let mut stream = match std::pin::pin!(inner.stream.lock()).poll_unpin(cx) {
             Poll::Ready(stream) => stream,
             Poll::Pending => {
                 if let Some(scb) = inner.send_continue_body.as_ref() {
@@ -191,9 +191,9 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
 ///
 /// The control plane wakes this task (via the shared waiters map) when
 /// the SETTINGS frame arrives.
-async fn wait_for_encoder(shared: &Arc<std::sync::Mutex<SharedCodecs>>, stream_id: u64) {
+async fn wait_for_encoder(shared: &Arc<parking_lot::Mutex<SharedCodecs>>, stream_id: u64) {
     std::future::poll_fn(|cx| {
-        let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shared = shared.lock();
         if shared.encoder.is_some() {
             shared.waiters.remove(&stream_id);
             return Poll::Ready(());
@@ -219,7 +219,7 @@ async fn send_interim_response(
 /// the peer's SETTINGS first.
 async fn send_response(
     stream: &SharedRequest,
-    shared: &Arc<std::sync::Mutex<SharedCodecs>>,
+    shared: &Arc<parking_lot::Mutex<SharedCodecs>>,
     stream_id: u64,
     status: StatusCode,
     headers: &http::HeaderMap,
@@ -267,13 +267,13 @@ async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
 #[allow(clippy::type_complexity)]
 async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     stream: SharedRequest,
-    shared: Arc<std::sync::Mutex<SharedCodecs>>,
+    shared: Arc<parking_lot::Mutex<SharedCodecs>>,
     stream_id: u64,
     request_fn: Rc<F>,
     date_cache: DateCache,
     send_continue_response: bool,
     send_date_header: bool,
-    conn_close: Arc<std::sync::Mutex<Option<u64>>>,
+    conn_close: Arc<parking_lot::Mutex<Option<u64>>>,
 ) where
     F: Fn(Request<Incoming>) -> Fut,
     Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
@@ -295,7 +295,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         // matching H3 code. Stream-scoped errors are left to the transport.
         Err(err) => {
             if !err.is_stream_scoped() {
-                *conn_close.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.h3_code());
+                *conn_close.lock() = Some(err.h3_code());
             }
             return;
         }
@@ -641,8 +641,8 @@ where
             // the H3 code when it hits a connection-scoped error; the driver
             // closes the connection with that code (the request task cannot
             // itself close the QUIC connection).
-            let conn_close: Arc<std::sync::Mutex<Option<u64>>> =
-                Arc::new(std::sync::Mutex::new(None));
+            let conn_close: Arc<parking_lot::Mutex<Option<u64>>> =
+                Arc::new(parking_lot::Mutex::new(None));
             let mut ongoing: FuturesUnordered<oneshot::AsyncReceiver<()>> = FuturesUnordered::new();
             let mut cancel_fut: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
                 None;
@@ -682,7 +682,7 @@ where
             std::future::poll_fn(|cx| loop {
                 // A request-stream task hit a connection-scoped error: close
                 // the connection with the H3 code it recorded.
-                if let Some(code) = conn_close.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                if let Some(code) = conn_close.lock().take() {
                     if closing_with.is_none() {
                         closing_with = Some(code);
                         shutdown = true;
@@ -737,7 +737,7 @@ where
                 {
                     let mut instructions = Vec::new();
                     {
-                        let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut shared = shared.lock();
                         while let Some(bytes) = shared.encoder_stream.pop_front() {
                             instructions.push(bytes);
                         }
@@ -854,7 +854,7 @@ where
                         } else {
                             let (end_tx, end_rx) = oneshot::async_channel();
                             ongoing.push(end_rx);
-                            let request_stream = Arc::new(futures_util::lock::Mutex::new(
+                            let request_stream = Arc::new(tokio::sync::Mutex::new(
                                 RequestStream::new(stream, shared.clone()),
                             ));
                             let request_fn = request_fn.clone();
