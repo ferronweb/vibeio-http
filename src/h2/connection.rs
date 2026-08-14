@@ -1304,6 +1304,7 @@ where
     async fn flush(&mut self) -> std::io::Result<()> {
         if !self.out.is_empty() {
             tokio::io::AsyncWriteExt::write_all(&mut self.io, &self.out).await?;
+            let _ = tokio::io::AsyncWriteExt::flush(&mut self.io).await;
             self.out.clear();
         }
         Ok(())
