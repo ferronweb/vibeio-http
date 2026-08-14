@@ -29,6 +29,7 @@ impl QpackError {
     ///
     /// Consumed by the HTTP/3 layer and by the error-module tests that
     /// pin the `0x02xx` family against the `0x01xx` HTTP/3 family.
+    #[inline]
     pub fn code(self) -> u16 {
         match self {
             QpackError::DecompressionFailed => 0x0200,

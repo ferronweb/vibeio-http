@@ -80,6 +80,7 @@ pub(crate) enum StreamError {
 impl StreamError {
     /// The connection error code to close with, when the error is
     /// connection-scoped.
+    #[inline]
     pub(crate) fn h3_code(&self) -> u64 {
         match self {
             StreamError::Transport(TransportError::Closed { code }) => *code,
@@ -94,6 +95,7 @@ impl StreamError {
 
     /// Whether the failure is stream-scoped (a reset or stop-sending from
     /// the peer), rather than a connection error.
+    #[inline]
     pub(crate) fn is_stream_scoped(&self) -> bool {
         matches!(
             self,
@@ -103,12 +105,14 @@ impl StreamError {
 }
 
 impl From<TransportError> for StreamError {
+    #[inline]
     fn from(err: TransportError) -> Self {
         StreamError::Transport(err)
     }
 }
 
 impl std::fmt::Display for StreamError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
     }
@@ -116,6 +120,7 @@ impl std::fmt::Display for StreamError {
 
 impl std::error::Error for StreamError {}
 
+#[inline]
 fn map_frame_error(err: FrameError) -> StreamError {
     match err {
         // A malformed frame payload anywhere is H3_FRAME_ERROR.
@@ -161,6 +166,7 @@ pub(crate) struct SharedCodecs {
 
 impl SharedCodecs {
     /// Creates the codecs for a connection with the given local settings.
+    #[inline]
     pub(crate) fn new(local: &LocalSettings) -> Self {
         Self {
             decoder: Decoder::new(
@@ -180,6 +186,7 @@ impl SharedCodecs {
     ///
     /// Waking a waiter whose section is still blocked is harmless: it
     /// re-polls, finds nothing, and re-registers.
+    #[inline]
     pub(crate) fn take_waiters(&mut self) -> Vec<Waker> {
         self.waiters.drain().map(|(_, waker)| waker).collect()
     }
@@ -222,6 +229,7 @@ impl RequestStream {
     /// Wraps an accepted request stream. `stream.id()` is its QUIC stream
     /// ID, used to correlate QPACK state (blocked field sections, section
     /// acknowledgements).
+    #[inline]
     pub(crate) fn new(stream: Box<dyn BidiStream>, shared: Arc<Mutex<SharedCodecs>>) -> Self {
         let stream_id = stream.id();
         Self {
@@ -245,6 +253,7 @@ impl RequestStream {
 
     /// The QUIC stream ID of this request stream.
     #[allow(dead_code)] // consumed by the connection driver (step 15)
+    #[inline]
     pub(crate) fn id(&self) -> u64 {
         self.stream_id
     }
@@ -255,6 +264,7 @@ impl RequestStream {
     /// While the field section is blocked on a QPACK dynamic table entry,
     /// polls `Pending`; it returns once the control plane's processing of
     /// the peer's encoder stream unblocks it.
+    #[inline]
     pub(crate) fn poll_headers(
         &mut self,
         cx: &mut Context<'_>,
@@ -305,6 +315,7 @@ impl RequestStream {
     /// trailers HEADERS frame arrived); any buffered trailers are then
     /// available via [`RequestStream::poll_recv_trailers`]. A frame after
     /// the trailers is `H3_FRAME_UNEXPECTED`.
+    #[inline]
     pub(crate) fn poll_recv_data(
         &mut self,
         cx: &mut Context<'_>,
@@ -360,6 +371,7 @@ impl RequestStream {
     ///
     /// `Ok(None)` when there were none. Any known frame after the trailers
     /// is `H3_FRAME_UNEXPECTED` (RFC 9114 Section 4.1).
+    #[inline]
     pub(crate) fn poll_recv_trailers(
         &mut self,
         cx: &mut Context<'_>,
@@ -423,6 +435,7 @@ impl RequestStream {
     /// `SETTINGS_MAX_FIELD_SECTION_SIZE`. Informational responses (1xx:
     /// 100 Continue, 103 Early Hints) may precede the final one; only one
     /// final response may be sent.
+    #[inline]
     pub(crate) fn poll_send_response(
         &mut self,
         cx: &mut Context<'_>,
@@ -456,6 +469,7 @@ impl RequestStream {
     }
 
     /// Writes one DATA frame with `data`.
+    #[inline]
     pub(crate) fn poll_send_data(
         &mut self,
         cx: &mut Context<'_>,
@@ -467,6 +481,7 @@ impl RequestStream {
     }
 
     /// Writes the trailers HEADERS frame. No DATA may follow.
+    #[inline]
     pub(crate) fn poll_send_trailers(
         &mut self,
         cx: &mut Context<'_>,
@@ -491,6 +506,7 @@ impl RequestStream {
     }
 
     /// Finishes the response (`FIN`), after all queued data was written.
+    #[inline]
     pub(crate) fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
         ready!(self.poll_write(cx, Bytes::new())?);
         self.stream.poll_finish(cx).map_err(StreamError::Transport)
@@ -498,6 +514,7 @@ impl RequestStream {
 
     /// Resets the sending side of the stream with `code` (RFC 9114
     /// Section 4.1), discarding buffered data.
+    #[inline]
     pub(crate) fn poll_reset(
         &mut self,
         cx: &mut Context<'_>,
@@ -509,6 +526,7 @@ impl RequestStream {
     }
 
     /// Stops the peer from sending on the stream with `code`.
+    #[inline]
     pub(crate) fn poll_stop_sending(
         &mut self,
         cx: &mut Context<'_>,
@@ -521,6 +539,7 @@ impl RequestStream {
 
     /// Encodes a field section with the shared encoder, enforces the peer's
     /// field-section size limit, and frames it as HEADERS.
+    #[inline]
     fn encode_headered_byte(&mut self, lines: &[(Bytes, Bytes)]) -> Result<Bytes, StreamError> {
         {
             let shared = self.shared.lock();
@@ -548,6 +567,7 @@ impl RequestStream {
 
     /// Decodes one encoded field section with the shared decoder, marking
     /// it blocked when a dynamic table entry is missing.
+    #[inline]
     fn decode_block(&self, block: &[u8]) -> Result<Option<Vec<(Bytes, Bytes)>>, StreamError> {
         self.shared
             .lock()
@@ -560,6 +580,7 @@ impl RequestStream {
     /// frame is `H3_FRAME_UNEXPECTED` (RFC 9114 Section 4.1).
     ///
     /// `Ok(Some(()))` when the stream ended cleanly after the trailers.
+    #[inline]
     fn poll_after_trailers(
         &mut self,
         cx: &mut Context<'_>,
@@ -580,6 +601,7 @@ impl RequestStream {
     /// Reads frames until one is available (buffering chunks into the
     /// frame decoder, the way a real transport delivers them). A stream
     /// that ends mid-frame is `H3_FRAME_ERROR`.
+    #[inline]
     fn poll_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Frame>, StreamError>> {
         loop {
             // RFC 9114 Sections 7.2.3-7.2.7: control-plane frames (CANCEL_PUSH,
@@ -618,6 +640,7 @@ impl RequestStream {
 
     /// Queues `bytes` behind any bytes already waiting on the transport
     /// and drains the queue.
+    #[inline]
     fn poll_write(&mut self, cx: &mut Context<'_>, bytes: Bytes) -> Poll<Result<(), StreamError>> {
         if !bytes.is_empty() {
             self.send_buf.push_back(bytes);
@@ -636,6 +659,7 @@ impl RequestStream {
 }
 
 /// Takes the oldest unblocked field section for `stream_id`.
+#[inline]
 fn take_unblocked_for(
     shared: &Arc<Mutex<SharedCodecs>>,
     stream_id: u64,
@@ -658,6 +682,7 @@ fn take_unblocked_for(
 }
 
 /// The monotonic clock the QPACK decoder records blocked sections with.
+#[inline]
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -674,6 +699,7 @@ fn now() -> u64 {
 ///   requires only `:authority`, plus `:scheme` and `:protocol` for an
 ///   extended CONNECT; a plain CONNECT must not carry `:scheme`/`:path`);
 /// - `:protocol` is only valid on CONNECT requests (RFC 9220).
+#[inline]
 fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamError> {
     let mut method = None;
     let mut scheme = None;
@@ -748,6 +774,7 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
     Ok(request)
 }
 
+#[inline]
 fn take_pseudo(slot: &mut Option<Bytes>, value: Bytes) -> Result<(), StreamError> {
     if slot.is_some() {
         // RFC 9114 Section 4.1: duplicate pseudo-headers are invalid.
@@ -757,6 +784,7 @@ fn take_pseudo(slot: &mut Option<Bytes>, value: Bytes) -> Result<(), StreamError
     Ok(())
 }
 
+#[inline]
 fn build_uri(
     connect: bool,
     scheme: &Option<Bytes>,
@@ -795,6 +823,7 @@ fn build_uri(
 
 /// Converts a decoded header list into a `HeaderMap`; pseudo-headers are
 /// invalid in a trailer section (RFC 9114 Section 4.1).
+#[inline]
 fn header_map(headers: Vec<(Bytes, Bytes)>) -> Result<HeaderMap, StreamError> {
     let mut map = HeaderMap::with_capacity(headers.len());
     for (name, value) in headers {
@@ -817,6 +846,7 @@ mod tests {
     use futures_util::task::noop_waker_ref;
     use http::header::CONTENT_TYPE;
 
+    #[inline]
     fn cx() -> Context<'static> {
         Context::from_waker(noop_waker_ref())
     }
@@ -834,6 +864,7 @@ mod tests {
     }
 
     impl MockBidi {
+        #[inline]
         fn new(id: u64) -> Self {
             Self::with_sink(
                 id,
@@ -841,6 +872,7 @@ mod tests {
             )
         }
 
+        #[inline]
         fn with_sink(
             id: u64,
             outbound: std::sync::Arc<parking_lot::Mutex<VecDeque<Bytes>>>,
@@ -855,16 +887,19 @@ mod tests {
             }
         }
 
+        #[inline]
         fn feed(&mut self, bytes: &[u8]) {
             self.inbound.push_back(Some(Bytes::copy_from_slice(bytes)));
         }
 
+        #[inline]
         fn finish(&mut self) {
             self.inbound.push_back(None);
         }
     }
 
     impl crate::h3::transport::RecvStream for MockBidi {
+        #[inline]
         fn poll_recv(
             &mut self,
             _cx: &mut Context<'_>,
@@ -875,12 +910,14 @@ mod tests {
             }
         }
 
+        #[inline]
         fn id(&self) -> u64 {
             self.id
         }
     }
 
     impl crate::h3::transport::SendStream for MockBidi {
+        #[inline]
         fn poll_send(
             &mut self,
             _cx: &mut Context<'_>,
@@ -890,11 +927,13 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
             self.finished = true;
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_reset(
             &mut self,
             _cx: &mut Context<'_>,
@@ -904,6 +943,7 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_stop_sending(
             &mut self,
             _cx: &mut Context<'_>,
@@ -916,6 +956,7 @@ mod tests {
 
     impl crate::h3::transport::BidiStream for MockBidi {}
 
+    #[inline]
     fn local_settings() -> LocalSettings {
         LocalSettings {
             qpack_max_table_capacity: 4096,
@@ -926,6 +967,7 @@ mod tests {
 
     /// A shared codec pair where the encoder is already usable (the peer's
     /// SETTINGS arrived).
+    #[inline]
     fn shared_with_encoder() -> Arc<Mutex<SharedCodecs>> {
         let mut shared = SharedCodecs::new(&local_settings());
         shared.encoder = Some(Encoder::new(4096, true));
@@ -934,6 +976,7 @@ mod tests {
 
     /// Returns the encoder for hand-encoding wire blocks, plus the shared
     /// handle.
+    #[inline]
     fn shared_and_peer_encoder() -> (Arc<Mutex<SharedCodecs>>, Encoder) {
         let mut shared = SharedCodecs::new(&local_settings());
         shared.encoder = Some(Encoder::new(4096, true));
@@ -941,6 +984,7 @@ mod tests {
         (Arc::new(Mutex::new(shared)), peer_encoder)
     }
 
+    #[inline]
     fn request_lines(method: &str, path: &str) -> Vec<(Bytes, Bytes)> {
         vec![
             (

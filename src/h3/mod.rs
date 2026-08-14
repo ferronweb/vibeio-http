@@ -191,6 +191,7 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
 ///
 /// The control plane wakes this task (via the shared waiters map) when
 /// the SETTINGS frame arrives.
+#[inline]
 async fn wait_for_encoder(shared: &Arc<parking_lot::Mutex<SharedCodecs>>, stream_id: u64) {
     std::future::poll_fn(|cx| {
         let mut shared = shared.lock();
@@ -205,6 +206,7 @@ async fn wait_for_encoder(shared: &Arc<parking_lot::Mutex<SharedCodecs>>, stream
 }
 
 /// Writes an interim (1xx) response HEADERS frame.
+#[inline]
 async fn send_interim_response(
     stream: &SharedRequest,
     status: StatusCode,
@@ -217,6 +219,7 @@ async fn send_interim_response(
 
 /// Writes the response HEADERS frame for `status`/`headers`, waiting for
 /// the peer's SETTINGS first.
+#[inline]
 async fn send_response(
     stream: &SharedRequest,
     shared: &Arc<parking_lot::Mutex<SharedCodecs>>,
@@ -233,6 +236,7 @@ async fn send_response(
 }
 
 /// Writes one response DATA frame.
+#[inline]
 async fn send_data(stream: &SharedRequest, data: Bytes) -> Result<(), std::io::Error> {
     let mut guard = stream.lock().await;
     std::future::poll_fn(|cx| guard.poll_send_data(cx, data.clone()))
@@ -241,6 +245,7 @@ async fn send_data(stream: &SharedRequest, data: Bytes) -> Result<(), std::io::E
 }
 
 /// Writes the response trailers HEADERS frame.
+#[inline]
 async fn send_trailers(
     stream: &SharedRequest,
     trailers: &http::HeaderMap,
@@ -252,6 +257,7 @@ async fn send_trailers(
 }
 
 /// Finishes the response (`FIN`).
+#[inline]
 async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
     let mut guard = stream.lock().await;
     std::future::poll_fn(|cx| guard.poll_finish(cx))

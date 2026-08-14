@@ -72,6 +72,7 @@ impl Connection {
     /// The given connection must already have completed its handshake (for
     /// example `Connecting::await` on the client side, or awaiting an
     /// `Incoming` on the server side).
+    #[inline]
     pub fn new(conn: quinn::Connection) -> Self {
         let accept_bi = Box::pin(stream::unfold(conn.clone(), |conn| async move {
             Some((conn.accept_bi().await, conn))
@@ -92,12 +93,14 @@ impl Connection {
     /// Exposes the raw `quinn` close reason; the transport traits only report
     /// a closed connection via [`Accept::poll_accept`], so this is used to
     /// observe the application close code directly (diagnostics, tests).
+    #[inline]
     pub fn close_reason(&self) -> Option<quinn::ConnectionError> {
         self.conn.close_reason()
     }
 }
 
 impl OpenStreams for Connection {
+    #[inline]
     fn poll_open_uni(
         &mut self,
         cx: &mut Context<'_>,
@@ -117,6 +120,7 @@ impl OpenStreams for Connection {
 }
 
 impl Accept for Connection {
+    #[inline]
     fn poll_accept(
         &mut self,
         cx: &mut Context<'_>,
@@ -134,6 +138,7 @@ impl Accept for Connection {
         }
     }
 
+    #[inline]
     fn poll_accept_uni(
         &mut self,
         cx: &mut Context<'_>,
@@ -147,6 +152,7 @@ impl Accept for Connection {
 }
 
 impl transport::Connection for Connection {
+    #[inline]
     fn stream_id_stream(&self) -> u64 {
         // RFC 9000 Section 2.1: the least significant bits encode the
         // initiator and directionality; the first client-initiated
@@ -157,10 +163,12 @@ impl transport::Connection for Connection {
         }
     }
 
+    #[inline]
     fn is_handshake_complete(&self) -> bool {
         self.conn.handshake_data().is_some()
     }
 
+    #[inline]
     fn poll_shutdown(
         &mut self,
         _cx: &mut Context<'_>,
@@ -189,6 +197,7 @@ pub(crate) struct Send {
 }
 
 impl Send {
+    #[inline]
     fn new(stream: quinn::SendStream) -> Self {
         Self {
             stream,
@@ -196,10 +205,12 @@ impl Send {
         }
     }
 
+    #[inline]
     fn id(&self) -> u64 {
         self.stream.id().into()
     }
 
+    #[inline]
     fn poll_send(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<Result<(), TransportError>> {
         if !data.is_empty() {
             self.buf.extend_from_slice(data);
@@ -219,6 +230,7 @@ impl Send {
         }
     }
 
+    #[inline]
     fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
         // quinn's `finish` is synchronous; its only failure mode is an
         // already-finished or reset stream, which is not an error for the
@@ -227,6 +239,7 @@ impl Send {
         Poll::Ready(Ok(()))
     }
 
+    #[inline]
     fn poll_reset(&mut self, _cx: &mut Context<'_>, code: u64) -> Poll<Result<(), TransportError>> {
         let code = match quinn::VarInt::from_u64(code) {
             Ok(code) => code,
@@ -259,6 +272,7 @@ pub(crate) struct Recv {
 }
 
 impl Recv {
+    #[inline]
     fn new(stream: quinn::RecvStream) -> Self {
         Self {
             stream: Some(stream),
@@ -266,10 +280,12 @@ impl Recv {
         }
     }
 
+    #[inline]
     fn id(&self) -> u64 {
         self.stream.as_ref().map_or(0, |stream| stream.id().into())
     }
 
+    #[inline]
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, TransportError>> {
         if let Some(mut stream) = self.stream.take() {
             self.read_chunk_fut.set(async move {
@@ -286,6 +302,7 @@ impl Recv {
         )
     }
 
+    #[inline]
     fn stop_sending(&mut self, code: u64) -> Result<(), TransportError> {
         let code = match quinn::VarInt::from_u64(code) {
             Ok(code) => code,
@@ -305,28 +322,34 @@ pub(crate) struct BidiStream {
 }
 
 impl RecvStreamTrait for BidiStream {
+    #[inline]
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, TransportError>> {
         self.recv.poll_recv(cx)
     }
 
+    #[inline]
     fn id(&self) -> u64 {
         self.send.id()
     }
 }
 
 impl SendStreamTrait for BidiStream {
+    #[inline]
     fn poll_send(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<Result<(), TransportError>> {
         self.send.poll_send(cx, data)
     }
 
+    #[inline]
     fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
         self.send.poll_finish(cx)
     }
 
+    #[inline]
     fn poll_reset(&mut self, cx: &mut Context<'_>, code: u64) -> Poll<Result<(), TransportError>> {
         self.send.poll_reset(cx, code)
     }
 
+    #[inline]
     fn poll_stop_sending(
         &mut self,
         _cx: &mut Context<'_>,
@@ -357,6 +380,7 @@ pub(crate) enum UniStream {
 }
 
 impl RecvStreamTrait for UniStream {
+    #[inline]
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, TransportError>> {
         match self {
             UniStream::Recv(recv) => recv.poll_recv(cx),
@@ -364,6 +388,7 @@ impl RecvStreamTrait for UniStream {
         }
     }
 
+    #[inline]
     fn id(&self) -> u64 {
         match self {
             UniStream::Send(send) => send.id(),
@@ -373,6 +398,7 @@ impl RecvStreamTrait for UniStream {
 }
 
 impl SendStreamTrait for UniStream {
+    #[inline]
     fn poll_send(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<Result<(), TransportError>> {
         match self {
             UniStream::Send(send) => send.poll_send(cx, data),
@@ -380,6 +406,7 @@ impl SendStreamTrait for UniStream {
         }
     }
 
+    #[inline]
     fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
         match self {
             UniStream::Send(send) => send.poll_finish(cx),
@@ -387,6 +414,7 @@ impl SendStreamTrait for UniStream {
         }
     }
 
+    #[inline]
     fn poll_reset(&mut self, cx: &mut Context<'_>, code: u64) -> Poll<Result<(), TransportError>> {
         match self {
             UniStream::Send(send) => send.poll_reset(cx, code),
@@ -394,6 +422,7 @@ impl SendStreamTrait for UniStream {
         }
     }
 
+    #[inline]
     fn poll_stop_sending(
         &mut self,
         _cx: &mut Context<'_>,
@@ -408,6 +437,7 @@ impl SendStreamTrait for UniStream {
 
 impl UniStreamTrait for UniStream {}
 
+#[inline]
 fn map_connection_error(err: quinn::ConnectionError) -> TransportError {
     match err {
         quinn::ConnectionError::ApplicationClosed(close) => TransportError::Closed {
@@ -420,6 +450,7 @@ fn map_connection_error(err: quinn::ConnectionError) -> TransportError {
     }
 }
 
+#[inline]
 fn map_read_error(err: quinn::ReadError) -> TransportError {
     match err {
         quinn::ReadError::Reset(code) => TransportError::Reset {
@@ -434,6 +465,7 @@ fn map_read_error(err: quinn::ReadError) -> TransportError {
     }
 }
 
+#[inline]
 fn map_write_error(err: quinn::WriteError) -> TransportError {
     match err {
         quinn::WriteError::Stopped(code) => TransportError::Stopped {

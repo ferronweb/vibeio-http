@@ -160,6 +160,7 @@ mod tests {
     }
 
     impl RecvStream for Mock {
+        #[inline]
         fn poll_recv(
             &mut self,
             _cx: &mut Context<'_>,
@@ -167,12 +168,14 @@ mod tests {
             Poll::Ready(Ok(self.data.take()))
         }
 
+        #[inline]
         fn id(&self) -> u64 {
             0
         }
     }
 
     impl SendStream for Mock {
+        #[inline]
         fn poll_send(
             &mut self,
             _cx: &mut Context<'_>,
@@ -181,10 +184,12 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_reset(
             &mut self,
             _cx: &mut Context<'_>,
@@ -193,6 +198,7 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_stop_sending(
             &mut self,
             _cx: &mut Context<'_>,

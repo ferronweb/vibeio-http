@@ -44,6 +44,7 @@ pub enum TransportError {
 }
 
 impl fmt::Display for TransportError {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TransportError::Closed { code } => write!(f, "connection closed with code {code:#x}"),
@@ -59,6 +60,7 @@ impl fmt::Display for TransportError {
 impl Error for TransportError {}
 
 impl From<TransportError> for io::Error {
+    #[inline]
     fn from(err: TransportError) -> io::Error {
         match err {
             TransportError::Closed { .. } => io::Error::new(io::ErrorKind::ConnectionAborted, err),
@@ -183,6 +185,7 @@ impl H3Error {
 }
 
 impl fmt::Display for H3Error {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?} ({:#06x})", self, self.code())
     }
@@ -191,6 +194,7 @@ impl fmt::Display for H3Error {
 impl Error for H3Error {}
 
 impl From<H3Error> for io::Error {
+    #[inline]
     fn from(err: H3Error) -> io::Error {
         io::Error::other(err)
     }

@@ -49,6 +49,7 @@ pub(crate) struct DynamicTable {
 }
 
 impl std::fmt::Debug for DynamicTable {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DynamicTable")
             .field("entries", &self.entries.len())
@@ -78,8 +79,8 @@ impl DynamicTable {
     }
 
     /// The current sum of entry sizes.
-    #[inline]
     #[cfg(test)]
+    #[inline]
     pub(crate) fn size(&self) -> u64 {
         self.size
     }
@@ -178,6 +179,7 @@ impl DynamicTable {
     ///
     /// Returns the entry's absolute index; entries are matched newest first
     /// (RFC 9204 Section 3.2.5.1).
+    #[inline]
     pub(crate) fn find(&self, name: &[u8], value: &[u8]) -> Option<u64> {
         self.find_name(name)
             .filter(|&abs| self.get_absolute(abs).is_some_and(|(_, v)| v == value))
@@ -186,6 +188,7 @@ impl DynamicTable {
     /// Finds the most recently inserted entry whose name matches `name`.
     ///
     /// Returns the entry's absolute index.
+    #[inline]
     pub(crate) fn find_name(&self, name: &[u8]) -> Option<u64> {
         self.entries
             .iter()
@@ -199,6 +202,7 @@ impl DynamicTable {
     /// Returns [`InsertError::EntryTooLarge`] if the entry does not fit in
     /// the table capacity at all; on success the entry receives absolute
     /// index `inserted()`.
+    #[inline]
     pub(crate) fn insert(&mut self, name: Bytes, value: Bytes) -> Result<(), InsertError> {
         let entry_size = Self::entry_size(&name, &value);
         if entry_size > self.capacity {
@@ -274,6 +278,7 @@ impl DynamicTable {
 mod tests {
     use super::*;
 
+    #[inline]
     fn insert(table: &mut DynamicTable, name: &str, value: &str) -> Result<(), InsertError> {
         table.insert(
             Bytes::copy_from_slice(name.as_bytes()),

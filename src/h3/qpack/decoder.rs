@@ -118,6 +118,7 @@ impl Decoder {
     /// Creates a decoder that advertised `max_capacity` in
     /// SETTINGS_QPACK_MAX_TABLE_CAPACITY and `max_blocked_streams` in
     /// SETTINGS_QPACK_BLOCKED_STREAMS.
+    #[inline]
     pub fn new(max_capacity: u64, max_blocked_streams: usize) -> Self {
         Self {
             dynamic: DynamicTable::new(0),
@@ -151,6 +152,7 @@ impl Decoder {
     }
 
     /// Takes the accumulated decoder stream instructions.
+    #[inline]
     pub fn take_decoder_stream(&mut self) -> Bytes {
         Bytes::from(std::mem::take(&mut self.decoder_stream))
     }
@@ -164,6 +166,7 @@ impl Decoder {
     /// instructions are not otherwise acted upon: this decoder emits its own
     /// decoder-stream instructions and never tracks the peer's
     /// acknowledgements, so it only needs to validate what the peer sends.
+    #[inline]
     pub fn feed_decoder_stream(&mut self, buf: &[u8]) -> Result<(), QpackError> {
         let mut off = 0;
         while off < buf.len() {
@@ -199,6 +202,7 @@ impl Decoder {
     /// in arrival order. The Section Acknowledgment for each is queued in
     /// the decoder stream, together with a coalesced Insert Count Increment
     /// when the table grew beyond the acknowledged count.
+    #[inline]
     pub fn feed_encoder_stream(&mut self, buf: &[u8]) -> Result<Vec<UnblockedSection>, QpackError> {
         let mut off = 0;
         while off < buf.len() {
@@ -315,6 +319,7 @@ impl Decoder {
     /// order are never decoded early: a section on a stream with buffered
     /// blocked sections joins the queue even when it could be decoded
     /// already (RFC 9204 Section 2.2.1 requires in-order processing).
+    #[inline]
     pub fn decode_block(
         &mut self,
         buf: &[u8],
@@ -347,6 +352,7 @@ impl Decoder {
     /// Notifies that `stream_id` was reset or abandoned: buffered blocked
     /// sections for it are dropped and a Stream Cancellation instruction is
     /// queued (RFC 9204 Section 2.2.2.2). Returns the instruction.
+    #[inline]
     pub fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
         self.blocked.retain(|b| b.stream_id != stream_id);
         let mut out = Vec::new();
@@ -358,6 +364,7 @@ impl Decoder {
     /// Drops blocked sections older than `max_age` in the caller's clock
     /// units, queueing one Stream Cancellation per affected stream. Returns
     /// the instructions.
+    #[inline]
     pub fn expire_blocked(&mut self, now: u64, max_age: u64) -> Bytes {
         let mut out = Vec::new();
         let mut cancelled = Vec::new();
@@ -376,6 +383,7 @@ impl Decoder {
     /// (immediate or retried from the blocked queue), validating that the
     /// announced Required Insert Count equals the largest referenced
     /// absolute index plus one (RFC 9204 Section 2.1.2).
+    #[inline]
     fn decode_ready(&self, buf: &[u8]) -> Result<Vec<(Bytes, Bytes)>, QpackError> {
         let (ric, base, mut off) = self.read_prefix(buf)?;
         let mut headers = Vec::new();
@@ -461,6 +469,7 @@ impl Decoder {
     /// Parses the Encoded Field Section Prefix (RFC 9204 Section 4.5.1):
     /// the Required Insert Count and the Base. Returns both and the number
     /// of octets consumed.
+    #[inline]
     fn read_prefix(&self, buf: &[u8]) -> Result<(u64, u64, usize), QpackError> {
         // Required Insert Count (4.5.1.1): 8-bit prefix; 0 stays 0, otherwise
         // it was wrapped modulo 2 * MaxEntries, where MaxEntries =
@@ -514,6 +523,7 @@ impl Decoder {
     /// carrying the Huffman bit (its `prefix_bits - 1` bit) and the length
     /// prefix; for name strings it is the field line's or instruction's
     /// first octet, which pairs with the name length prefix.
+    #[inline]
     fn read_string(
         &self,
         buf: &[u8],
@@ -550,6 +560,7 @@ impl Decoder {
     /// rules of RFC 9204 Sections 2.1.1 and 3.2.2: entries with an absolute
     /// index at or above the Known Received Count are not evictable, so an
     /// insert that would evict them is an encoder error.
+    #[inline]
     fn insert_entry(&mut self, name: Bytes, value: Bytes) -> Result<(), QpackError> {
         let size = DynamicTable::entry_size(&name, &value);
         let evicted = self.dynamic.would_evict(size);
@@ -576,11 +587,13 @@ impl Decoder {
     }
 
     /// Whether `stream_id` has buffered blocked sections.
+    #[inline]
     fn stream_has_blocked(&self, stream_id: u64) -> bool {
         self.blocked.iter().any(|b| b.stream_id == stream_id)
     }
 
     /// The number of distinct streams with buffered blocked sections.
+    #[inline]
     fn blocked_streams(&self) -> usize {
         let mut streams: Vec<u64> = Vec::new();
         for b in &self.blocked {
@@ -616,6 +629,7 @@ mod tests {
     use super::*;
     use crate::h3::qpack::encoder::Encoder;
 
+    #[inline]
     fn hdr(name: &str, value: &str) -> (Bytes, Bytes) {
         (
             Bytes::copy_from_slice(name.as_bytes()),
@@ -623,6 +637,7 @@ mod tests {
         )
     }
 
+    #[inline]
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }

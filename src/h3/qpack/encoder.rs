@@ -86,6 +86,7 @@ pub struct Encoder {
 impl Encoder {
     /// Creates an encoder bound to a decoder that advertised the given
     /// `max_capacity` in SETTINGS_QPACK_MAX_TABLE_CAPACITY.
+    #[inline]
     pub fn new(max_capacity: u64, huffman: bool) -> Self {
         Self {
             dynamic: DynamicTable::new(0),
@@ -106,6 +107,7 @@ impl Encoder {
     /// The dynamic table is used only when the decoder allows a capacity of
     /// at least one entry (RFC 9204 Section 3.2.3): a maximum capacity below
     /// 32 bytes cannot hold any entry and disables the dynamic table.
+    #[inline]
     pub fn encode_section(&mut self, headers: &[(Bytes, Bytes)]) -> EncodedSection {
         self.encode_section_with_base(headers, self.dynamic.inserted())
     }
@@ -117,6 +119,7 @@ impl Encoder {
         self.dynamic.inserted()
     }
 
+    #[inline]
     fn encode_section_with_base(
         &mut self,
         headers: &[(Bytes, Bytes)],
@@ -239,6 +242,7 @@ impl Encoder {
     }
 
     /// Encodes the Required Insert Count and the Base (RFC 9204 4.5.1).
+    #[inline]
     fn encode_prefix(&self, out: &mut Vec<u8>, ric: u64, base: u64) {
         // Required Insert Count (4.5.1.1): 0 stays 0, otherwise it is wrapped
         // modulo 2 * MaxEntries, where MaxEntries = floor(MaxCapacity / 32).
@@ -259,6 +263,7 @@ impl Encoder {
     }
 
     /// Encodes an indexed reference to a dynamic table entry.
+    #[inline]
     fn encode_indexed(
         &self,
         abs: u64,
@@ -279,6 +284,7 @@ impl Encoder {
     }
 
     /// Encodes a literal field line with a dynamic name reference (T=0).
+    #[inline]
     fn encode_literal_with_name_ref(
         &self,
         abs: u64,
@@ -296,6 +302,7 @@ impl Encoder {
     }
 
     /// Encodes a literal field line with a post-Base name reference (4.5.5).
+    #[inline]
     fn encode_literal_post_base_name_ref(
         &self,
         abs: u64,
@@ -312,6 +319,7 @@ impl Encoder {
     }
 
     /// Encodes a literal field line with a static name reference (T=1).
+    #[inline]
     fn encode_literal_with_static_name_ref(&self, idx: usize, value: &[u8], block: &mut Vec<u8>) {
         integer::encode(block, idx as u64, 4, LITERAL_NAME_REF | 0x10);
         self.push_string(block, value, 8, 0);
@@ -319,6 +327,7 @@ impl Encoder {
 
     /// Encodes a literal field line with a literal name (4.5.6), preferring a
     /// static name reference when one exists.
+    #[inline]
     fn encode_literal(&self, name: &[u8], value: &[u8], sensitive: bool, block: &mut Vec<u8>) {
         if let Some(idx) = static_table::find_name(name) {
             integer::encode(
@@ -343,6 +352,7 @@ impl Encoder {
     /// `header` carries the bits preceding the string, the Huffman flag is
     /// set when Huffman encoding is shorter, and the length is encoded with
     /// an (N-1)-bit prefix.
+    #[inline]
     fn push_string(&self, out: &mut Vec<u8>, value: &[u8], prefix: u8, header: u8) {
         let huffman_bits = huffman::encoded_len(value);
         let huffman = self.huffman && huffman_bits < value.len() * 8;
@@ -367,6 +377,7 @@ impl Encoder {
     /// Inserts an entry with a literal name on the encoder stream (4.3.3)
     /// and mirrors it in the local table. Returns the instruction, or `None`
     /// when the entry does not fit in the dynamic table.
+    #[inline]
     pub(crate) fn insert_literal(&mut self, name: &[u8], value: &[u8]) -> Option<Bytes> {
         if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
             return None;
@@ -386,6 +397,7 @@ impl Encoder {
     /// preferring the dynamic table (T=0) then the static table (T=1), and
     /// mirrors it in the local table. Returns the instruction, or `None`
     /// when the name is not indexed anywhere or the entry does not fit.
+    #[inline]
     pub(crate) fn insert_with_name_ref(&mut self, name: &[u8], value: &[u8]) -> Option<Bytes> {
         if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
             return None;
@@ -418,6 +430,7 @@ impl Encoder {
     /// Duplicates the entry at the given relative index (4.3.4) and mirrors
     /// it in the local table. Returns the instruction, or `None` when the
     /// index is out of range or the copy does not fit.
+    #[inline]
     pub(crate) fn duplicate(&mut self, relative: u64) -> Option<Bytes> {
         if relative >= self.dynamic.len() as u64 {
             return None;
@@ -441,6 +454,7 @@ impl Encoder {
     /// Sets the dynamic table capacity (4.3.1), evicting as needed. Returns
     /// the instruction, or `None` when the capacity is unchanged or exceeds
     /// the decoder's maximum.
+    #[inline]
     pub fn set_capacity(&mut self, capacity: u64) -> Option<Bytes> {
         if capacity > self.max_capacity || capacity == self.dynamic.capacity() {
             return None;
@@ -456,6 +470,7 @@ impl Encoder {
 mod tests {
     use super::*;
 
+    #[inline]
     fn hdr(name: &str, value: &str) -> (Bytes, Bytes) {
         (
             Bytes::copy_from_slice(name.as_bytes()),
@@ -463,6 +478,7 @@ mod tests {
         )
     }
 
+    #[inline]
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }

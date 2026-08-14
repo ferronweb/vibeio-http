@@ -34,23 +34,27 @@ impl PeerSettings {
     /// The peer's `SETTINGS_QPACK_MAX_TABLE_CAPACITY`: the dynamic table
     /// capacity our encoder may use on its encoder stream (RFC 9204
     /// Section 5).
+    #[inline]
     pub fn qpack_max_table_capacity(&self) -> u64 {
         self.qpack_max_table_capacity
     }
 
     /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE`: the largest field
     /// section it will accept, or `None` when unlimited.
+    #[inline]
     pub fn max_field_section_size(&self) -> Option<u64> {
         self.max_field_section_size
     }
 
     /// The peer's `SETTINGS_QPACK_BLOCKED_STREAMS`: how many of its field
     /// sections may block waiting for dynamic table entries.
+    #[inline]
     pub fn qpack_blocked_streams(&self) -> u64 {
         self.qpack_blocked_streams
     }
 
     /// The peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
+    #[inline]
     pub fn enable_connect_protocol(&self) -> bool {
         self.enable_connect_protocol
     }
@@ -58,6 +62,7 @@ impl PeerSettings {
     /// Overlays the values of a received SETTINGS frame onto these
     /// settings. Unknown identifiers are ignored (their grease handling is
     /// the frame codec's); known ones replace the previous values.
+    #[inline]
     pub fn apply(&mut self, settings: &FrameSettings) {
         if let Some(v) = settings.get(SETTINGS_QPACK_MAX_TABLE_CAPACITY) {
             self.qpack_max_table_capacity = v;
@@ -101,6 +106,7 @@ impl LocalSettings {
     ///
     /// Includes a reserved (grease) identifier, as RFC 9114 Section
     /// 7.2.4.1 recommends; receivers must ignore it.
+    #[inline]
     pub fn to_frame(&self) -> FrameSettings {
         debug_assert!(
             self.qpack_max_table_capacity < (1 << 30),

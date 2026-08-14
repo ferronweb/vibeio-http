@@ -33,6 +33,7 @@ use crate::h3::stream::{RequestStream, StreamError};
 /// bytes the peer keeps sending) through the stream's receive path; the
 /// returned task writes the consumer's output on the send path until the
 /// consumer closes it.
+#[inline]
 pub(super) fn pair(inner: Arc<Mutex<RequestStream>>) -> (H3Upgraded, UpgradedSendStreamTask) {
     let (tx, rx) = kanal::bounded_async(1);
     let (error_tx, error_rx) = oneshot::async_channel();
@@ -160,6 +161,7 @@ pub(super) struct UpgradedSendStreamTask {
 
 impl UpgradedSendStreamTask {
     /// One send-data step: consumes `data` on the shared request stream.
+    #[inline]
     async fn send_data(inner: Arc<Mutex<RequestStream>>, data: Bytes) -> Result<(), StreamError> {
         let mut guard = inner.lock().await;
         // `Bytes::clone` is a refcount bump; the peer's flow control shows up
@@ -168,6 +170,7 @@ impl UpgradedSendStreamTask {
     }
 
     /// Finishes the send half (`FIN`) once the consumer closed its write side.
+    #[inline]
     async fn finish(inner: Arc<Mutex<RequestStream>>) -> Result<(), StreamError> {
         let mut guard = inner.lock().await;
         std::future::poll_fn(|cx| guard.poll_finish(cx)).await

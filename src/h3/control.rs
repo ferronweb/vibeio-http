@@ -88,6 +88,7 @@ pub(crate) enum ControlError {
 
 impl ControlError {
     /// The connection error code to close with.
+    #[inline]
     pub(crate) fn h3_code(&self) -> u64 {
         match self {
             ControlError::Transport(_) => H3Error::GeneralProtocol.code(),
@@ -104,12 +105,14 @@ impl ControlError {
 }
 
 impl From<TransportError> for ControlError {
+    #[inline]
     fn from(err: TransportError) -> Self {
         ControlError::Transport(err)
     }
 }
 
 impl std::fmt::Display for ControlError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
     }
@@ -117,6 +120,7 @@ impl std::fmt::Display for ControlError {
 
 impl std::error::Error for ControlError {}
 
+#[inline]
 fn map_frame_error(err: FrameError) -> ControlError {
     match err {
         FrameError::Frame => ControlError::Frame,
@@ -192,6 +196,7 @@ impl ControlStreams {
     /// Creates the control plane for a connection with the given local
     /// settings. The QPACK decoder is sized by them; nothing is sent until
     /// [`ControlStreams::poll_init`].
+    #[inline]
     pub(crate) fn new(local: LocalSettings) -> Self {
         let shared = Arc::new(Mutex::new(SharedCodecs::new(&local)));
         Self {
@@ -217,6 +222,7 @@ impl ControlStreams {
 
     /// The peer's settings once its SETTINGS frame arrived (defaults
     /// before that).
+    #[inline]
     pub(crate) fn peer_settings(&self) -> &PeerSettings {
         &self.peer
     }
@@ -226,27 +232,32 @@ impl ControlStreams {
     /// The decoder's capacity is fixed by our own SETTINGS; the encoder is
     /// created once the peer's SETTINGS bound its table (see
     /// [`ControlStreams::poll_read`]).
+    #[inline]
     pub(crate) fn shared(&self) -> &Arc<Mutex<SharedCodecs>> {
         &self.shared
     }
 
     /// Field sections the peer's encoder stream unblocked, drained for the
     /// request-stream handler.
+    #[inline]
     pub(crate) fn take_unblocked(&mut self) -> Vec<UnblockedSection> {
         std::mem::take(&mut self.shared.lock().unblocked)
     }
 
     /// Whether the peer's SETTINGS frame was received.
+    #[inline]
     pub(crate) fn settings_received(&self) -> bool {
         self.settings_received
     }
 
     /// The peer's MAX_PUSH_ID, once received.
+    #[inline]
     pub(crate) fn max_push_id(&self) -> Option<u64> {
         self.max_push_id
     }
 
     /// The ID this endpoint announced in its GOAWAY, once sent.
+    #[inline]
     pub(crate) fn goaway_sent(&self) -> Option<u64> {
         self.goaway_sent
     }
@@ -254,6 +265,7 @@ impl ControlStreams {
     /// Whether a GOAWAY has been sent; the driver then rejects request
     /// streams above the announced ID and closes with `H3_NO_ERROR` once
     /// they drain.
+    #[inline]
     pub(crate) fn shutting_down(&self) -> bool {
         self.goaway_sent.is_some()
     }
@@ -261,6 +273,7 @@ impl ControlStreams {
     /// Opens the control, QPACK encoder, and QPACK decoder streams and
     /// queues the SETTINGS frame that must open the control stream.
     /// Idempotent; call until `Ready`.
+    #[inline]
     pub(crate) fn poll_init(
         &mut self,
         conn: &mut dyn Connection,
@@ -286,6 +299,7 @@ impl ControlStreams {
 
     /// Writes everything queued on the outbound control and QPACK streams.
     /// Call until `Ready`.
+    #[inline]
     pub(crate) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ControlError>> {
         if let Some(stream) = self.out_control.as_mut() {
             if !self.control_buf.is_empty() {
@@ -311,6 +325,7 @@ impl ControlStreams {
     /// Queues a GOAWAY frame for the control stream and remembers `id` as
     /// the last request stream this endpoint will process. Only the first
     /// GOAWAY is sent; later calls are no-ops.
+    #[inline]
     pub(crate) fn send_goaway(&mut self, id: u64) {
         if self.goaway_sent.is_some() {
             return;
@@ -322,6 +337,7 @@ impl ControlStreams {
     }
 
     /// Queues a MAX_PUSH_ID frame (client side only).
+    #[inline]
     pub(crate) fn send_max_push_id(&mut self, id: u64) {
         let mut buf = BytesMut::new();
         Frame::MaxPushId(id).encode(&mut buf);
@@ -329,6 +345,7 @@ impl ControlStreams {
     }
 
     /// Queues a CANCEL_PUSH frame (client side only).
+    #[inline]
     pub(crate) fn send_cancel_push(&mut self, push_id: u64) {
         let mut buf = BytesMut::new();
         Frame::CancelPush(push_id).encode(&mut buf);
@@ -338,6 +355,7 @@ impl ControlStreams {
     /// Queues encoder stream instructions (e.g. the section-encoding
     /// output of [`Encoder::encode_section`]) for the QPACK encoder
     /// stream; [`ControlStreams::poll_flush`] writes them.
+    #[inline]
     pub(crate) fn queue_encoder_stream(&mut self, bytes: Bytes) {
         if !bytes.is_empty() {
             self.encoder_pending.push_back(bytes);
@@ -350,6 +368,7 @@ impl ControlStreams {
     /// Polling this in a loop drains everything the peer sent; `Pending`
     /// means all inbound inputs are idle and the transport registered a
     /// wakeup for the next chunk.
+    #[inline]
     pub(crate) fn poll_read(
         &mut self,
         conn: &mut dyn Connection,
@@ -481,6 +500,7 @@ impl ControlStreams {
     /// Reads the type varint of the stream under classification and wires
     /// it to its handler. The stream stays pending while the varint is
     /// incomplete.
+    #[inline]
     fn classify_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ControlError>> {
         loop {
             let chunk = {
@@ -563,6 +583,7 @@ impl ControlStreams {
     }
 
     /// Validates one frame read from the peer's control stream.
+    #[inline]
     fn handle_control_frame(&mut self, frame: Frame) -> Result<(), ControlError> {
         // RFC 9114 Section 6.2.1: the first frame must be SETTINGS; any
         // other first frame is H3_MISSING_SETTINGS.
@@ -622,6 +643,7 @@ impl ControlStreams {
     /// Moves the QPACK decoder's accumulated acknowledgements (Section
     /// Acknowledgment, Insert Count Increment) to the outbound decoder
     /// stream queue.
+    #[inline]
     fn queue_decoder_acks(&mut self) {
         let acks = self.shared.lock().decoder.take_decoder_stream();
         if !acks.is_empty() {
@@ -637,6 +659,7 @@ mod tests {
     use crate::h3::transport::{Accept, Connection, OpenStreams, RecvStream, SendStream};
     use futures_util::task::noop_waker_ref;
 
+    #[inline]
     fn cx() -> Context<'static> {
         Context::from_waker(noop_waker_ref())
     }
@@ -657,6 +680,7 @@ mod tests {
     }
 
     impl MockStream {
+        #[inline]
         fn new(log: SendLog) -> Self {
             Self {
                 inbound: std::sync::Arc::new(parking_lot::Mutex::new(VecDeque::new())),
@@ -665,22 +689,26 @@ mod tests {
             }
         }
 
+        #[inline]
         fn feed(&mut self, bytes: &[u8]) {
             self.inbound
                 .lock()
                 .push_back(Some(Bytes::copy_from_slice(bytes)));
         }
 
+        #[inline]
         fn finish(&mut self) {
             self.inbound.lock().push_back(None);
         }
 
         /// A handle to the inbound queue, to feed the stream after it has
         /// been moved into the plane.
+        #[inline]
         fn sink(&self) -> std::sync::Arc<parking_lot::Mutex<VecDeque<Option<Bytes>>>> {
             self.inbound.clone()
         }
 
+        #[inline]
         fn take_outbound(&mut self) -> Bytes {
             let mut joined = BytesMut::new();
             for chunk in self.outbound.drain(..) {
@@ -691,6 +719,7 @@ mod tests {
     }
 
     impl RecvStream for MockStream {
+        #[inline]
         fn poll_recv(
             &mut self,
             _cx: &mut Context<'_>,
@@ -701,12 +730,14 @@ mod tests {
             }
         }
 
+        #[inline]
         fn id(&self) -> u64 {
             0
         }
     }
 
     impl SendStream for MockStream {
+        #[inline]
         fn poll_send(
             &mut self,
             _cx: &mut Context<'_>,
@@ -718,10 +749,12 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_reset(
             &mut self,
             _cx: &mut Context<'_>,
@@ -730,6 +763,7 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
+        #[inline]
         fn poll_stop_sending(
             &mut self,
             _cx: &mut Context<'_>,
@@ -751,6 +785,7 @@ mod tests {
     }
 
     impl MockConn {
+        #[inline]
         fn new() -> Self {
             Self {
                 peer_unis: VecDeque::new(),
@@ -761,12 +796,14 @@ mod tests {
         }
 
         /// Queues a peer uni stream preloaded with a mock reader.
+        #[inline]
         fn peer_uni(log: SendLog) -> Box<dyn UniStream> {
             Box::new(MockStream::new(log))
         }
     }
 
     impl OpenStreams for MockConn {
+        #[inline]
         fn poll_open_uni(
             &mut self,
             _cx: &mut Context<'_>,
@@ -777,6 +814,7 @@ mod tests {
     }
 
     impl Accept for MockConn {
+        #[inline]
         fn poll_accept(
             &mut self,
             _cx: &mut Context<'_>,
@@ -785,6 +823,7 @@ mod tests {
             Poll::Pending
         }
 
+        #[inline]
         fn poll_accept_uni(
             &mut self,
             _cx: &mut Context<'_>,
@@ -794,14 +833,17 @@ mod tests {
     }
 
     impl Connection for MockConn {
+        #[inline]
         fn stream_id_stream(&self) -> u64 {
             3
         }
 
+        #[inline]
         fn is_handshake_complete(&self) -> bool {
             true
         }
 
+        #[inline]
         fn poll_shutdown(
             &mut self,
             _cx: &mut Context<'_>,
@@ -812,6 +854,7 @@ mod tests {
         }
     }
 
+    #[inline]
     fn encode_frames(frames: &[Frame]) -> Bytes {
         let mut buf = BytesMut::new();
         for frame in frames {
@@ -820,12 +863,14 @@ mod tests {
         buf.freeze()
     }
 
+    #[inline]
     fn settings_frame(settings: &FrameSettings) -> Frame {
         Frame::Settings(settings.clone())
     }
 
     /// Bytes for a peer control stream: the control stream type byte then
     /// the frames.
+    #[inline]
     fn control_wire(frames: &[Frame]) -> Bytes {
         let mut buf = BytesMut::from(&[STREAM_TYPE_CONTROL as u8][..]);
         for frame in frames {
@@ -835,6 +880,7 @@ mod tests {
     }
 
     /// Polls `poll_read` until Pending, collecting every event yielded.
+    #[inline]
     fn drain_events(
         plane: &mut ControlStreams,
         conn: &mut MockConn,
@@ -853,6 +899,7 @@ mod tests {
         Ok(events)
     }
 
+    #[inline]
     fn init_with(plane: &mut ControlStreams, conn: &mut MockConn) {
         let mut cx = cx();
         assert!(plane.poll_init(conn, &mut cx).is_ready());

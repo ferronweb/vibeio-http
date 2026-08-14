@@ -92,16 +92,19 @@ pub struct Settings {
 
 impl Settings {
     /// An empty SETTINGS payload.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Appends a `(identifier, value)` parameter in wire order.
+    #[inline]
     pub fn insert(&mut self, id: u64, value: u64) {
         self.entries.push((id, value));
     }
 
     /// The value of the first parameter with `id`, if any.
+    #[inline]
     pub fn get(&self, id: u64) -> Option<u64> {
         self.entries
             .iter()
@@ -109,6 +112,7 @@ impl Settings {
     }
 
     /// The parameters in wire order.
+    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = Setting> + '_ {
         self.entries.iter().copied()
     }
@@ -150,6 +154,7 @@ impl Frame {
     /// returns is by construction a known type. This method documents the
     /// request-stream rule (Section 4.1) that after the trailers only
     /// unknown frames may still appear.
+    #[inline]
     pub fn is_known(&self) -> bool {
         matches!(
             self,
@@ -164,6 +169,7 @@ impl Frame {
     }
 
     /// Serializes this frame (type, length, payload) into `dst`.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         match self {
             Frame::Data(payload) => {
@@ -261,16 +267,19 @@ pub struct FrameDecoder {
 
 impl FrameDecoder {
     /// A decoder with an empty buffer.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Appends received bytes to the input buffer.
+    #[inline]
     pub fn extend(&mut self, data: Bytes) {
         self.buf.extend_from_slice(&data);
     }
 
     /// Bytes buffered but not yet consumed by a frame.
+    #[inline]
     pub fn buffered(&self) -> usize {
         self.buf.len()
     }
@@ -281,6 +290,7 @@ impl FrameDecoder {
     /// frame; callers must extend the buffer and poll again. Unknown and
     /// reserved frame types are consumed and skipped (RFC 9114 Section
     /// 7.2.8) — a known frame behind them is still returned.
+    #[inline]
     pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
         loop {
             let Some((ty, type_len)) = parse_varint(&self.buf)? else {
@@ -333,6 +343,7 @@ impl FrameDecoder {
     /// when the type varint is incomplete. Used to pre-reject control-plane
     /// frames on request streams (RFC 9114 Sections 7.2.3-7.2.7) before the
     /// decoder parses (and would otherwise accept or mismatch) them.
+    #[inline]
     pub fn peek_frame_type(&self) -> Option<u64> {
         match parse_varint(&self.buf) {
             Ok(Some((ty, _))) => Some(ty),
@@ -341,6 +352,7 @@ impl FrameDecoder {
     }
 }
 
+#[inline]
 fn is_known_frame_type(ty: u64) -> bool {
     matches!(
         ty,
@@ -356,14 +368,17 @@ fn is_known_frame_type(ty: u64) -> bool {
 
 /// Reserved grease identifiers: `0x1f * N + 0x21` (RFC 9114 Sections 7.2.8
 /// and 7.2.4.1) — must be ignored, never interpreted.
+#[inline]
 fn is_grease(v: u64) -> bool {
     v >= 0x21 && (v - 0x21).is_multiple_of(0x1f)
 }
 
+#[inline]
 fn is_reserved_setting(id: u64) -> bool {
     (0x02..=0x05).contains(&id)
 }
 
+#[inline]
 fn parse_settings(payload: &mut BytesMut) -> Result<Settings, FrameError> {
     let mut settings = Settings::new();
     let mut rest = &payload[..];
@@ -393,6 +408,7 @@ fn parse_settings(payload: &mut BytesMut) -> Result<Settings, FrameError> {
 /// (used for CANCEL_PUSH, GOAWAY, MAX_PUSH_ID, and the PUSH_PROMISE push
 /// ID). A truncated or non-minimal integer, or trailing bytes, is
 /// `H3_FRAME_ERROR` (RFC 9114 Sections 7.1 and 10.8).
+#[inline]
 fn take_varint(buf: &mut BytesMut) -> Result<u64, FrameError> {
     let Some((value, n)) = parse_varint(buf)? else {
         return Err(FrameError::Frame);
@@ -412,6 +428,7 @@ fn take_varint(buf: &mut BytesMut) -> Result<u64, FrameError> {
 ///
 /// The control plane uses this to read uni stream type varints before a
 /// stream is assigned its role.
+#[inline]
 pub(crate) fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameError> {
     let Some(&first) = buf.first() else {
         return Ok(None);
@@ -437,6 +454,7 @@ pub(crate) fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameErro
 }
 
 /// The encoded length of `value` as a QUIC variable-length integer.
+#[inline]
 pub fn varint_size(value: u64) -> usize {
     if value < (1 << 6) {
         1
@@ -451,6 +469,7 @@ pub fn varint_size(value: u64) -> usize {
 
 /// Encodes `value` as a QUIC variable-length integer (RFC 9000 Section
 /// 16). Panics in debug builds if `value` does not fit.
+#[inline]
 pub fn write_varint(value: u64, dst: &mut BytesMut) {
     debug_assert!(value <= MAX_VARINT, "varint out of range: {value:#x}");
     if value < (1 << 6) {
@@ -468,6 +487,7 @@ pub fn write_varint(value: u64, dst: &mut BytesMut) {
 mod tests {
     use super::*;
 
+    #[inline]
     fn decode_all(decoder: &mut FrameDecoder) -> Result<Vec<Frame>, FrameError> {
         let mut frames = Vec::new();
         while let Some(frame) = decoder.next_frame()? {
@@ -476,6 +496,7 @@ mod tests {
         Ok(frames)
     }
 
+    #[inline]
     fn encode_frames(frames: &[Frame]) -> Bytes {
         let mut buf = BytesMut::new();
         for frame in frames {
@@ -516,6 +537,7 @@ mod tests {
         assert_eq!(got, expected);
     }
 
+    #[inline]
     fn settings_without_grease() -> Settings {
         let mut s = Settings::new();
         s.insert(SETTINGS_QPACK_MAX_TABLE_CAPACITY, 4096);
