@@ -143,8 +143,6 @@ impl Encoder {
             let sensitive = NEVER_INDEXED.contains(&name.as_ref());
 
             if sensitive {
-                // Section 7.1: sensitive field lines are always literal with
-                // N=1 and never stored in the dynamic table.
                 self.encode_literal(name, value, true, &mut block);
                 continue;
             }

@@ -47,10 +47,7 @@ impl MockStream {
 }
 
 impl RecvStream for MockStream {
-    fn poll_recv(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, TransportError>> {
+    fn poll_recv(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, TransportError>> {
         match self.chunks.pop_front() {
             Some(chunk) => Poll::Ready(Ok(chunk)),
             None => Poll::Pending,
@@ -198,7 +195,7 @@ fuzz_target!(|data: &[u8]| {
         let resp = Response::builder()
             .status(200)
             .body(Full::new(Bytes::from_static(b"x")))
-            .unwrap();
+            .expect("failed to create response body");
         Ok::<_, Infallible>(resp)
     };
 

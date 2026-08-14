@@ -485,12 +485,6 @@ impl Decoder {
     /// of octets consumed.
     #[inline]
     fn read_prefix(&self, buf: &[u8]) -> Result<(u64, u64, usize), QpackError> {
-        // Required Insert Count (4.5.1.1): 8-bit prefix; 0 stays 0, otherwise
-        // it was wrapped modulo 2 * MaxEntries, where MaxEntries =
-        // floor(MaxCapacity / 32) with MaxCapacity the maximum capacity
-        // advertised by this decoder. Reconstructed with the algorithm from
-        // Section 4.5.1.1; values a conformant encoder could not produce are
-        // an error.
         let header = *buf.first().ok_or(QpackError::DecompressionFailed)?;
         let mut off = 1;
         let enc_ric = integer::decode(buf, &mut off, 8, header).map_err(dec_failed)?;
