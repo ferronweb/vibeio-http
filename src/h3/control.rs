@@ -396,11 +396,10 @@ impl ControlStreams {
                         progressed = true;
                     }
                     Poll::Ready(None) => {
-                        return Poll::Ready(Err(if self.settings_received {
-                            ControlError::ClosedCriticalStream
-                        } else {
-                            ControlError::MissingSettings
-                        }));
+                        // Closing the control stream (a critical stream) is
+                        // always a connection error, regardless of whether
+                        // SETTINGS was seen first (RFC 9114 Section 6.2).
+                        return Poll::Ready(Err(ControlError::ClosedCriticalStream));
                     }
                     Poll::Pending => {}
                 }
@@ -456,13 +455,21 @@ impl ControlStreams {
                 }
             }
 
-            // Drain the peer's QPACK decoder stream. Its instructions
-            // (Insert Count Increments, Header Acknowledgements, Stream
-            // Cancellations) acknowledge our encoder's output; the encoder
-            // does not track them, so the bytes are discarded.
+            // Feed the peer's QPACK decoder stream to the decoder. Its
+            // instructions (Section Acknowledgments, Stream Cancellations,
+            // Insert Count Increments) acknowledge our encoder's output; the
+            // encoder does not track them, but an Insert Count Increment of 0
+            // is a decoder stream error (RFC 9204 Section 4.4.3).
             if let Some(stream) = self.in_decoder.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
-                    Poll::Ready(Some(_)) => progressed = true,
+                    Poll::Ready(Some(chunk)) => {
+                        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Err(err) = shared.decoder.feed_decoder_stream(&chunk) {
+                            drop(shared);
+                            return Poll::Ready(Err(ControlError::Qpack(err)));
+                        }
+                        progressed = true;
+                    }
                     Poll::Ready(None) => {
                         return Poll::Ready(Err(ControlError::ClosedCriticalStream));
                     }
@@ -544,6 +551,13 @@ impl ControlStreams {
                 STREAM_TYPE_QPACK_DECODER => {
                     if self.in_decoder.is_some() {
                         return Poll::Ready(Err(ControlError::StreamCreation));
+                    }
+                    if !leftover.is_empty() {
+                        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+                        match shared.decoder.feed_decoder_stream(&leftover) {
+                            Ok(()) => {}
+                            Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
+                        }
                     }
                     self.in_decoder = Some(stream);
                 }
@@ -1226,6 +1240,23 @@ mod tests {
             plane.poll_read(&mut conn, &mut cx()),
             Poll::Ready(Err(ControlError::ClosedCriticalStream))
         ));
+    }
+
+    #[test]
+    fn peer_decoder_stream_zero_insert_count_increment_is_decoder_stream_error() {
+        // h3spec QPACK 4.4.3: a single 0x00 byte on the peer's decoder
+        // stream is an Insert Count Increment of 0 -> QPACK_DECODER_STREAM_ERROR.
+        let mut plane = ControlStreams::new(LocalSettings::default());
+        let mut conn = MockConn::new();
+        let mut peer = MockStream::new(conn.log.clone());
+        peer.feed(&[STREAM_TYPE_QPACK_DECODER as u8, 0x00]);
+        conn.peer_unis.push_back(Box::new(peer));
+
+        let err = drain_events(&mut plane, &mut conn).unwrap_err();
+        match err {
+            ControlError::Qpack(QpackError::DecoderStream) => {}
+            other => panic!("expected DecoderStream, got {:?}", other),
+        }
     }
 
     #[test]

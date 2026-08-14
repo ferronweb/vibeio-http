@@ -226,9 +226,10 @@ async fn send_response(
 ) -> Result<(), std::io::Error> {
     wait_for_encoder(shared, stream_id).await;
     let mut guard = stream.lock().await;
-    std::future::poll_fn(|cx| guard.poll_send_response(cx, status, headers))
+    let res = std::future::poll_fn(|cx| guard.poll_send_response(cx, status, headers))
         .await
-        .map_err(h3_stream_error_to_io)
+        .map_err(h3_stream_error_to_io);
+    res
 }
 
 /// Writes one response DATA frame.
@@ -272,6 +273,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     date_cache: DateCache,
     send_continue_response: bool,
     send_date_header: bool,
+    conn_close: Arc<std::sync::Mutex<Option<u64>>>,
 ) where
     F: Fn(Request<Incoming>) -> Fut,
     Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
@@ -282,15 +284,21 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     // Read the request.
     let request_headers = {
         let mut guard = stream.lock().await;
-        std::future::poll_fn(|cx| guard.poll_headers(cx))
-            .await
-            .map_err(h3_stream_error_to_io)
+        std::future::poll_fn(|cx| guard.poll_headers(cx)).await
     };
     let request = match request_headers {
         Ok(Some(request)) => request,
-        // The stream ended without a request, or it errored: nothing to
-        // respond to.
-        _ => return,
+        // The stream ended without a request: nothing to respond to.
+        Ok(None) => return,
+        // A connection-scoped protocol violation (a malformed request,
+        // message, or QPACK error): force the connection to close with the
+        // matching H3 code. Stream-scoped errors are left to the transport.
+        Err(err) => {
+            if !err.is_stream_scoped() {
+                *conn_close.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.h3_code());
+            }
+            return;
+        }
     };
 
     // 100 Continue
@@ -629,6 +637,12 @@ where
 
             let mut controls = ControlStreams::new(options.local_settings.clone());
             let shared = controls.shared().clone();
+            // A request-stream task raises this to a non-`None` value holding
+            // the H3 code when it hits a connection-scoped error; the driver
+            // closes the connection with that code (the request task cannot
+            // itself close the QUIC connection).
+            let conn_close: Arc<std::sync::Mutex<Option<u64>>> =
+                Arc::new(std::sync::Mutex::new(None));
             let mut ongoing: FuturesUnordered<oneshot::AsyncReceiver<()>> = FuturesUnordered::new();
             let mut cancel_fut: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
                 None;
@@ -636,7 +650,21 @@ where
                 cancel_fut = Some(Box::pin(token.cancelled()));
             }
             let mut accept_sleep: Option<Pin<Box<vibeio::time::Sleep>>> = None;
+            let mut shutdown_sleep: Option<Pin<Box<vibeio::time::Sleep>>> = None;
+            // Once graceful shutdown has drained every in-flight request we
+            // must not issue `CONNECTION_CLOSE` immediately: quinn's
+            // `close()` sends exactly one frame and then stops transmitting,
+            // discarding any response bytes still buffered in the send
+            // scheduler. A short grace window lets the background transmit
+            // flush those bytes so the peer observes the response, not the
+            // close.
+            let mut drain_grace: Option<Pin<Box<vibeio::time::Sleep>>> = None;
             let mut shutdown = false;
+            let mut control_dead = false;
+            // When set, the connection is being torn down by a protocol error
+            // and must close with this H3 code (rather than the graceful
+            // GOAWAY + H3_NO_ERROR path).
+            let mut closing_with: Option<u64> = None;
             let mut outcome: Option<Result<(), std::io::Error>> = None;
             let mut last_request_id = 0u64;
 
@@ -652,6 +680,16 @@ where
             .await?;
 
             std::future::poll_fn(|cx| loop {
+                // A request-stream task hit a connection-scoped error: close
+                // the connection with the H3 code it recorded.
+                if let Some(code) = conn_close.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    if closing_with.is_none() {
+                        closing_with = Some(code);
+                        shutdown = true;
+                        control_dead = true;
+                    }
+                }
+
                 // Accept-timeout window: refreshed whenever a request
                 // stream is accepted; it bounds waiting for the next one.
                 let mut timeout_fired = false;
@@ -663,6 +701,15 @@ where
                 } else if let Some(accept_timeout) = options.accept_timeout {
                     accept_sleep = Some(Box::pin(vibeio::time::sleep(accept_timeout)));
                     continue;
+                }
+
+                // Shutdown backstop: while graceful shutdown is pending on
+                // in-flight requests, re-poll periodically so the close
+                // with `H3_NO_ERROR` cannot be starved by a lost wake-up.
+                if let Some(sleep) = shutdown_sleep.as_mut() {
+                    if let Poll::Ready(()) = sleep.as_mut().poll(cx) {
+                        shutdown_sleep = None;
+                    }
                 }
 
                 // Graceful shutdown trigger.
@@ -700,27 +747,93 @@ where
                     }
                 }
 
-                // Write the control plane's outbound streams.
-                ready!(controls.poll_flush(cx).map_err(h3_control_error_to_io))?;
-
-                // Read the peer's control plane and react to its events.
-                loop {
-                    match controls.poll_read(&mut conn, cx) {
-                        Poll::Ready(Ok(Some(ControlEvent::Goaway { .. }))) => {
-                            // The client is going away: stop accepting new
-                            // request streams and close once the in-flight
-                            // ones drain.
-                            if !shutdown {
+                // Write the control plane's outbound streams. If the peer tore
+                // it down while we were shutting down (e.g. an h3 0.0.8 client
+                // resets its receive side once it sees GOAWAY), we stop trying
+                // to flush — the connection is already draining — but we must
+                // NOT close yet: in-flight requests still need to be served so
+                // the peer receives their responses before the application
+                // close. `control_dead` records that state so we neither spin
+                // on a terminal error nor send a close prematurely.
+                if !control_dead {
+                    match controls.poll_flush(cx) {
+                        Poll::Ready(Ok(())) => {}
+                        Poll::Ready(Err(err)) => {
+                            if shutdown {
+                                control_dead = true;
+                            } else {
+                                closing_with = Some(err.h3_code());
                                 shutdown = true;
-                                outcome = Some(Ok(()));
+                                control_dead = true;
                             }
                         }
-                        Poll::Ready(Ok(Some(_))) => {}
-                        Poll::Ready(Ok(None)) => {}
-                        Poll::Ready(Err(err)) => {
-                            return Poll::Ready(Err(h3_control_error_to_io(err)));
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+
+                // Read the peer's control plane and react to its events.
+                if !control_dead {
+                    loop {
+                        match controls.poll_read(&mut conn, cx) {
+                            Poll::Ready(Ok(Some(ControlEvent::Goaway { .. }))) => {
+                                // The client is going away: stop accepting new
+                                // request streams and close once the in-flight
+                                // ones drain.
+                                if !shutdown {
+                                    shutdown = true;
+                                    outcome = Some(Ok(()));
+                                }
+                            }
+                            Poll::Ready(Ok(Some(_))) => {}
+                            Poll::Ready(Ok(None)) => {}
+                            Poll::Ready(Err(err)) => {
+                                if shutdown {
+                                    control_dead = true;
+                                    break;
+                                }
+                                closing_with = Some(err.h3_code());
+                                shutdown = true;
+                                control_dead = true;
+                                break;
+                            }
+                            Poll::Pending => break,
                         }
-                        Poll::Pending => break,
+                    }
+                }
+
+                // Shutdown: either a protocol error (close immediately with
+                // the recorded H3 code) or a graceful drain (GOAWAY, then
+                // H3_NO_ERROR once every in-flight request has drained).
+                if shutdown {
+                    if let Some(code) = closing_with {
+                        ready!(conn
+                            .poll_shutdown(cx, code)
+                            .map_err(h3_transport_error_to_io))?;
+                        return Poll::Ready(outcome.take().unwrap_or(Ok(())));
+                    }
+                    if controls.goaway_sent().is_none() {
+                        controls.send_goaway(last_request_id);
+                    }
+                    if ongoing.is_empty() {
+                        // Give the send scheduler a grace window to flush
+                        // the last response before we close. See the comment
+                        // on `drain_grace` above.
+                        if let Some(grace) = drain_grace.as_mut() {
+                            if grace.as_mut().poll(cx).is_ready() {
+                                ready!(conn
+                                    .poll_shutdown(cx, H3_NO_ERROR)
+                                    .map_err(h3_transport_error_to_io))?;
+                                return Poll::Ready(outcome.take().unwrap_or(Ok(())));
+                            }
+                        } else {
+                            drain_grace = Some(Box::pin(vibeio::time::sleep(
+                                std::time::Duration::from_millis(50),
+                            )));
+                        }
+                    } else if shutdown_sleep.is_none() {
+                        shutdown_sleep = Some(Box::pin(vibeio::time::sleep(
+                            std::time::Duration::from_millis(10),
+                        )));
                     }
                 }
 
@@ -730,8 +843,9 @@ where
                         let id = stream.id();
                         last_request_id = last_request_id.max(id);
                         accept_sleep = None;
-                        if controls.shutting_down()
-                            && id > controls.goaway_sent().unwrap_or(u64::MAX)
+                        if shutdown
+                            && (controls.goaway_sent().is_none()
+                                || id > controls.goaway_sent().unwrap_or(u64::MAX))
                         {
                             // A request after our GOAWAY: reject it
                             // (RFC 9114 Section 5.2).
@@ -746,6 +860,7 @@ where
                             let request_fn = request_fn.clone();
                             let date_cache = date_cache.clone();
                             let shared = shared.clone();
+                            let conn_close_for_task = conn_close.clone();
                             vibeio::spawn(async move {
                                 let _end = end_tx;
                                 handle_request(
@@ -756,41 +871,32 @@ where
                                     date_cache,
                                     send_continue_response,
                                     send_date_header,
+                                    conn_close_for_task,
                                 )
                                 .await;
                             });
                         }
                     }
                     // The connection closed: nothing left to do.
-                    Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Ok(None)) => {
+                        return Poll::Ready(Ok(()));
+                    }
                     Poll::Ready(Err(err)) => {
                         return Poll::Ready(Err(h3_transport_error_to_io(err)));
                     }
                     Poll::Pending => {}
                 }
 
-                // Graceful shutdown: send GOAWAY once, then close with
-                // H3_NO_ERROR once every in-flight request has drained.
-                if shutdown {
-                    if controls.goaway_sent().is_none() {
-                        controls.send_goaway(last_request_id);
-                    }
-                    if ongoing.is_empty() {
-                        ready!(conn
-                            .poll_shutdown(cx, H3_NO_ERROR)
-                            .map_err(h3_transport_error_to_io))?;
-                        return Poll::Ready(outcome.take().unwrap_or(Ok(())));
-                    }
-                }
-
                 // Collect finished request tasks. Their completion
                 // receivers were registered on first poll, so parking
                 // below wakes whenever one finishes; a completion can
-                // race the registration, so re-check before parking.
+                // race the registration, so re-check before parking. An
+                // empty set yields `None` from `poll_next` (there are no
+                // completions to observe).
                 match ongoing.poll_next_unpin(cx) {
                     Poll::Ready(Some(Ok(()))) => continue,
                     Poll::Ready(Some(Err(_))) => continue,
-                    Poll::Ready(None) => unreachable!("completion stream is unbounded"),
+                    Poll::Ready(None) => {}
                     Poll::Pending => {}
                 }
                 if ongoing.is_empty() && shutdown {

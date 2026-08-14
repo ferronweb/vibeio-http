@@ -155,6 +155,43 @@ impl Decoder {
         Bytes::from(std::mem::take(&mut self.decoder_stream))
     }
 
+    /// Parses the peer's QPACK decoder stream instructions (RFC 9204
+    /// Section 4.4): Section Acknowledgments, Stream Cancellations, and
+    /// Insert Count Increments.
+    ///
+    /// An Insert Count Increment with a zero value is a decoder stream
+    /// error (Section 4.4.3); any malformed instruction is too. The
+    /// instructions are not otherwise acted upon: this decoder emits its own
+    /// decoder-stream instructions and never tracks the peer's
+    /// acknowledgements, so it only needs to validate what the peer sends.
+    pub fn feed_decoder_stream(&mut self, buf: &[u8]) -> Result<(), QpackError> {
+        let mut off = 0;
+        while off < buf.len() {
+            let header = buf[off];
+            off += 1;
+            match header & 0xC0 {
+                // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1).
+                0x80 => {
+                    integer::decode(buf, &mut off, 7, header).map_err(dec_stream_err)?;
+                }
+                // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
+                0x40 => {
+                    integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
+                }
+                // `00` + 6-bit increment: Insert Count Increment (4.4.3). A
+                // zero increment is forbidden.
+                _ => {
+                    let increment =
+                        integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
+                    if increment == 0 {
+                        return Err(QpackError::DecoderStream);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Processes the encoder stream instructions in `buf`, materializing
     /// dynamic table updates.
     ///
@@ -566,6 +603,13 @@ fn enc_stream_err(_: HpackError) -> QpackError {
 #[inline]
 fn dec_failed(_: HpackError) -> QpackError {
     QpackError::DecompressionFailed
+}
+
+/// Maps an `HpackError` from a decoder stream instruction to
+/// `QPACK_DECODER_STREAM_ERROR`.
+#[inline]
+fn dec_stream_err(_: HpackError) -> QpackError {
+    QpackError::DecoderStream
 }
 #[cfg(test)]
 mod tests {

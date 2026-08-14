@@ -38,7 +38,10 @@ use http::header::{HeaderMap, HeaderName, HeaderValue};
 use http::{Method, Request, StatusCode, Uri, Version};
 
 use crate::h3::error::{H3Error, TransportError};
-use crate::h3::frame::{Frame, FrameDecoder, FrameError};
+use crate::h3::frame::{
+    Frame, FrameDecoder, FrameError, FRAME_CANCEL_PUSH, FRAME_GOAWAY, FRAME_MAX_PUSH_ID,
+    FRAME_PUSH_PROMISE, FRAME_SETTINGS,
+};
 use crate::h3::qpack::{Decoder, Encoder, QpackError, UnblockedSection};
 use crate::h3::settings::LocalSettings;
 use crate::h3::transport::BidiStream;
@@ -579,6 +582,22 @@ impl RequestStream {
     /// that ends mid-frame is `H3_FRAME_ERROR`.
     fn poll_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Frame>, StreamError>> {
         loop {
+            // RFC 9114 Sections 7.2.3-7.2.7: control-plane frames (CANCEL_PUSH,
+            // SETTINGS, PUSH_PROMISE, GOAWAY, MAX_PUSH_ID) MUST NOT appear on a
+            // request stream and are H3_FRAME_UNEXPECTED — even when malformed,
+            // so reject them at the type level before the decoder parses them.
+            if let Some(ty) = self.frame_decoder.peek_frame_type() {
+                if matches!(
+                    ty,
+                    FRAME_CANCEL_PUSH
+                        | FRAME_SETTINGS
+                        | FRAME_PUSH_PROMISE
+                        | FRAME_GOAWAY
+                        | FRAME_MAX_PUSH_ID
+                ) {
+                    return Poll::Ready(Err(StreamError::FrameUnexpected));
+                }
+            }
             match self.frame_decoder.next_frame() {
                 Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
                 Ok(None) => {}
@@ -711,7 +730,7 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
                 return Err(StreamError::Message);
             }
         }
-    } else if scheme.is_none() || path.is_none() {
+    } else if scheme.is_none() || path.is_none() || authority.is_none() {
         return Err(StreamError::Message);
     }
 

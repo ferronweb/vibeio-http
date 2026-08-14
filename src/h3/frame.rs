@@ -328,6 +328,19 @@ impl FrameDecoder {
     }
 }
 
+impl FrameDecoder {
+    /// Returns the type of the next frame without consuming it, or `None`
+    /// when the type varint is incomplete. Used to pre-reject control-plane
+    /// frames on request streams (RFC 9114 Sections 7.2.3-7.2.7) before the
+    /// decoder parses (and would otherwise accept or mismatch) them.
+    pub fn peek_frame_type(&self) -> Option<u64> {
+        match parse_varint(&self.buf) {
+            Ok(Some((ty, _))) => Some(ty),
+            _ => None,
+        }
+    }
+}
+
 fn is_known_frame_type(ty: u64) -> bool {
     matches!(
         ty,
