@@ -24,9 +24,10 @@
 //! Required Insert Count that does not equal the largest referenced absolute
 //! index plus one is rejected (Sections 2.1.2 and 2.2.1), evictions that
 //! touch entries with an absolute index at or above the Known Received Count
-//! are rejected (Sections 2.1.1 and 3.2.2), and field sections whose decoded
-//! size exceeds the advertised `SETTINGS_MAX_FIELD_SECTION_SIZE` are rejected
-//! (RFC 9114 Section 7.2.4.1).
+//! are rejected (Sections 2.1.1 and 3.2.2), and field sections that push a
+//! stream's cumulative decoded size over the advertised
+//! `SETTINGS_MAX_FIELD_SECTION_SIZE` are rejected (RFC 9114 Section
+//! 7.2.4.1).
 #![expect(dead_code)]
 
 use std::collections::VecDeque;
@@ -113,6 +114,19 @@ pub struct Decoder {
     /// does not rescan every buffered section (or allocate a temporary list)
     /// for every field section received while the table is catching up.
     blocked_by_stream: Vec<(u64, usize)>,
+    /// Decoded field-section size per stream, summed so the
+    /// `SETTINGS_MAX_FIELD_SECTION_SIZE` budget applies across a stream's
+    /// field sections (request headers, trailers) like
+    /// `SETTINGS_MAX_HEADER_LIST_SIZE` does for HTTP/2 — not per section.
+    ///
+    /// A stream's budget is only charged when a section is actually
+    /// decoded, so a section buffered as blocked is charged when it is
+    /// unblocked. Entries are dropped when the stream finishes, is reset,
+    /// or is abandoned ([`Decoder::stream_finished`],
+    /// [`Decoder::stream_cancelled`], [`Decoder::expire_blocked`]); QUIC
+    /// stream IDs are never reused, so a stale entry could not affect
+    /// another stream anyway.
+    section_size_by_stream: Vec<(u64, usize)>,
     /// The maximum number of streams that may be blocked at once,
     /// SETTINGS_QPACK_BLOCKED_STREAMS (RFC 9204 Section 5).
     max_blocked_streams: usize,
@@ -137,6 +151,7 @@ impl Decoder {
             known_received: 0,
             blocked: VecDeque::new(),
             blocked_by_stream: Vec::new(),
+            section_size_by_stream: Vec::new(),
             max_blocked_streams,
             max_field_section_size: usize::MAX,
             decoder_stream: Vec::new(),
@@ -145,9 +160,10 @@ impl Decoder {
 
     /// Sets the maximum size of a decoded field section: the locally
     /// advertised `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section
-    /// 7.2.4.1). Field sections whose cumulative name and value octets
-    /// exceed this are rejected with `QPACK_DECOMPRESSION_FAILED` (RFC
-    /// 9204 Section 4.5).
+    /// 7.2.4.1). The budget is per stream and accumulates across its field
+    /// sections (request headers and trailers); a section that pushes a
+    /// stream's cumulative name and value octets over this is rejected
+    /// with `QPACK_DECOMPRESSION_FAILED` (RFC 9204 Section 4.5).
     #[inline]
     pub fn set_max_field_section_size(&mut self, size: usize) {
         self.max_field_section_size = size;
@@ -305,13 +321,18 @@ impl Decoder {
             }
             let front = self.blocked.pop_front().expect("front just inspected");
             self.remove_blocked_section(front.stream_id);
+            let headers = self.decode_ready(&front.buf)?;
+            let size: usize = headers.iter().map(|(n, v)| n.len() + v.len()).sum();
+            if self.account_section(front.stream_id, size) > self.max_field_section_size {
+                return Err(QpackError::DecompressionFailed);
+            }
             if front.ric > 0 {
                 self.acknowledge(front.ric);
                 self.emit_section_ack(front.stream_id);
             }
             sections.push(UnblockedSection {
                 stream_id: front.stream_id,
-                headers: self.decode_ready(&front.buf)?,
+                headers,
             });
         }
 
@@ -363,11 +384,32 @@ impl Decoder {
             return Ok(None);
         }
         let headers = self.decode_ready(buf)?;
+        let size: usize = headers.iter().map(|(n, v)| n.len() + v.len()).sum();
+        if self.account_section(stream_id, size) > self.max_field_section_size {
+            return Err(QpackError::DecompressionFailed);
+        }
         if ric > 0 {
             self.acknowledge(ric);
             self.emit_section_ack(stream_id);
         }
         Ok(Some(headers))
+    }
+
+    /// Notifies that `stream_id` finished receiving (the peer closed its
+    /// send side): no further field sections can arrive on it, so its
+    /// field-section size budget is released. Safe to call when the stream
+    /// never carried a field section.
+    ///
+    /// Must only be called when no field section of the stream remains
+    /// buffered as blocked: a buffered section is decoded later by
+    /// [`Decoder::feed_encoder_stream`], which would then restart the
+    /// stream's budget from scratch. The HTTP/3 layer calls this only upon
+    /// observing the peer's stream end, which implies every section of the
+    /// stream (headers, trailers) has decoded.
+    #[inline]
+    pub fn stream_finished(&mut self, stream_id: u64) {
+        self.section_size_by_stream
+            .retain(|(id, _)| *id != stream_id);
     }
 
     /// Notifies that `stream_id` was reset or abandoned: buffered blocked
@@ -377,6 +419,8 @@ impl Decoder {
     pub fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
         self.blocked.retain(|b| b.stream_id != stream_id);
         self.blocked_by_stream.retain(|(id, _)| *id != stream_id);
+        self.section_size_by_stream
+            .retain(|(id, _)| *id != stream_id);
         let mut out = Vec::new();
         integer::encode(&mut out, stream_id, 6, STREAM_CANCELLATION);
         self.decoder_stream.extend_from_slice(&out);
@@ -406,6 +450,8 @@ impl Decoder {
                 .retain(|blocked| !cancelled.contains(&blocked.stream_id));
             self.blocked_by_stream
                 .retain(|(stream_id, _)| !cancelled.contains(stream_id));
+            self.section_size_by_stream
+                .retain(|(stream_id, _)| !cancelled.contains(stream_id));
         }
         self.decoder_stream.extend_from_slice(&out);
         Bytes::from(out)
@@ -420,7 +466,6 @@ impl Decoder {
         let (ric, base, mut off) = self.read_prefix(buf)?;
         let mut headers = Vec::new();
         let mut needed = 0u64;
-        let mut size = 0usize;
         while off < buf.len() {
             let header = buf[off];
             off += 1;
@@ -491,14 +536,6 @@ impl Decoder {
                 needed = needed.max(base + index + 1);
                 let value = self.read_value_string(buf, &mut off).map_err(dec_failed)?;
                 headers.push((name, value));
-            }
-            // The size cap is enforced on the decoded output, not the
-            // encoded block: Huffman encoding and index references make the
-            // two diverge arbitrarily (RFC 9114 Section 7.2.4.1).
-            let (name, value) = headers.last().expect("one field line pushed per branch");
-            size = size.saturating_add(name.len() + value.len());
-            if size > self.max_field_section_size {
-                return Err(QpackError::DecompressionFailed);
             }
         }
         if ric != needed {
@@ -640,6 +677,28 @@ impl Decoder {
             *count += 1;
         } else {
             self.blocked_by_stream.push((stream_id, 1));
+        }
+    }
+
+    /// Charges `size` against `stream_id`'s field-section budget and
+    /// returns the stream's new cumulative total. Creates the entry on
+    /// first use.
+    ///
+    /// `size` is the decoded name and value octets, not the size of the
+    /// encoded block: Huffman encoding and index references make the two
+    /// diverge arbitrarily (RFC 9114 Section 7.2.4.1).
+    #[inline]
+    fn account_section(&mut self, stream_id: u64, size: usize) -> usize {
+        if let Some((_, total)) = self
+            .section_size_by_stream
+            .iter_mut()
+            .find(|(id, _)| *id == stream_id)
+        {
+            *total = total.saturating_add(size);
+            *total
+        } else {
+            self.section_size_by_stream.push((stream_id, size));
+            size
         }
     }
 
@@ -972,7 +1031,7 @@ mod tests {
 
     #[test]
     fn field_section_size_capped() {
-        // A field section whose decoded size exceeds the advertised
+        // A field section whose decoded size alone exceeds the advertised
         // SETTINGS_MAX_FIELD_SECTION_SIZE is a decompression failure (RFC
         // 9204 Section 4.5). The cap counts decoded names and values, not
         // the encoded block.
@@ -984,13 +1043,70 @@ mod tests {
             Err(QpackError::DecompressionFailed)
         );
         // A section of exactly the cap decodes.
-        let headers = dec.decode_block(b"\x00\x00\x21x\tyyyyyyyyy", 0, 0).unwrap();
+        let headers = dec.decode_block(b"\x00\x00\x21x\tyyyyyyyyy", 1, 0).unwrap();
         assert_eq!(headers.as_deref(), Some(&[hdr("x", "yyyyyyyyy")][..]));
         // Static table lines count too: content-length: 0 is 15 octets.
         assert_eq!(
-            dec.decode_block(b"\x00\x00\xc4", 0, 0),
+            dec.decode_block(b"\x00\x00\xc4", 2, 0),
             Err(QpackError::DecompressionFailed)
         );
+    }
+
+    #[test]
+    fn field_section_size_budget_is_per_stream() {
+        // The SETTINGS_MAX_FIELD_SECTION_SIZE budget accumulates across a
+        // stream's field sections (request headers and trailers), like
+        // SETTINGS_MAX_HEADER_LIST_SIZE does for HTTP/2, rather than
+        // capping each section on its own.
+        let mut dec = Decoder::new(220, 8);
+        dec.set_max_field_section_size(20);
+        // :method GET (10) + :authority (10): exactly the budget.
+        let headers = dec.decode_block(b"\x00\x01\xd1\xc0", 3, 0).unwrap();
+        assert_eq!(
+            headers.as_deref(),
+            Some(&[hdr(":method", "GET"), hdr(":authority", "")][..])
+        );
+        // A second section on the same stream, small on its own, pushes the
+        // stream over the budget.
+        assert_eq!(
+            dec.decode_block(b"\x00\x00\x21a\x01b", 3, 0),
+            Err(QpackError::DecompressionFailed)
+        );
+        // Another stream starts with a fresh budget.
+        let headers = dec.decode_block(b"\x00\x00\x21a\x01b", 5, 0).unwrap();
+        assert_eq!(headers.as_deref(), Some(&[hdr("a", "b")][..]));
+    }
+
+    #[test]
+    fn stream_finished_releases_budget() {
+        let mut dec = Decoder::new(220, 8);
+        dec.set_max_field_section_size(10);
+        // :method GET (10): exactly the budget.
+        assert!(dec.decode_block(b"\x00\x01\xd1", 2, 0).unwrap().is_some());
+        assert_eq!(
+            dec.decode_block(b"\x00\x00\x21a\x01b", 2, 0),
+            Err(QpackError::DecompressionFailed)
+        );
+        // The HTTP/3 layer reports the stream finished (peer closed its
+        // send side): the budget is released.
+        dec.stream_finished(2);
+        assert!(dec
+            .decode_block(b"\x00\x00\x21a\x01b", 2, 0)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn stream_cancelled_releases_budget() {
+        let mut dec = Decoder::new(220, 8);
+        dec.set_max_field_section_size(10);
+        assert!(dec.decode_block(b"\x00\x01\xd1", 4, 0).unwrap().is_some());
+        assert_eq!(hex(&dec.stream_cancelled(4)), "44");
+        // The reset stream's budget is gone; sections fit again.
+        assert!(dec
+            .decode_block(b"\x00\x00\x21a\x01b", 4, 0)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1015,6 +1131,38 @@ mod tests {
             dec.feed_encoder_stream(&es),
             Err(QpackError::DecompressionFailed)
         );
+    }
+
+    #[test]
+    fn blocked_section_charges_the_stream_budget() {
+        // A section unblocked later charges the stream's budget: it can
+        // push a stream that already used part of its budget over the cap.
+        let mut enc = Encoder::new(220, false);
+        let mut es = Vec::new();
+        es.extend_from_slice(&enc.set_capacity(220).unwrap());
+        es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
+        let block = enc
+            .encode_section(&[hdr("custom-key", "custom-value")])
+            .block;
+
+        let mut dec = Decoder::new(220, 8);
+        dec.set_max_field_section_size(30);
+        // :method GET (10) on the stream, then a blocked 22-octet section.
+        assert!(dec.decode_block(b"\x00\x01\xd1", 7, 0).unwrap().is_some());
+        assert!(dec.decode_block(&block, 7, 0).unwrap().is_none());
+        // 10 + 22 > 30: the stream is over its budget once unblocked.
+        assert_eq!(
+            dec.feed_encoder_stream(&es),
+            Err(QpackError::DecompressionFailed)
+        );
+
+        // The same 22-octet section alone fits on a fresh stream.
+        let mut dec = Decoder::new(220, 8);
+        dec.set_max_field_section_size(30);
+        assert!(dec.decode_block(&block, 9, 0).unwrap().is_none());
+        let sections = dec.feed_encoder_stream(&es).unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].headers, vec![hdr("custom-key", "custom-value")]);
     }
 
     #[test]

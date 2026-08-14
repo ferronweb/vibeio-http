@@ -294,7 +294,7 @@ impl RequestStream {
         match ready!(self.poll_frame(cx)?) {
             None => {
                 self.awaiting_headers = false;
-                self.recv_finished = true;
+                self.finish_recv();
                 Poll::Ready(Ok(None))
             }
             Some(Frame::Headers(block)) => match self.decode_block(&block) {
@@ -345,7 +345,7 @@ impl RequestStream {
             // After the trailers, only unknown frames may appear.
             match ready!(self.poll_after_trailers(cx)?) {
                 Some(()) => {
-                    self.recv_finished = true;
+                    self.finish_recv();
                     return Poll::Ready(Ok(None));
                 }
                 None => return Poll::Pending,
@@ -353,7 +353,7 @@ impl RequestStream {
         }
         match ready!(self.poll_frame(cx)?) {
             None => {
-                self.recv_finished = true;
+                self.finish_recv();
                 Poll::Ready(Ok(None))
             }
             Some(Frame::Data(data)) => Poll::Ready(Ok(Some(data))),
@@ -406,7 +406,7 @@ impl RequestStream {
         if self.trailers_done {
             match ready!(self.poll_after_trailers(cx)?) {
                 Some(()) => {
-                    self.recv_finished = true;
+                    self.finish_recv();
                     return Poll::Ready(Ok(None));
                 }
                 None => return Poll::Pending,
@@ -414,7 +414,7 @@ impl RequestStream {
         }
         match ready!(self.poll_frame(cx)?) {
             None => {
-                self.recv_finished = true;
+                self.finish_recv();
                 Poll::Ready(Ok(None))
             }
             Some(Frame::Headers(block)) => match self.decode_block(&block) {
@@ -592,6 +592,20 @@ impl RequestStream {
             .decoder
             .decode_block(block, self.stream_id, now())
             .map_err(StreamError::Qpack)
+    }
+
+    /// Marks the stream's receive side complete: the peer ended its send
+    /// side, so no further field sections can arrive on this stream. The
+    /// decoder's per-stream field-section budget for it is released.
+    ///
+    /// Only the peer's stream end triggers this, so every field section of
+    /// the stream (headers, trailers) has decoded by now; a blocked
+    /// section would have suspended frame reads before the end was
+    /// observable.
+    #[inline]
+    fn finish_recv(&mut self) {
+        self.recv_finished = true;
+        self.shared.lock().decoder.stream_finished(self.stream_id);
     }
 
     /// After the trailers, reads and discards unknown frames; a known
