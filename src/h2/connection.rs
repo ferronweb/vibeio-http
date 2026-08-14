@@ -343,7 +343,21 @@ where
                 };
             futures_util::select! {
                 n = read => {
-                    let n = n?;
+                    let n = match n {
+                        Ok(n) => n,
+                        Err(e) if self.streams.is_empty()
+                            && matches!(
+                                e.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::UnexpectedEof
+                            ) => {
+                            // Connection abruptly closed while idle (no streams)...
+                            return Ok(())
+                        }
+                        Err(e) => Err(e)?
+                    };
                     if n == 0 {
                         break; // peer closed; nothing more to say
                     }
