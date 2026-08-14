@@ -193,6 +193,7 @@ impl StreamEntry {
 /// Section 8.1.1).
 pub(crate) struct H2Body {
     inner: kanal::AsyncReceiver<BodyMsg>,
+    inner_fut: Option<Pin<Box<kanal::ReceiveFuture<'static, BodyMsg>>>>,
     send_continue_body: Option<Arc<AtomicBool>>,
     ended: bool,
 }
@@ -205,6 +206,7 @@ impl H2Body {
     ) -> Self {
         H2Body {
             inner: rx,
+            inner_fut: None,
             send_continue_body,
             ended: false,
         }
@@ -224,27 +226,47 @@ impl Body for H2Body {
         if this.ended {
             return Poll::Ready(None);
         }
-        match std::pin::pin!(this.inner.recv()).poll(cx) {
-            Poll::Ready(Ok(BodyMsg::Data(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
-            Poll::Ready(Ok(BodyMsg::Trailers(trailers))) => {
-                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
-            }
-            Poll::Ready(Ok(BodyMsg::EndStream)) => {
-                this.ended = true;
-                Poll::Ready(None)
-            }
-            Poll::Ready(Err(_)) => {
-                // The connection dropped the stream (reset, closed,
-                // connection gone).
-                this.ended = true;
-                Poll::Ready(None)
-            }
-            Poll::Pending => {
-                if let Some(send_continue_body) = this.send_continue_body.as_ref() {
-                    send_continue_body.store(true, Ordering::Relaxed);
+        loop {
+            if let Some(inner_fut) = &mut this.inner_fut {
+                match Pin::new(inner_fut).poll(cx) {
+                    Poll::Ready(Ok(BodyMsg::Data(data))) => {
+                        this.inner_fut.take();
+                        return Poll::Ready(Some(Ok(Frame::data(data))));
+                    }
+                    Poll::Ready(Ok(BodyMsg::Trailers(trailers))) => {
+                        this.inner_fut.take();
+                        return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+                    }
+                    Poll::Ready(Ok(BodyMsg::EndStream)) => {
+                        this.ended = true;
+                        this.inner_fut.take();
+                        return Poll::Ready(None);
+                    }
+                    Poll::Ready(Err(_)) => {
+                        // The connection dropped the stream (reset, closed,
+                        // connection gone).
+                        this.ended = true;
+                        this.inner_fut.take();
+                        return Poll::Ready(None);
+                    }
+                    Poll::Pending => {
+                        if let Some(scb) = this.send_continue_body.as_ref() {
+                            scb.store(true, Ordering::Relaxed);
+                        }
+                        return Poll::Pending;
+                    }
                 }
-                Poll::Pending
             }
+
+            let fut = this.inner.recv();
+            // SAFETY: inner_fut lives as long as inner after storing in struct
+            let fut = unsafe {
+                std::mem::transmute::<
+                    kanal::ReceiveFuture<'_, BodyMsg>,
+                    kanal::ReceiveFuture<'static, BodyMsg>,
+                >(fut)
+            };
+            this.inner_fut = Some(Box::pin(fut));
         }
     }
 }

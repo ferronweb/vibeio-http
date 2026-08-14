@@ -326,7 +326,8 @@ where
             let send_continue_body = is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
 
             let request_body = Http1Body {
-                inner: Box::pin(body_rx),
+                inner: body_rx,
+                inner_fut: None,
                 send_continue_body: send_continue_body.clone(),
             };
             let mut request = Request::new(Incoming::H1(request_body));
@@ -374,9 +375,19 @@ where
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) struct Http1Body {
-    #[allow(clippy::type_complexity)]
-    inner: Pin<Box<AsyncReceiver<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>>>,
+    inner: AsyncReceiver<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
+    inner_fut: Option<
+        Pin<
+            Box<
+                kanal::ReceiveFuture<
+                    'static,
+                    Result<http_body::Frame<bytes::Bytes>, std::io::Error>,
+                >,
+            >,
+        >,
+    >,
     send_continue_body: Option<Arc<AtomicBool>>,
 }
 
@@ -389,16 +400,46 @@ impl Body for Http1Body {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        match std::pin::pin!(self.inner.recv()).poll(cx) {
-            Poll::Ready(Ok(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
-            Poll::Ready(Ok(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(Err(_)) => Poll::Ready(None),
-            Poll::Pending => {
-                if let Some(scb) = self.send_continue_body.as_ref() {
-                    scb.store(true, Ordering::Relaxed);
+        let this = self.get_mut();
+        loop {
+            if let Some(inner_fut) = &mut this.inner_fut {
+                match Pin::new(inner_fut).poll(cx) {
+                    Poll::Ready(Ok(Ok(frame))) => {
+                        this.inner_fut.take();
+                        return Poll::Ready(Some(Ok(frame)));
+                    }
+                    Poll::Ready(Ok(Err(e))) => {
+                        this.inner_fut.take();
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Ready(Err(_)) => {
+                        this.inner_fut.take();
+                        return Poll::Ready(None);
+                    }
+                    Poll::Pending => {
+                        if let Some(scb) = this.send_continue_body.as_ref() {
+                            scb.store(true, Ordering::Relaxed);
+                        }
+                        return Poll::Pending;
+                    }
                 }
-                Poll::Pending
             }
+
+            let fut = this.inner.recv();
+            // SAFETY: inner_fut lives as long as inner after storing in struct
+            let fut = unsafe {
+                std::mem::transmute::<
+                    kanal::ReceiveFuture<
+                        '_,
+                        Result<http_body::Frame<bytes::Bytes>, std::io::Error>,
+                    >,
+                    kanal::ReceiveFuture<
+                        'static,
+                        Result<http_body::Frame<bytes::Bytes>, std::io::Error>,
+                    >,
+                >(fut)
+            };
+            this.inner_fut = Some(Box::pin(fut));
         }
     }
 }
