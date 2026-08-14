@@ -973,7 +973,11 @@ mod tests {
 
         assert_eq!(conn.opened, 3);
         let log = conn.log.lock();
-        assert_eq!(log.len(), 3, "stream preludes and SETTINGS are written at init");
+        assert_eq!(
+            log.len(),
+            3,
+            "stream preludes and SETTINGS are written at init"
+        );
         // RFC 9114 Section 6.2.1 / RFC 9204 Sections 4.2 and 4.4: every
         // unidirectional stream must open with its type byte.
         assert_eq!(log[0][0], STREAM_TYPE_CONTROL as u8);
@@ -1196,10 +1200,7 @@ mod tests {
         conn.peer_unis.push_back(Box::new(control));
 
         let events = drain_events(&mut plane, &mut conn).expect("no error");
-        assert!(matches!(
-            events.first(),
-            Some(ControlEvent::Settings(_))
-        ));
+        assert!(matches!(events.first(), Some(ControlEvent::Settings(_))));
         assert!(plane.in_discard.is_none(), "discard stream drained");
     }
 
