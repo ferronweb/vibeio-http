@@ -207,7 +207,20 @@ impl SharedCodecs {
 /// bidirectional QUIC stream.
 ///
 /// Owned by the connection driver, which reads the request
-/// ([`RequestStream::poll_headers`]), streams the body
+/// Tracks an in-progress write so that a re-poll after a `Pending` transport
+/// drains the send buffer instead of re-encoding (which would duplicate bytes).
+enum PendingSend {
+    None,
+    ResponseHeaders(StatusCode),
+    Data,
+    Trailers,
+}
+
+/// A bidirectional HTTP/3 request stream.
+///
+/// Wraps a QUIC bidirectional stream ([`transport::BidiStream`]) and
+/// implements the HTTP/3 framing layer: reading the request
+/// ([`RequestStream::poll_headers`]), streaming the body
 /// ([`RequestStream::poll_recv_data`], [`RequestStream::poll_recv_trailers`])
 /// and writes the response ([`RequestStream::poll_send_response`],
 /// [`RequestStream::poll_send_data`], [`RequestStream::poll_send_trailers`],
@@ -233,6 +246,7 @@ pub(crate) struct RequestStream {
     sent_trailers: bool,
     #[allow(dead_code)] // written by the driver (step 15)
     sent_fin: bool,
+    pending_send: PendingSend,
     send_buf: VecDeque<Bytes>,
 }
 
@@ -258,6 +272,7 @@ impl RequestStream {
             sent_headers: false,
             sent_trailers: false,
             sent_fin: false,
+            pending_send: PendingSend::None,
             send_buf: VecDeque::new(),
         }
     }
@@ -458,25 +473,46 @@ impl RequestStream {
             // is invalid; the server resets it.
             return Poll::Ready(Err(StreamError::Message));
         }
-        let mut lines = Vec::with_capacity(headers.len() + 1);
-        lines.push((
-            Bytes::from_static(b":status"),
-            Bytes::copy_from_slice(status.as_str().as_bytes()),
-        ));
-        for (name, value) in headers {
-            if name.as_str().starts_with(':') {
-                return Poll::Ready(Err(StreamError::Message));
+        match &self.pending_send {
+            PendingSend::ResponseHeaders(_) => {
+                // Re-poll after a Pending transport: just drain send_buf.
+                ready!(self.poll_write(cx, Bytes::new()))?;
+                let pending = std::mem::replace(&mut self.pending_send, PendingSend::None);
+                if let PendingSend::ResponseHeaders(s) = pending {
+                    if !s.is_informational() {
+                        self.sent_headers = true;
+                    }
+                }
+                Poll::Ready(Ok(()))
             }
-            lines.push((
-                Bytes::copy_from_slice(name.as_str().as_bytes()),
-                Bytes::copy_from_slice(value.as_bytes()),
-            ));
+            PendingSend::None => {
+                let mut lines = Vec::with_capacity(headers.len() + 1);
+                lines.push((
+                    Bytes::from_static(b":status"),
+                    Bytes::copy_from_slice(status.as_str().as_bytes()),
+                ));
+                for (name, value) in headers {
+                    if name.as_str().starts_with(':') {
+                        return Poll::Ready(Err(StreamError::Message));
+                    }
+                    lines.push((
+                        Bytes::copy_from_slice(name.as_str().as_bytes()),
+                        Bytes::copy_from_slice(value.as_bytes()),
+                    ));
+                }
+                let (frame_header, field_section) = self.encode_headers(&lines)?;
+                self.pending_send = PendingSend::ResponseHeaders(status);
+                ready!(self.poll_write_parts(cx, frame_header, field_section))?;
+                let pending = std::mem::replace(&mut self.pending_send, PendingSend::None);
+                if let PendingSend::ResponseHeaders(s) = pending {
+                    if !s.is_informational() {
+                        self.sent_headers = true;
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+            _ => Poll::Ready(Err(StreamError::Message)),
         }
-        let (frame_header, field_section) = self.encode_headers(&lines)?;
-        if !status.is_informational() {
-            self.sent_headers = true;
-        }
-        self.poll_write_parts(cx, frame_header, field_section)
     }
 
     /// Writes one DATA frame with `data`.
@@ -486,11 +522,25 @@ impl RequestStream {
         cx: &mut Context<'_>,
         data: Bytes,
     ) -> Poll<Result<(), StreamError>> {
-        let mut frame_header =
-            BytesMut::with_capacity(1 + crate::h3::frame::varint_size(data.len() as u64));
-        write_varint(FRAME_DATA, &mut frame_header);
-        write_varint(data.len() as u64, &mut frame_header);
-        self.poll_write_parts(cx, frame_header.freeze(), data)
+        match &self.pending_send {
+            PendingSend::Data => {
+                // Re-poll after a Pending transport: just drain send_buf.
+                ready!(self.poll_write(cx, Bytes::new()))?;
+                self.pending_send = PendingSend::None;
+                Poll::Ready(Ok(()))
+            }
+            PendingSend::None => {
+                let mut frame_header =
+                    BytesMut::with_capacity(1 + crate::h3::frame::varint_size(data.len() as u64));
+                write_varint(FRAME_DATA, &mut frame_header);
+                write_varint(data.len() as u64, &mut frame_header);
+                self.pending_send = PendingSend::Data;
+                ready!(self.poll_write_parts(cx, frame_header.freeze(), data))?;
+                self.pending_send = PendingSend::None;
+                Poll::Ready(Ok(()))
+            }
+            _ => Poll::Ready(Err(StreamError::Message)),
+        }
     }
 
     /// Writes the trailers HEADERS frame. No DATA may follow.
@@ -503,19 +553,33 @@ impl RequestStream {
         if !self.sent_headers {
             return Poll::Ready(Err(StreamError::Message));
         }
-        let mut lines = Vec::with_capacity(trailers.len());
-        for (name, value) in trailers {
-            if name.as_str().starts_with(':') {
-                return Poll::Ready(Err(StreamError::Message));
+        match &self.pending_send {
+            PendingSend::Trailers => {
+                // Re-poll after a Pending transport: just drain send_buf.
+                ready!(self.poll_write(cx, Bytes::new()))?;
+                self.pending_send = PendingSend::None;
+                Poll::Ready(Ok(()))
             }
-            lines.push((
-                Bytes::copy_from_slice(name.as_str().as_bytes()),
-                Bytes::copy_from_slice(value.as_bytes()),
-            ));
+            PendingSend::None => {
+                let mut lines = Vec::with_capacity(trailers.len());
+                for (name, value) in trailers {
+                    if name.as_str().starts_with(':') {
+                        return Poll::Ready(Err(StreamError::Message));
+                    }
+                    lines.push((
+                        Bytes::copy_from_slice(name.as_str().as_bytes()),
+                        Bytes::copy_from_slice(value.as_bytes()),
+                    ));
+                }
+                let (frame_header, field_section) = self.encode_headers(&lines)?;
+                self.pending_send = PendingSend::Trailers;
+                ready!(self.poll_write_parts(cx, frame_header, field_section))?;
+                self.pending_send = PendingSend::None;
+                self.sent_trailers = true;
+                Poll::Ready(Ok(()))
+            }
+            _ => Poll::Ready(Err(StreamError::Message)),
         }
-        let (frame_header, field_section) = self.encode_headers(&lines)?;
-        self.sent_trailers = true;
-        self.poll_write_parts(cx, frame_header, field_section)
     }
 
     /// Finishes the response (`FIN`), after all queued data was written.
