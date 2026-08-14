@@ -550,10 +550,13 @@ impl Encoder {
     /// Cancellations (4.4.2) free every reference of a cancelled stream,
     /// and Insert Count Increments (4.4.3) raise the Known Received Count.
     ///
-    /// Per RFC 9204 Section 4.4, acknowledging a field section that was
-    /// never sent, cancelling a stream without outstanding field sections,
-    /// or incrementing past the number of inserts is a connection error of
-    /// type QPACK_DECODER_STREAM_ERROR.
+    /// Only an Insert Count Increment (4.4.3) is a connection error: a zero
+    /// increment, or one that advances past the number of inserts sent
+    /// (RFC 9204 Section 2.1.4). A Section Acknowledgment or Stream
+    /// Cancellation that matches no outstanding field section is benign —
+    /// RFC 9204 Section 4.4 defines no error for it and a peer may send one
+    /// for a section already acknowledged or cancelled — so it is ignored
+    /// rather than closing the connection.
     #[inline]
     pub fn feed_decoder_stream(&mut self, buf: &[u8]) -> Result<(), QpackError> {
         let mut off = 0;
@@ -565,24 +568,25 @@ impl Encoder {
                 // The top bit is the instruction type; the remaining 7 bits
                 // (and any continuation bytes) are the Stream ID, so this
                 // arm must catch every byte with the high bit set, including
-                // IDs at or above 64 whose prefix byte is `0xC0`.
+                // IDs at or above 64 whose prefix byte is `0xC0`. A matching
+                // field section is freed; a stray acknowledgment (already
+                // freed, or never outstanding) is ignored.
                 let stream_id = integer::decode(buf, &mut off, 7, header)
                     .map_err(|_| QpackError::DecoderStream)?;
-                let pos = self
+                if let Some(pos) = self
                     .pending_refs
                     .iter()
                     .position(|(id, _)| *id == stream_id)
-                    .ok_or(QpackError::DecoderStream)?;
-                self.pending_refs.remove(pos);
+                {
+                    self.pending_refs.remove(pos);
+                }
             } else if header & 0x40 != 0 {
                 // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
+                // Every outstanding reference of the stream is dropped; a
+                // cancellation for a stream with none is a no-op.
                 let stream_id = integer::decode(buf, &mut off, 6, header)
                     .map_err(|_| QpackError::DecoderStream)?;
-                let before = self.pending_refs.len();
                 self.pending_refs.retain(|(id, _)| *id != stream_id);
-                if self.pending_refs.len() == before {
-                    return Err(QpackError::DecoderStream);
-                }
             } else {
                 // `00` + 6-bit increment: Insert Count Increment (4.4.3).
                 // A zero increment is forbidden, and the total may not
@@ -646,6 +650,27 @@ mod tests {
         assert!(inserted >= 1);
         assert!(enc.feed_decoder_stream(&[0x01]).is_ok());
         assert_eq!(enc.known_received, 1);
+    }
+
+    #[test]
+    fn stray_decoder_stream_instructions_are_benign() {
+        // A conformant peer may send a Section Acknowledgment or Stream
+        // Cancellation for a field section the encoder has already freed
+        // (or never outstanding). RFC 9204 Section 4.4 defines no error for
+        // these; treating them as QPACK_DECODER_STREAM_ERROR closed the
+        // connection and dropped in-flight requests (the bug this guards).
+        let mut enc = Encoder::new(256, false);
+
+        // Section Acknowledgment for a stream with no pending reference.
+        assert!(enc.feed_decoder_stream(&[0xC0]).is_ok());
+        // Stream Cancellation for a stream with no pending reference.
+        assert!(enc.feed_decoder_stream(&[0x44]).is_ok());
+
+        // A duplicate Section Acknowledgment after the only pending
+        // reference was already freed is likewise benign.
+        enc.encode_section(4, &[hdr("a", "b")]);
+        assert!(enc.feed_decoder_stream(&[0x44]).is_ok());
+        assert!(enc.feed_decoder_stream(&[0x44]).is_ok());
     }
 
     #[test]
