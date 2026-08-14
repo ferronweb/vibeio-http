@@ -1,0 +1,41 @@
+name: h3spec
+
+# HTTP/3 conformance gate for the native backend. Downloads the prebuilt
+# h3spec binary (no Haskell toolchain needed), builds the `h3spec_server`
+# example, and runs it against h3spec. Known RFC 9114 / QPACK conformance gaps
+# are skipped via scripts/h3spec.sh's KNOWN_FAILING list; the run is green on
+# the remaining cases and gates CI on them.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  H3SPEC_VERSION: "0.1.13"
+
+jobs:
+  h3spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install h3spec
+        run: |
+          mkdir -p h3spec
+          curl -fsSL -o h3spec/h3spec \
+            "https://github.com/kazu-yamamoto/h3spec/releases/download/v${H3SPEC_VERSION}/h3spec-linux-x86_64"
+          chmod +x h3spec/h3spec
+          ./h3spec/h3spec --version
+
+      - name: Run h3spec conformance
+        # scripts/h3spec.sh builds the example (with --features h3-quinn), waits
+        # for UDP readiness, runs h3spec -n with the documented skip list, and
+        # propagates its exit code.
+        run: bash scripts/h3spec.sh
