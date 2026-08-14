@@ -18,9 +18,11 @@
 //!   are queued for the request-stream handler.
 //!
 //! Rules enforced here, all from RFC 9114 Section 6.2: a second control
-//! stream, a push stream (server side), a duplicate QPACK stream, or an
-//! unknown stream type is `H3_STREAM_CREATION_ERROR`; the first frame of
-//! the control stream must be SETTINGS (`H3_MISSING_SETTINGS` otherwise);
+//! stream, a push stream (server side), or a duplicate QPACK stream is
+//! `H3_STREAM_CREATION_ERROR`; an unknown (including reserved/grease) stream
+//! type is ignored, its data drained and discarded (never a connection
+//! error); the first frame of the control stream must be SETTINGS
+//! (`H3_MISSING_SETTINGS` otherwise);
 //! a second SETTINGS or any DATA/HEADERS/PUSH_PROMISE on the control
 //! stream is `H3_FRAME_UNEXPECTED`; a CANCEL_PUSH for a push this endpoint
 //! never promised is `H3_ID_ERROR`; a reduced MAX_PUSH_ID is `H3_ID_ERROR`;
@@ -179,6 +181,11 @@ pub(crate) struct ControlStreams {
     in_encoder: Option<Box<dyn UniStream>>,
     in_decoder: Option<Box<dyn UniStream>>,
     pending_uni: Option<PendingUni>,
+    // A uni stream of unknown (or reserved, i.e. grease) type: drained and
+    // discarded (RFC 9114 Section 6.2: recipients of unknown stream types
+    // MUST discard the data or abort reading, and MUST NOT treat them as a
+    // connection error of any kind).
+    in_discard: Option<Box<dyn UniStream>>,
 
     // The connection's QPACK codecs, shared with the request streams. The
     // decoder's capacity is fixed by our own SETTINGS; the encoder is
@@ -212,6 +219,7 @@ impl ControlStreams {
             in_encoder: None,
             in_decoder: None,
             pending_uni: None,
+            in_discard: None,
             shared,
             settings_received: false,
             max_push_id: None,
@@ -282,17 +290,28 @@ impl ControlStreams {
         if self.out_control.is_none() {
             let stream = ready!(conn.poll_open_uni(cx).map_err(ControlError::from))?;
             self.out_control = Some(stream);
+            // RFC 9114 Section 6.2.1: the control stream's first byte is
+            // its type; the SETTINGS frame that opens it comes right after.
             let mut settings = BytesMut::new();
+            frame::write_varint(STREAM_TYPE_CONTROL, &mut settings);
             Frame::Settings(self.local.to_frame()).encode(&mut settings);
             self.control_buf.extend_from_slice(&settings);
         }
         if self.out_encoder.is_none() {
             let stream = ready!(conn.poll_open_uni(cx).map_err(ControlError::from))?;
             self.out_encoder = Some(stream);
+            // RFC 9204 Section 4.2: the encoder stream starts with its
+            // type byte before any instruction.
+            self.encoder_pending
+                .push_back(Bytes::from_static(&[STREAM_TYPE_QPACK_ENCODER as u8]));
         }
         if self.out_decoder.is_none() {
             let stream = ready!(conn.poll_open_uni(cx).map_err(ControlError::from))?;
             self.out_decoder = Some(stream);
+            // RFC 9204 Section 4.4: the decoder stream starts with its
+            // type byte before any instruction.
+            self.decoder_pending
+                .push_back(Bytes::from_static(&[STREAM_TYPE_QPACK_DECODER as u8]));
         }
         Poll::Ready(Ok(()))
     }
@@ -509,6 +528,22 @@ impl ControlStreams {
                 }
             }
 
+            // Drain a stream of unknown type: its semantics are unknown,
+            // so every byte is discarded until it ends or is reset (RFC
+            // 9114 Section 6.2). Only one discard stream is serviced at a
+            // time; when it ends, the next poll accepts the peer's next
+            // stream.
+            if let Some(stream) = self.in_discard.as_mut() {
+                match stream.poll_recv(cx).map_err(ControlError::from)? {
+                    Poll::Ready(Some(_)) => progressed = true,
+                    Poll::Ready(None) => {
+                        self.in_discard = None;
+                        progressed = true;
+                    }
+                    Poll::Pending => {}
+                }
+            }
+
             if !progressed {
                 return Poll::Pending;
             }
@@ -594,7 +629,13 @@ impl ControlStreams {
                     }
                     self.in_decoder = Some(stream);
                 }
-                _ => return Poll::Ready(Err(ControlError::StreamCreation)),
+                _ => {
+                    // Unknown or reserved (grease) stream type: its data
+                    // has no meaning to us, so it is discarded as it
+                    // arrives (RFC 9114 Section 6.2). This is never a
+                    // connection error.
+                    self.in_discard = Some(stream);
+                }
             }
             return Poll::Ready(Ok(()));
         }
@@ -932,10 +973,16 @@ mod tests {
 
         assert_eq!(conn.opened, 3);
         let log = conn.log.lock();
-        assert_eq!(log.len(), 1, "only SETTINGS is written at init");
+        assert_eq!(log.len(), 3, "stream preludes and SETTINGS are written at init");
+        // RFC 9114 Section 6.2.1 / RFC 9204 Sections 4.2 and 4.4: every
+        // unidirectional stream must open with its type byte.
+        assert_eq!(log[0][0], STREAM_TYPE_CONTROL as u8);
+        assert_eq!(log[1][0], STREAM_TYPE_QPACK_ENCODER as u8);
+        assert_eq!(log[2][0], STREAM_TYPE_QPACK_DECODER as u8);
+        // The control stream's first frame is SETTINGS.
         assert_eq!(
-            log[0],
-            encode_frames(&[settings_frame(&LocalSettings::default().to_frame())])
+            &log[0][1..],
+            &encode_frames(&[settings_frame(&LocalSettings::default().to_frame())])[..]
         );
     }
 
@@ -1135,24 +1182,38 @@ mod tests {
     // }
 
     #[test]
-    fn unknown_and_push_uni_stream_types_are_stream_creation_error() {
-        for (bytes, label) in [
-            (&[0x42u8, 0x01, 0x00][..], "unknown type"),
-            (&[STREAM_TYPE_PUSH as u8, 0x01, 0x00][..], "push stream"),
-        ] {
-            let mut plane = ControlStreams::new(LocalSettings::default());
-            let mut conn = MockConn::new();
-            let mut peer = MockStream::new(conn.log.clone());
-            peer.feed(bytes);
-            conn.peer_unis.push_back(Box::new(peer));
+    fn unknown_uni_stream_type_is_discarded() {
+        let mut plane = ControlStreams::new(LocalSettings::default());
+        let mut conn = MockConn::new();
+        let mut unknown = MockStream::new(conn.log.clone());
+        unknown.feed(&[0x42, 0x01, 0x00]);
+        unknown.finish();
+        conn.peer_unis.push_back(Box::new(unknown));
+        let mut control = MockStream::new(conn.log.clone());
+        control.feed(&control_wire(&[settings_frame(
+            &LocalSettings::default().to_frame(),
+        )]));
+        conn.peer_unis.push_back(Box::new(control));
 
-            let err = drain_events(&mut plane, &mut conn).unwrap_err();
-            assert!(
-                matches!(err, ControlError::StreamCreation),
-                "{label}: {err:?}"
-            );
-            assert_eq!(err.h3_code(), 0x0103);
-        }
+        let events = drain_events(&mut plane, &mut conn).expect("no error");
+        assert!(matches!(
+            events.first(),
+            Some(ControlEvent::Settings(_))
+        ));
+        assert!(plane.in_discard.is_none(), "discard stream drained");
+    }
+
+    #[test]
+    fn push_uni_stream_is_stream_creation_error() {
+        let mut plane = ControlStreams::new(LocalSettings::default());
+        let mut conn = MockConn::new();
+        let mut peer = MockStream::new(conn.log.clone());
+        peer.feed(&[STREAM_TYPE_PUSH as u8, 0x01, 0x00]);
+        conn.peer_unis.push_back(Box::new(peer));
+
+        let err = drain_events(&mut plane, &mut conn).unwrap_err();
+        assert!(matches!(err, ControlError::StreamCreation));
+        assert_eq!(err.h3_code(), 0x0103);
     }
 
     #[test]
@@ -1185,11 +1246,14 @@ mod tests {
         assert!(plane.poll_read(&mut conn, &mut cx()).is_pending());
         assert!(plane.pending_uni.is_some());
 
-        // The second byte completes type 16128, which is unknown.
+        // The second byte completes type 16128, which is unknown: the
+        // stream is discarded, not a connection error (RFC 9114 Section
+        // 6.2).
         sink.lock().push_back(Some(Bytes::from_static(&[0x00])));
-        let err = drain_events(&mut plane, &mut conn).unwrap_err();
-        assert!(matches!(err, ControlError::StreamCreation));
-        assert_eq!(err.h3_code(), 0x0103);
+        sink.lock().push_back(None);
+        let events = drain_events(&mut plane, &mut conn).expect("no error");
+        assert!(events.is_empty());
+        assert!(plane.in_discard.is_none(), "discard stream drained");
     }
 
     #[test]
@@ -1326,8 +1390,8 @@ mod tests {
 
         {
             let log = conn.log.lock();
-            assert_eq!(log.len(), 2);
-            assert_eq!(log[1], encode_frames(&[Frame::Goaway(7)]));
+            assert_eq!(log.len(), 4);
+            assert_eq!(log[3], encode_frames(&[Frame::Goaway(7)]));
         }
         assert_eq!(conn.shutdown_code, None, "closing is the driver's job");
 
@@ -1342,9 +1406,9 @@ mod tests {
         assert!(plane.poll_flush(&mut cx).is_ready());
         {
             let log = conn.log.lock();
-            assert_eq!(log.len(), 3);
+            assert_eq!(log.len(), 5);
             assert_eq!(
-                log[2],
+                log[4],
                 encode_frames(&[Frame::MaxPushId(2), Frame::CancelPush(1)])
             );
         }
