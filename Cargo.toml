@@ -49,6 +49,10 @@ rcgen = "0.14"
 name = "h2_hpack"
 harness = false
 
+[[bench]]
+name = "h3_qpack"
+harness = false
+
 [features]
 default = ["h1", "h1-zerocopy", "h2"]
 h1 = ["httparse", "httpdate", "memchr", "tokio-util"]
