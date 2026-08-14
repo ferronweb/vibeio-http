@@ -145,6 +145,7 @@ where
             initial_connection_window_size: self.options.initial_connection_window_size,
             max_frame_size: self.options.max_frame_size,
             max_header_list_size: self.options.max_header_list_size,
+            enable_connect_protocol: self.options.enable_connect_protocol,
             idle_timeout: self.options.idle_timeout,
         };
         // The trait hands us a plain `Fn`; the native connection needs

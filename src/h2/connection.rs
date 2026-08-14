@@ -62,6 +62,8 @@ pub struct ConnectionOptions {
     pub max_frame_size: u32,
     /// Largest decoded header list we accept (`SETTINGS_MAX_HEADER_LIST_SIZE`).
     pub max_header_list_size: u32,
+    /// Whether to enable Extended CONNECT
+    pub enable_connect_protocol: bool,
     /// Close the connection after this long with no frame from the peer
     /// (RFC 9113 Section 10.5). `None` disables the idle timeout.
     pub idle_timeout: Option<Duration>,
@@ -78,6 +80,7 @@ impl Default for ConnectionOptions {
             initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
             max_header_list_size: u32::MAX,
+            enable_connect_protocol: false,
             idle_timeout: None,
         }
     }
@@ -293,6 +296,14 @@ where
                 Setting {
                     id: 0x05,
                     value: self.opts.max_frame_size,
+                },
+                Setting {
+                    id: 0x08,
+                    value: if self.opts.enable_connect_protocol {
+                        1
+                    } else {
+                        0
+                    },
                 },
             ],
         );
