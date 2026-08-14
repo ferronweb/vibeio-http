@@ -1,6 +1,6 @@
 //! # vibeio-http
 //!
-//! High-performance HTTP/1.1, HTTP/2, and experimental HTTP/3 server implementation
+//! High-performance HTTP/1.1, HTTP/2, and HTTP/3 server implementation
 //! for the [`vibeio`] async runtime.
 //!
 //! `vibeio-http` provides protocol-specific connection handlers behind a common
