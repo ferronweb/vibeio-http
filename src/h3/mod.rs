@@ -271,6 +271,7 @@ async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
 ///
 /// Drives one accepted request stream to completion.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     stream: SharedRequest,
     shared: Arc<parking_lot::Mutex<SharedCodecs>>,

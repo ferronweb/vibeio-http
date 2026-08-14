@@ -393,7 +393,7 @@ fn is_reserved_setting(id: u64) -> bool {
 #[inline]
 fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
     let mut settings = Settings::new();
-    let mut rest = &payload[..];
+    let mut rest = payload;
     while !rest.is_empty() {
         let Some((id, id_len)) = parse_varint(rest)? else {
             return Err(FrameError::Frame);
