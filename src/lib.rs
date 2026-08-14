@@ -68,7 +68,7 @@ mod h3;
 mod incoming;
 mod upgrade;
 
-#[cfg(feature = "h2")]
+#[cfg(any(feature = "h2", feature = "h3"))]
 pub mod hpack;
 
 pub use early_hints::*;
