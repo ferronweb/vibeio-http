@@ -11,6 +11,14 @@
   runtime dependency; it remains only as a dev-dependency for interop
   tests and benchmarks. QPACK and limits are configurable through the
   extended `Http3Options`.
+- Enforced RFC 9114 / QPACK conformance gaps surfaced by `h3spec` (critical
+  stream closure, `SETTINGS`-first ordering, `MAX_PUSH_ID` client check,
+  `PATH` pseudo-header rejection, unidirectional-stream validation, QPACK
+  decoder-stream error codes) and added a green `h3spec` conformance
+  harness plus CI workflow.
+- Added a `http3_control` fuzz target exercising the HTTP/3 control plane
+  and QPACK decoder/encoder streams, and Criterion benchmarks for the QPACK
+  codec (`h3_qpack`) and the native HTTP/3 server (`h3_server`).
 
 ## `vibeio-http` 0.3.5
 
