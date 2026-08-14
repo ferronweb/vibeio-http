@@ -42,6 +42,7 @@ impl Http3Options {
     /// `qpack_max_table_capacity` and `qpack_blocked_streams`; the peer's
     /// encoder is limited by them in turn. `max_field_section_size` bounds
     /// how large a field section this endpoint will accept.
+    #[inline]
     pub fn new() -> Self {
         Self {
             local_settings: LocalSettings::default(),
@@ -58,6 +59,7 @@ impl Http3Options {
     ///
     /// This is also the capacity this endpoint's own QPACK decoder uses. It
     /// must not exceed 2^30 - 1. Defaults to **`0`** (no dynamic table).
+    #[inline]
     pub fn qpack_max_table_capacity(mut self, capacity: u64) -> Self {
         self.local_settings.qpack_max_table_capacity = capacity;
         self
@@ -68,6 +70,7 @@ impl Http3Options {
     /// `SETTINGS_QPACK_BLOCKED_STREAMS` (RFC 9204 Section 5).
     ///
     /// Defaults to **`0`**.
+    #[inline]
     pub fn qpack_blocked_streams(mut self, max: u64) -> Self {
         self.local_settings.qpack_blocked_streams = max;
         self
@@ -77,6 +80,7 @@ impl Http3Options {
     /// `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section 7.2.4.1).
     ///
     /// Pass `None` for unlimited (the RFC default).
+    #[inline]
     pub fn max_field_section_size(mut self, max: Option<u64>) -> Self {
         self.local_settings.max_field_section_size = max;
         self
@@ -86,6 +90,7 @@ impl Http3Options {
     /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 9114 Section 7.2.4.1).
     ///
     /// Defaults to **`false`**.
+    #[inline]
     pub fn enable_connect_protocol(mut self, enable: bool) -> Self {
         self.local_settings.enable_connect_protocol = enable;
         self
@@ -97,6 +102,7 @@ impl Http3Options {
     /// If no new request arrives before this duration, the connection is
     /// gracefully shut down and the handler returns a timeout error.
     /// Pass `None` to disable this timeout. Defaults to **30 seconds**.
+    #[inline]
     pub fn accept_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.accept_timeout = timeout;
         self
@@ -108,6 +114,7 @@ impl Http3Options {
     /// If the setup does not complete within this duration, the handler
     /// returns an I/O timeout error. Pass `None` to disable this timeout.
     /// Defaults to **30 seconds**.
+    #[inline]
     pub fn handshake_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.handshake_timeout = timeout;
         self
@@ -117,6 +124,7 @@ impl Http3Options {
     /// request contains an `Expect: 100-continue` header.
     ///
     /// Defaults to **`true`**.
+    #[inline]
     pub fn send_continue_response(mut self, send: bool) -> Self {
         self.send_continue_response = send;
         self
@@ -127,6 +135,7 @@ impl Http3Options {
     ///
     /// The value is cached and refreshed at most once per second.
     /// Defaults to **`true`**.
+    #[inline]
     pub fn send_date_header(mut self, send: bool) -> Self {
         self.send_date_header = send;
         self
@@ -134,6 +143,7 @@ impl Http3Options {
 }
 
 impl Default for Http3Options {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
