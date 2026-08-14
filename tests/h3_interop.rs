@@ -35,6 +35,10 @@ use vibeio_http::{
 
 const H3_NO_ERROR: u64 = 0x0100;
 
+const SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x1;
+const SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x6;
+const SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x7;
+
 fn loopback() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
@@ -170,18 +174,31 @@ struct Fixture {
     encoder_stream: quinn::SendStream,
     #[allow(dead_code)]
     decoder_stream: quinn::SendStream,
+    /// The server's QPACK encoder stream (type 0x02), fed to `decoder`.
+    server_encoder: Option<quinn::RecvStream>,
     started_at: std::time::Instant,
 }
 
 impl Fixture {
     async fn new(conn: quinn::Connection) -> Self {
+        Self::new_with_capacity(conn, 0, 0).await
+    }
+
+    /// Like [`Fixture::new`], but advertises `capacity` in
+    /// SETTINGS_QPACK_MAX_TABLE_CAPACITY (like Chromium's 65536), so the
+    /// server's encoder may use its dynamic table.
+    async fn new_with_capacity(conn: quinn::Connection, capacity: u64, blocked: u64) -> Self {
         let mut control = conn.open_uni().await.expect("control stream");
         let mut encoder_stream = conn.open_uni().await.expect("encoder stream");
         let mut decoder_stream = conn.open_uni().await.expect("decoder stream");
 
+        let mut settings = Settings::new();
+        settings.insert(SETTINGS_QPACK_MAX_TABLE_CAPACITY, capacity);
+        settings.insert(SETTINGS_QPACK_BLOCKED_STREAMS, blocked);
+        settings.insert(SETTINGS_MAX_FIELD_SECTION_SIZE, 262_144);
         let mut buf = BytesMut::new();
         write_varint(&mut buf, 0x00);
-        Frame::Settings(Settings::new()).encode(&mut buf);
+        Frame::Settings(settings).encode(&mut buf);
         control.write_all(&buf).await.expect("write settings");
 
         let mut buf = BytesMut::new();
@@ -201,10 +218,11 @@ impl Fixture {
         Fixture {
             conn,
             encoder: Encoder::new(0, false),
-            decoder: Decoder::new(0, 0),
+            decoder: Decoder::new(capacity, blocked as usize),
             control,
             encoder_stream,
             decoder_stream,
+            server_encoder: None,
             started_at: std::time::Instant::now(),
         }
     }
@@ -244,6 +262,82 @@ impl Fixture {
             .decode_block(block, stream_id, now)
             .expect("decode response headers")
             .expect("blocked without a dynamic table")
+    }
+
+    /// Accepts whatever unidirectional streams the server has opened so far
+    /// and routes them: the QPACK encoder stream (type 0x02) is retained and
+    /// fed to `decoder` by [`Self::feed_server_encoder`]; control, decoder,
+    /// push and unknown streams are drained and dropped.
+    async fn pump_server_unis(&mut self) {
+        loop {
+            let accept = tokio::time::timeout(Duration::from_millis(250), self.conn.accept_uni())
+                .await;
+            let Ok(uni) = accept else { break };
+            let mut recv = uni.expect("server uni stream");
+            let mut type_byte = [0u8; 1];
+            recv.read_exact(&mut type_byte)
+                .await
+                .expect("uni stream type");
+            match type_byte[0] {
+                0x02 => self.server_encoder = Some(recv),
+                other => {
+                    // Control (0x00), decoder (0x03), push (0x01) or grease:
+                    // nothing to decode here. These streams stay open for
+                    // the connection's lifetime, so drain only what is
+                    // buffered right now (a short timeout), then drop.
+                    let _ = other;
+                    let mut buf = [0u8; 16 * 1024];
+                    loop {
+                        let read =
+                            tokio::time::timeout(Duration::from_millis(100), recv.read(&mut buf))
+                                .await;
+                        match read {
+                            Ok(Ok(Some(n))) if n > 0 => {}
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads one chunk of the server's QPACK encoder stream into the
+    /// decoder, which unblocks any field section whose Required Insert
+    /// Count has been reached.
+    async fn feed_server_encoder(&mut self) {
+        let recv = match self.server_encoder.as_mut() {
+            Some(recv) => recv,
+            None => return,
+        };
+        if let Some(chunk) = recv
+            .read_chunk(64 * 1024, true)
+            .await
+            .expect("read encoder stream")
+        {
+            self.decoder
+                .feed_encoder_stream(&chunk.bytes)
+                .expect("valid encoder instructions");
+        }
+    }
+
+    /// Decodes a response HEADERS block against a dynamic-table-capable
+    /// decoder, pumping the server's encoder stream until the block
+    /// unblocks. This mirrors Chromium's blocked-decoding flow.
+    async fn decode_dynamic(&mut self, block: &[u8], stream_id: u64) -> Vec<(Bytes, Bytes)> {
+        loop {
+            let now = self.started_at.elapsed().as_nanos() as u64;
+            if let Some(headers) = self
+                .decoder
+                .decode_block(block, stream_id, now)
+                .expect("decode response headers")
+            {
+                return headers;
+            }
+            if self.server_encoder.is_none() {
+                self.pump_server_unis().await;
+            }
+            self.feed_server_encoder().await;
+        }
     }
 }
 
@@ -668,6 +762,192 @@ async fn fixture_client_wire_get() {
     })
     .await
     .expect("fixture_client_wire_get timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_dynamic_table_unblocks() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new(),
+            cancel.clone(),
+            |request| async move {
+                let (parts, _) = request.into_parts();
+                let payload = format!("dyn-ok {}", parts.uri.path());
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        // A name outside the static table: the server's
+                        // encoder must insert it and reference it, so the
+                        // response's Required Insert Count is non-zero.
+                        .header("x-dyn-token", "rendered-dynamically")
+                        .body(Full::new(Bytes::from(payload)))
+                        .expect("response"),
+                )
+            },
+        );
+
+        // Chromium advertises 65536 / 100; the fixture's decoder is sized
+        // the same way so it can materialize the server's dynamic entries.
+        let mut fixture = Fixture::new_with_capacity(client_conn, 65_536, 100).await;
+        let (mut send, mut recv) = fixture
+            .request_open(&pseudo(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/dyn"),
+            ]))
+            .await;
+        send.finish().expect("finish request");
+
+        let stream_id = u64::from(recv.id());
+        let mut reader = FrameReader::new();
+        let mut sections = Vec::new();
+        let mut data = Vec::new();
+        while let Some(frame) = reader.next(&mut recv).await {
+            match frame {
+                Frame::Headers(block) => sections.push(field_map(
+                    fixture.decode_dynamic(&block, stream_id).await,
+                )),
+                Frame::Data(chunk) => data.extend_from_slice(&chunk),
+                other => panic!("unexpected frame on request stream: {other:?}"),
+            }
+        }
+        assert_eq!(sections.len(), 1, "no interim responses for a plain GET");
+        let headers = &sections[0];
+        assert_eq!(headers.get(":status").map(String::as_str), Some("200"));
+        assert_eq!(
+            headers.get("x-dyn-token").map(String::as_str),
+            Some("rendered-dynamically")
+        );
+        assert_eq!(data, b"dyn-ok /dyn");
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_dynamic_table_unblocks timed out");
+}
+
+/// One GET against a dynamic-table-capable fixture: the response headers
+/// carry the non-static `x-dyn-token` name, so every response forces the
+/// server's encoder to emit inserts (and, from the second response on, to
+/// reference the entries it inserted for earlier responses).
+async fn dyn_exchange(
+    fixture: &mut Fixture,
+    path: &str,
+    expect_token: &str,
+) -> Vec<u8> {
+    let (mut send, mut recv) = fixture
+        .request_open(&pseudo(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+            (":path", path),
+        ]))
+        .await;
+    send.finish().expect("finish request");
+
+    let stream_id = u64::from(recv.id());
+    let mut reader = FrameReader::new();
+    let mut sections = Vec::new();
+    let mut data = Vec::new();
+    while let Some(frame) = reader.next(&mut recv).await {
+        match frame {
+            Frame::Headers(block) => sections.push(field_map(
+                fixture.decode_dynamic(&block, stream_id).await,
+            )),
+            Frame::Data(chunk) => data.extend_from_slice(&chunk),
+            other => panic!("unexpected frame on request stream: {other:?}"),
+        }
+    }
+    let headers = &sections[0];
+    assert_eq!(headers.get(":status").map(String::as_str), Some("200"));
+    assert_eq!(
+        headers.get("x-dyn-token").map(String::as_str),
+        Some(expect_token)
+    );
+    data
+}
+
+/// A request handler echoing the path, with the dynamic-table-forcing
+/// `x-dyn-token` response header.
+async fn dyn_handler(
+    request: Request<Incoming>,
+) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+    let (parts, _) = request.into_parts();
+    let payload = format!("dyn-ok {}", parts.uri.path());
+    Ok::<_, std::convert::Infallible>(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("x-dyn-token", "rendered-dynamically")
+            .body(Full::new(Bytes::from(payload)))
+            .expect("response"),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_dynamic_table_reload_and_reconnect() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        // Connection 1: the "reload" pattern — the same page twice, so the
+        // second response references the entries the first one inserted.
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new(),
+            cancel.clone(),
+            dyn_handler,
+        );
+        let mut fixture = Fixture::new_with_capacity(client_conn, 65_536, 100).await;
+        assert_eq!(
+            dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
+            b"dyn-ok /page"
+        );
+        assert_eq!(
+            dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
+            b"dyn-ok /page"
+        );
+        drop(fixture);
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server 1 finished");
+        assert!(result.is_ok(), "server 1 handle: {result:?}");
+        server_thread.join().expect("join server 1");
+
+        // Connection 2: the browser closed and reopened; the fresh
+        // connection must serve the dynamic-table response on its first
+        // request.
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new(),
+            cancel.clone(),
+            dyn_handler,
+        );
+        let mut fixture = Fixture::new_with_capacity(client_conn, 65_536, 100).await;
+        assert_eq!(
+            dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
+            b"dyn-ok /page"
+        );
+        drop(fixture);
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server 2 finished");
+        assert!(result.is_ok(), "server 2 handle: {result:?}");
+        server_thread.join().expect("join server 2");
+    })
+    .await
+    .expect("fixture_client_dynamic_table_reload_and_reconnect timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

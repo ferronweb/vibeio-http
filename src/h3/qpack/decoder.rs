@@ -773,6 +773,48 @@ mod tests {
     }
 
     #[test]
+    fn chromium_style_capacity_round_trip() {
+        // Chromium advertises SETTINGS_QPACK_MAX_TABLE_CAPACITY 65536 and
+        // blocked streams 100; the server's encoder is then capped at the
+        // peer's value (inheritcapacity 65536, Huffman on, as in production).
+        let mut enc = Encoder::new(65536, true);
+        let mut dec = Decoder::new(65536, 100);
+
+        let response = [
+            hdr(":status", "200"),
+            hdr("content-type", "text/html"),
+            hdr("x-custom-header", "hello-world"),
+            hdr("x-another", "value-2"),
+        ];
+        let s1 = enc.encode_section(&response);
+        // Reference-before-data: the section arrives first, blocks, then the
+        // encoder stream unblocks it.
+        assert!(dec.decode_block(&s1.block, 0, 0).unwrap().is_none());
+        let unblocked = dec.feed_encoder_stream(&s1.encoder_stream).unwrap();
+        assert_eq!(unblocked.len(), 1);
+        assert_eq!(unblocked[0].headers.as_slice(), response.as_slice());
+
+        // A second section referencing the entries from the first.
+        let s2 = enc.encode_section(&[
+            hdr(":status", "200"),
+            hdr("x-custom-header", "hello-world"),
+        ]);
+        let unblocked2 = dec.feed_encoder_stream(&s2.encoder_stream).unwrap();
+        assert!(unblocked2.is_empty());
+        let out2 = dec
+            .decode_block(&s2.block, 1, 0)
+            .unwrap()
+            .expect("decodes");
+        assert_eq!(
+            out2,
+            &[
+                hdr(":status", "200"),
+                hdr("x-custom-header", "hello-world")
+            ][..]
+        );
+    }
+
+    #[test]
     fn vector_b2_round_trip() {
         // RFC 9204 B.2: Set Capacity 220, two inserts, then a section
         // referencing them post-Base (Required Insert Count 2, Sign 1).
