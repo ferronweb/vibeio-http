@@ -263,8 +263,10 @@ impl Encoder {
                     self.dynamic.set_capacity(self.max_capacity);
                 }
                 let abs = self.dynamic.next_absolute();
-                // Insert with Literal Name (4.3.3).
-                self.push_string(&mut encoder_stream, name, 5, INSERT_WITH_LITERAL_NAME);
+                // Insert with Literal Name (4.3.3): the name length uses a
+                // 5-bit prefix, so `push_string` receives 6 (it reserves one
+                // bit for the Huffman flag).
+                self.push_string(&mut encoder_stream, name, 6, INSERT_WITH_LITERAL_NAME);
                 self.push_string(&mut encoder_stream, value, 8, 0);
                 let _ = self.dynamic.insert(name.clone(), value.clone());
                 // The fresh entry is referenced with a post-Base index.
@@ -439,7 +441,9 @@ impl Encoder {
             return None;
         }
         let mut out = Vec::new();
-        self.push_string(&mut out, name, 5, INSERT_WITH_LITERAL_NAME);
+        // Name length uses a 5-bit prefix (RFC 9204 4.3.3), so `push_string`
+        // receives 6 (it reserves one bit for the Huffman flag).
+        self.push_string(&mut out, name, 6, INSERT_WITH_LITERAL_NAME);
         self.push_string(&mut out, value, 8, 0);
         let res = self
             .dynamic
@@ -842,5 +846,107 @@ mod tests {
         // static index of ":method GET" (17) as an Indexed Field Line.
         assert_eq!(hex(&out.block), "0001d1");
         assert!(out.encoder_stream.is_empty());
+    }
+
+    /// Strict, independent decoder for a single QPACK "Insert With Literal
+    /// Name" instruction (RFC 9204 Section 4.3.3). Deliberately does NOT use
+    /// the project's `push_string`/`read_string`, so it reproduces exactly
+    /// what a third-party decoder (e.g. Chromium) does: the name length uses
+    /// a 5-bit prefix with the Huffman flag at bit 5.
+    fn strict_decode_insert_literal_name(buf: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+        let mut off = 0usize;
+        let first = *buf.get(off)?;
+        // `01` + H + 5-bit name length.
+        if first & 0xC0 != 0x40 {
+            return None;
+        }
+        let name_huffman = first & 0x20 != 0;
+        let mut name_len = (first & 0x1F) as usize;
+        off += 1;
+        if name_len == 0x1F {
+            let mut shift = 0u32;
+            loop {
+                let b = *buf.get(off)?;
+                off += 1;
+                name_len += ((b & 0x7f) as usize) << shift;
+                if b & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+        }
+        let name_raw = buf.get(off..off + name_len)?;
+        off += name_len;
+        let name = if name_huffman {
+            let mut out = Vec::new();
+            crate::hpack::huffman::decode(name_raw, &mut out).ok()?;
+            out
+        } else {
+            name_raw.to_vec()
+        };
+
+        let first = *buf.get(off)?;
+        // 7-bit value length with the Huffman flag at bit 7.
+        let value_huffman = first & 0x80 != 0;
+        let mut value_len = (first & 0x7f) as usize;
+        off += 1;
+        if value_len == 0x7f {
+            let mut shift = 0u32;
+            loop {
+                let b = *buf.get(off)?;
+                off += 1;
+                value_len += ((b & 0x7f) as usize) << shift;
+                if b & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+        }
+        let value_raw = buf.get(off..off + value_len)?;
+        let value = if value_huffman {
+            let mut out = Vec::new();
+            crate::hpack::huffman::decode(value_raw, &mut out).ok()?;
+            out
+        } else {
+            value_raw.to_vec()
+        };
+        Some((name, value))
+    }
+
+    #[test]
+    fn insert_with_literal_name_survives_strict_decode() {
+        // Reproduces the hang Chromium reports: the encoder stream carries an
+        // "Insert With Literal Name" instruction whose name length must be a
+        // 5-bit prefix with the Huffman flag at bit 5. With Huffman enabled
+        // (the production setting), a 4-bit prefix misplaces the flag and
+        // corrupts the stream, so a strict decoder cannot recover the name.
+        let mut enc = Encoder::new(220, true);
+        enc.set_capacity(220);
+        let ins = enc
+            .insert_literal(b"x-custom-header", b"hello-world")
+            .unwrap();
+
+        let (name, value) = strict_decode_insert_literal_name(&ins)
+            .expect("strict QPACK decoder must parse the insert");
+        assert_eq!(name, b"x-custom-header");
+        assert_eq!(value, b"hello-world");
+    }
+
+    #[test]
+    fn insert_with_literal_name_huffman_flag_at_bit_five() {
+        // Byte-level check: with Huffman on, the H flag of an Insert With
+        // Literal Name must sit at bit 5 (0x20), not bit 4 (0x10).
+        let mut enc = Encoder::new(220, true);
+        enc.set_capacity(220);
+        let ins = enc.insert_literal(b"x-custom-header", b"hello").unwrap();
+        let pos = ins
+            .iter()
+            .position(|&b| b & 0xC0 == 0x40)
+            .expect("insert instruction present");
+        assert_eq!(
+            ins[pos] & 0x20,
+            0x20,
+            "Huffman flag must be at bit 5 for an Insert With Literal Name"
+        );
     }
 }

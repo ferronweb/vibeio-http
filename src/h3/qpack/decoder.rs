@@ -274,9 +274,11 @@ impl Decoder {
                     self.insert_entry(name, value)?;
                 }
                 0x40 => {
-                    // Insert with Literal Name (4.3.3).
+                    // Insert with Literal Name (4.3.3): the name length uses
+                    // a 5-bit prefix, so `read_string` receives 6 (it reserves
+                    // one bit for the Huffman flag).
                     let name = self
-                        .read_string(buf, &mut off, 5, header)
+                        .read_string(buf, &mut off, 6, header)
                         .map_err(enc_stream_err)?;
                     let value = self
                         .read_value_string(buf, &mut off)
