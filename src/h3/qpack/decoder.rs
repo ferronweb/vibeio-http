@@ -22,9 +22,11 @@
 //! Validation is strict: malformed instructions are `QPACK_ENCODER_STREAM_
 //! ERROR`, malformed field sections are `QPACK_DECOMPRESSION_FAILED`, a
 //! Required Insert Count that does not equal the largest referenced absolute
-//! index plus one is rejected (Sections 2.1.2 and 2.2.1), and evictions that
+//! index plus one is rejected (Sections 2.1.2 and 2.2.1), evictions that
 //! touch entries with an absolute index at or above the Known Received Count
-//! are rejected (Sections 2.1.1 and 3.2.2).
+//! are rejected (Sections 2.1.1 and 3.2.2), and field sections whose decoded
+//! size exceeds the advertised `SETTINGS_MAX_FIELD_SECTION_SIZE` are rejected
+//! (RFC 9114 Section 7.2.4.1).
 #![expect(dead_code)]
 
 use std::collections::VecDeque;
@@ -114,6 +116,11 @@ pub struct Decoder {
     /// The maximum number of streams that may be blocked at once,
     /// SETTINGS_QPACK_BLOCKED_STREAMS (RFC 9204 Section 5).
     max_blocked_streams: usize,
+    /// Cap on the total size of a decoded field section (the sum of the
+    /// lengths of the names and values of its field lines), the locally
+    /// advertised `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section
+    /// 7.2.4.1). Exceeding it is `QPACK_DECOMPRESSION_FAILED`.
+    max_field_section_size: usize,
     /// Decoder stream instructions awaiting transmission.
     decoder_stream: Vec<u8>,
 }
@@ -131,8 +138,19 @@ impl Decoder {
             blocked: VecDeque::new(),
             blocked_by_stream: Vec::new(),
             max_blocked_streams,
+            max_field_section_size: usize::MAX,
             decoder_stream: Vec::new(),
         }
+    }
+
+    /// Sets the maximum size of a decoded field section: the locally
+    /// advertised `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section
+    /// 7.2.4.1). Field sections whose cumulative name and value octets
+    /// exceed this are rejected with `QPACK_DECOMPRESSION_FAILED` (RFC
+    /// 9204 Section 4.5).
+    #[inline]
+    pub fn set_max_field_section_size(&mut self, size: usize) {
+        self.max_field_section_size = size;
     }
 
     /// The total number of insertions and duplications materialized from the
@@ -402,6 +420,7 @@ impl Decoder {
         let (ric, base, mut off) = self.read_prefix(buf)?;
         let mut headers = Vec::new();
         let mut needed = 0u64;
+        let mut size = 0usize;
         while off < buf.len() {
             let header = buf[off];
             off += 1;
@@ -472,6 +491,14 @@ impl Decoder {
                 needed = needed.max(base + index + 1);
                 let value = self.read_value_string(buf, &mut off).map_err(dec_failed)?;
                 headers.push((name, value));
+            }
+            // The size cap is enforced on the decoded output, not the
+            // encoded block: Huffman encoding and index references make the
+            // two diverge arbitrarily (RFC 9114 Section 7.2.4.1).
+            let (name, value) = headers.last().expect("one field line pushed per branch");
+            size = size.saturating_add(name.len() + value.len());
+            if size > self.max_field_section_size {
+                return Err(QpackError::DecompressionFailed);
             }
         }
         if ric != needed {
@@ -941,6 +968,53 @@ mod tests {
         let mut dec = Decoder::new(220, 8);
         assert_eq!(dec.decode_block(b"\x00\x00", 0, 0).unwrap(), Some(vec![]));
         assert!(dec.take_decoder_stream().is_empty());
+    }
+
+    #[test]
+    fn field_section_size_capped() {
+        // A field section whose decoded size exceeds the advertised
+        // SETTINGS_MAX_FIELD_SECTION_SIZE is a decompression failure (RFC
+        // 9204 Section 4.5). The cap counts decoded names and values, not
+        // the encoded block.
+        let mut dec = Decoder::new(220, 8);
+        dec.set_max_field_section_size(10);
+        // Name "x" (1) + value of 10 octets: 11, one over the cap.
+        assert_eq!(
+            dec.decode_block(b"\x00\x00\x21x\x0ayyyyyyyyyy", 0, 0),
+            Err(QpackError::DecompressionFailed)
+        );
+        // A section of exactly the cap decodes.
+        let headers = dec.decode_block(b"\x00\x00\x21x\tyyyyyyyyy", 0, 0).unwrap();
+        assert_eq!(headers.as_deref(), Some(&[hdr("x", "yyyyyyyyy")][..]));
+        // Static table lines count too: content-length: 0 is 15 octets.
+        assert_eq!(
+            dec.decode_block(b"\x00\x00\xc4", 0, 0),
+            Err(QpackError::DecompressionFailed)
+        );
+    }
+
+    #[test]
+    fn blocked_section_size_capped_on_unblock() {
+        // The cap is enforced when the section is decoded, so a section
+        // buffered as blocked is rejected by the feed once the encoder
+        // stream unblocks it.
+        let mut enc = Encoder::new(220, false);
+        let mut es = Vec::new();
+        es.extend_from_slice(&enc.set_capacity(220).unwrap());
+        es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
+        let block = enc
+            .encode_section(&[hdr("custom-key", "custom-value")])
+            .block;
+
+        let mut dec = Decoder::new(220, 8);
+        dec.set_max_field_section_size(10);
+        // custom-key (10) + custom-value (12) = 22, but the section is
+        // buffered before its decoded size is known.
+        assert!(dec.decode_block(&block, 7, 0).unwrap().is_none());
+        assert_eq!(
+            dec.feed_encoder_stream(&es),
+            Err(QpackError::DecompressionFailed)
+        );
     }
 
     #[test]

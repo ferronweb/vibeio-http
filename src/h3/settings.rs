@@ -83,7 +83,7 @@ impl PeerSettings {
 /// and `qpack_blocked_streams`; the peer's encoder is limited by them in
 /// turn. `max_field_section_size` bounds how large a field section this
 /// endpoint will accept.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSettings {
     /// `SETTINGS_QPACK_MAX_TABLE_CAPACITY`; must not exceed 2^30 - 1
     /// (RFC 9204 Section 5).
@@ -95,6 +95,18 @@ pub struct LocalSettings {
     pub max_field_section_size: Option<u64>,
     /// `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
     pub enable_connect_protocol: bool,
+}
+
+impl Default for LocalSettings {
+    #[inline]
+    fn default() -> Self {
+        LocalSettings {
+            qpack_max_table_capacity: 0,
+            qpack_blocked_streams: 0,
+            max_field_section_size: Some(65_536),
+            enable_connect_protocol: false,
+        }
+    }
 }
 
 impl LocalSettings {

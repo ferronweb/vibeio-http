@@ -168,11 +168,21 @@ impl SharedCodecs {
     /// Creates the codecs for a connection with the given local settings.
     #[inline]
     pub(crate) fn new(local: &LocalSettings) -> Self {
+        let mut decoder = Decoder::new(
+            local.qpack_max_table_capacity,
+            local.qpack_blocked_streams as usize,
+        );
+        // The decoder rejects inbound field sections larger than the limit
+        // this endpoint advertised (RFC 9114 Section 7.2.4.1); `None` means
+        // unlimited.
+        decoder.set_max_field_section_size(
+            local
+                .max_field_section_size
+                .map(|v| v as usize)
+                .unwrap_or(usize::MAX),
+        );
         Self {
-            decoder: Decoder::new(
-                local.qpack_max_table_capacity,
-                local.qpack_blocked_streams as usize,
-            ),
+            decoder,
             encoder: None,
             encoder_stream: VecDeque::new(),
             unblocked: Vec::new(),

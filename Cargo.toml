@@ -62,7 +62,7 @@ required-features = ["h3", "h3-quinn"]
 harness = false
 
 [features]
-default = ["h1", "h1-zerocopy", "h2"]
+default = ["h1", "h1-zerocopy", "h2", "h3", "h3-quinn"]
 h1 = ["httparse", "httpdate", "memchr", "tokio-util"]
 h1-zerocopy = ["h1", "vibeio/splice"]
 h2 = ["dep:rustc-hash", "httpdate", "tokio-util", "pin-project-lite"]

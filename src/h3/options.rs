@@ -33,7 +33,7 @@ impl Http3Options {
     /// | `send_date_header` | `true` |
     /// | `qpack_max_table_capacity` | `0` (RFC 9204 default) |
     /// | `qpack_blocked_streams` | `0` (RFC 9204 default) |
-    /// | `max_field_section_size` | unlimited (RFC 9114 default) |
+    /// | `max_field_section_size` | 65,536 |
     /// | `enable_connect_protocol` | `false` |
     ///
     /// The QPACK/limit settings are advertised to the peer in this

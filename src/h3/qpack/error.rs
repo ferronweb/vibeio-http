@@ -12,7 +12,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QpackError {
     /// `QPACK_DECOMPRESSION_FAILED` (0x0200): a field section could not be
-    /// decoded, or references an entry that is evicted or out of range.
+    /// decoded, or references an entry that is evicted or out of range, or
+    /// exceeds the advertised `SETTINGS_MAX_FIELD_SECTION_SIZE`.
     DecompressionFailed,
     /// `QPACK_ENCODER_STREAM_ERROR` (0x0201): an encoder stream instruction
     /// was malformed or violated table constraints.
