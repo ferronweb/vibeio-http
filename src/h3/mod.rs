@@ -741,16 +741,8 @@ where
                 // Hand the request streams' queued QPACK encoder
                 // instructions to the control plane.
                 {
-                    let mut instructions = Vec::new();
-                    {
-                        let mut shared = shared.lock();
-                        while let Some(bytes) = shared.encoder_stream.pop_front() {
-                            instructions.push(bytes);
-                        }
-                    }
-                    for bytes in instructions {
-                        controls.queue_encoder_stream(bytes);
-                    }
+                    let mut shared = shared.lock();
+                    controls.queue_encoder_streams(&mut shared.encoder_stream);
                 }
 
                 // Write the control plane's outbound streams. If the peer tore

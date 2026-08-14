@@ -40,8 +40,8 @@ use parking_lot::Mutex;
 
 use crate::h3::error::{H3Error, TransportError};
 use crate::h3::frame::{
-    Frame, FrameDecoder, FrameError, FRAME_CANCEL_PUSH, FRAME_GOAWAY, FRAME_MAX_PUSH_ID,
-    FRAME_PUSH_PROMISE, FRAME_SETTINGS,
+    write_varint, Frame, FrameDecoder, FrameError, FRAME_CANCEL_PUSH, FRAME_DATA, FRAME_GOAWAY,
+    FRAME_HEADERS, FRAME_MAX_PUSH_ID, FRAME_PUSH_PROMISE, FRAME_SETTINGS,
 };
 use crate::h3::qpack::{Decoder, Encoder, QpackError, UnblockedSection};
 use crate::h3::settings::LocalSettings;
@@ -461,11 +461,11 @@ impl RequestStream {
                 Bytes::copy_from_slice(value.as_bytes()),
             ));
         }
-        let bytes = self.encode_headered_byte(&lines)?;
+        let (frame_header, field_section) = self.encode_headers(&lines)?;
         if !status.is_informational() {
             self.sent_headers = true;
         }
-        self.poll_write(cx, bytes)
+        self.poll_write_parts(cx, frame_header, field_section)
     }
 
     /// Writes one DATA frame with `data`.
@@ -475,9 +475,11 @@ impl RequestStream {
         cx: &mut Context<'_>,
         data: Bytes,
     ) -> Poll<Result<(), StreamError>> {
-        let mut buf = BytesMut::new();
-        Frame::Data(data).encode(&mut buf);
-        self.poll_write(cx, buf.freeze())
+        let mut frame_header =
+            BytesMut::with_capacity(1 + crate::h3::frame::varint_size(data.len() as u64));
+        write_varint(FRAME_DATA, &mut frame_header);
+        write_varint(data.len() as u64, &mut frame_header);
+        self.poll_write_parts(cx, frame_header.freeze(), data)
     }
 
     /// Writes the trailers HEADERS frame. No DATA may follow.
@@ -500,9 +502,9 @@ impl RequestStream {
                 Bytes::copy_from_slice(value.as_bytes()),
             ));
         }
-        let bytes = self.encode_headered_byte(&lines)?;
+        let (frame_header, field_section) = self.encode_headers(&lines)?;
         self.sent_trailers = true;
-        self.poll_write(cx, bytes)
+        self.poll_write_parts(cx, frame_header, field_section)
     }
 
     /// Finishes the response (`FIN`), after all queued data was written.
@@ -538,9 +540,11 @@ impl RequestStream {
     }
 
     /// Encodes a field section with the shared encoder, enforces the peer's
-    /// field-section size limit, and frames it as HEADERS.
+    /// field-section size limit, and returns the HEADERS frame header plus
+    /// its field section as separate byte ranges. Keeping the body separate
+    /// lets the transport write the QPACK output without copying it again.
     #[inline]
-    fn encode_headered_byte(&mut self, lines: &[(Bytes, Bytes)]) -> Result<Bytes, StreamError> {
+    fn encode_headers(&mut self, lines: &[(Bytes, Bytes)]) -> Result<(Bytes, Bytes), StreamError> {
         {
             let shared = self.shared.lock();
             if shared.encoder.is_none() {
@@ -559,10 +563,14 @@ impl RequestStream {
                 return Err(StreamError::HeadersTooBig { size, limit });
             }
         }
-        shared.encoder_stream.push_back(section.encoder_stream);
-        let mut buf = BytesMut::new();
-        Frame::Headers(section.block).encode(&mut buf);
-        Ok(buf.freeze())
+        if !section.encoder_stream.is_empty() {
+            shared.encoder_stream.push_back(section.encoder_stream);
+        }
+        let mut frame_header =
+            BytesMut::with_capacity(1 + crate::h3::frame::varint_size(section.block.len() as u64));
+        write_varint(FRAME_HEADERS, &mut frame_header);
+        write_varint(section.block.len() as u64, &mut frame_header);
+        Ok((frame_header.freeze(), section.block))
     }
 
     /// Decodes one encoded field section with the shared decoder, marking
@@ -655,6 +663,25 @@ impl RequestStream {
             }
         }
         Poll::Ready(Ok(()))
+    }
+
+    /// Queues two adjacent byte ranges before draining. HTTP/3 frame headers
+    /// are tiny while DATA and QPACK field sections can be large, so keeping
+    /// them separate avoids copying their bodies into a framing buffer.
+    #[inline]
+    fn poll_write_parts(
+        &mut self,
+        cx: &mut Context<'_>,
+        first: Bytes,
+        second: Bytes,
+    ) -> Poll<Result<(), StreamError>> {
+        if !first.is_empty() {
+            self.send_buf.push_back(first);
+        }
+        if !second.is_empty() {
+            self.send_buf.push_back(second);
+        }
+        self.poll_write(cx, Bytes::new())
     }
 }
 
@@ -1368,9 +1395,13 @@ mod tests {
 
         // The wire carries one HEADERS frame with a QPACK-encoded field
         // section (never empty: it encodes `:status` and the headers).
-        let outbound = sink.lock().pop_front().expect("response wrote bytes");
+        let mut outbound = BytesMut::new();
+        let mut sent = sink.lock();
+        while let Some(chunk) = sent.pop_front() {
+            outbound.extend_from_slice(&chunk);
+        }
         let mut decoder = FrameDecoder::new();
-        decoder.extend(outbound);
+        decoder.extend(outbound.freeze());
         match decoder.next_frame().expect("valid frame").expect("a frame") {
             Frame::Headers(block) => assert!(!block.is_empty()),
             other => panic!("expected HEADERS frame, got {other:?}"),

@@ -310,13 +310,23 @@ impl ControlStreams {
             }
         }
         if let Some(stream) = self.out_encoder.as_mut() {
-            while let Some(bytes) = self.encoder_pending.pop_front() {
-                ready!(stream.poll_send(cx, &bytes).map_err(ControlError::from)?);
+            while let Some(bytes) = self.encoder_pending.front() {
+                match stream.poll_send(cx, bytes).map_err(ControlError::from)? {
+                    Poll::Ready(()) => {
+                        self.encoder_pending.pop_front();
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
             }
         }
         if let Some(stream) = self.out_decoder.as_mut() {
-            while let Some(bytes) = self.decoder_pending.pop_front() {
-                ready!(stream.poll_send(cx, &bytes).map_err(ControlError::from)?);
+            while let Some(bytes) = self.decoder_pending.front() {
+                match stream.poll_send(cx, bytes).map_err(ControlError::from)? {
+                    Poll::Ready(()) => {
+                        self.decoder_pending.pop_front();
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
             }
         }
         Poll::Ready(Ok(()))
@@ -360,6 +370,14 @@ impl ControlStreams {
         if !bytes.is_empty() {
             self.encoder_pending.push_back(bytes);
         }
+    }
+
+    /// Moves all queued QPACK encoder instructions from the shared codecs.
+    /// The connection driver uses this to transfer a whole burst without an
+    /// intermediate allocation or per-instruction lock handoff.
+    #[inline]
+    pub(crate) fn queue_encoder_streams(&mut self, bytes: &mut VecDeque<Bytes>) {
+        self.encoder_pending.append(bytes);
     }
 
     /// Accepts and services the peer's unidirectional streams and reads

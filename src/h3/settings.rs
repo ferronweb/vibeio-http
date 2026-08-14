@@ -64,17 +64,14 @@ impl PeerSettings {
     /// the frame codec's); known ones replace the previous values.
     #[inline]
     pub fn apply(&mut self, settings: &FrameSettings) {
-        if let Some(v) = settings.get(SETTINGS_QPACK_MAX_TABLE_CAPACITY) {
-            self.qpack_max_table_capacity = v;
-        }
-        if let Some(v) = settings.get(SETTINGS_MAX_FIELD_SECTION_SIZE) {
-            self.max_field_section_size = Some(v);
-        }
-        if let Some(v) = settings.get(SETTINGS_QPACK_BLOCKED_STREAMS) {
-            self.qpack_blocked_streams = v;
-        }
-        if let Some(v) = settings.get(SETTINGS_ENABLE_CONNECT_PROTOCOL) {
-            self.enable_connect_protocol = v != 0;
+        for (id, value) in settings.iter() {
+            match id {
+                SETTINGS_QPACK_MAX_TABLE_CAPACITY => self.qpack_max_table_capacity = value,
+                SETTINGS_MAX_FIELD_SECTION_SIZE => self.max_field_section_size = Some(value),
+                SETTINGS_QPACK_BLOCKED_STREAMS => self.qpack_blocked_streams = value,
+                SETTINGS_ENABLE_CONNECT_PROTOCOL => self.enable_connect_protocol = value != 0,
+                _ => {}
+            }
         }
     }
 }

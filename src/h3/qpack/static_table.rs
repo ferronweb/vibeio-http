@@ -142,11 +142,30 @@ pub(crate) fn get(index: usize) -> Option<(&'static [u8], &'static [u8])> {
 /// An entry may only be referenced when both the field name and value match
 /// the header field being encoded (RFC 9204 Section 2.1.1). The input name
 /// must be lowercase, matching the table.
+#[cfg(test)]
 #[inline]
 pub(crate) fn find(name: &[u8], value: &[u8]) -> Option<usize> {
     STATIC_TABLE
         .iter()
         .position(|&(table_name, table_value)| table_name == name && table_value == value)
+}
+
+/// Finds an exact match and, when no exact match exists, the lowest-indexed
+/// name match in one pass. QPACK encoders need both answers for most literal
+/// fields, so combining them avoids a second 99-entry linear scan.
+#[inline]
+pub(crate) fn find_full_or_name(name: &[u8], value: &[u8]) -> (Option<usize>, Option<usize>) {
+    let mut name_match = None;
+    for (index, &(table_name, table_value)) in STATIC_TABLE.iter().enumerate() {
+        if table_name != name {
+            continue;
+        }
+        name_match.get_or_insert(index);
+        if table_value == value {
+            return (Some(index), name_match);
+        }
+    }
+    (None, name_match)
 }
 
 /// Returns the index of the first entry whose name matches `name`.

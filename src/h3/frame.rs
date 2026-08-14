@@ -262,7 +262,11 @@ impl FrameError {
 /// event-loop turn, draining as many complete frames as are buffered.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
-    buf: BytesMut,
+    // Keep a transport chunk intact whenever it contains complete frames.
+    // `Bytes` slicing is reference-counted, so DATA and HEADERS can then be
+    // handed to the caller without a second copy. Fragmented frames still
+    // need coalescing when their next chunk arrives.
+    buf: Bytes,
 }
 
 impl FrameDecoder {
@@ -275,7 +279,15 @@ impl FrameDecoder {
     /// Appends received bytes to the input buffer.
     #[inline]
     pub fn extend(&mut self, data: Bytes) {
-        self.buf.extend_from_slice(&data);
+        if self.buf.is_empty() {
+            self.buf = data;
+            return;
+        }
+
+        let mut joined = BytesMut::with_capacity(self.buf.len() + data.len());
+        joined.extend_from_slice(&self.buf);
+        joined.extend_from_slice(&data);
+        self.buf = joined.freeze();
     }
 
     /// Bytes buffered but not yet consumed by a frame.
@@ -314,23 +326,23 @@ impl FrameDecoder {
                 continue;
             }
             let mut chunk = self.buf.split_to(total);
-            let mut payload = chunk.split_off(header_len);
+            let payload = chunk.split_off(header_len);
             let frame = match ty {
-                FRAME_DATA => Frame::Data(payload.freeze()),
-                FRAME_HEADERS => Frame::Headers(payload.freeze()),
-                FRAME_CANCEL_PUSH => Frame::CancelPush(take_varint(&mut payload)?),
-                FRAME_SETTINGS => Frame::Settings(parse_settings(&mut payload)?),
+                FRAME_DATA => Frame::Data(payload),
+                FRAME_HEADERS => Frame::Headers(payload),
+                FRAME_CANCEL_PUSH => Frame::CancelPush(take_varint(&payload)?),
+                FRAME_SETTINGS => Frame::Settings(parse_settings(&payload)?),
                 FRAME_PUSH_PROMISE => {
                     let Some((push_id, id_len)) = parse_varint(&payload)? else {
                         return Err(FrameError::Frame);
                     };
                     Frame::PushPromise {
                         push_id,
-                        field_section: payload.split_off(id_len).freeze(),
+                        field_section: payload.slice(id_len..),
                     }
                 }
-                FRAME_GOAWAY => Frame::Goaway(take_varint(&mut payload)?),
-                FRAME_MAX_PUSH_ID => Frame::MaxPushId(take_varint(&mut payload)?),
+                FRAME_GOAWAY => Frame::Goaway(take_varint(&payload)?),
+                FRAME_MAX_PUSH_ID => Frame::MaxPushId(take_varint(&payload)?),
                 _ => unreachable!("unknown types are skipped above"),
             };
             return Ok(Some(frame));
@@ -379,7 +391,7 @@ fn is_reserved_setting(id: u64) -> bool {
 }
 
 #[inline]
-fn parse_settings(payload: &mut BytesMut) -> Result<Settings, FrameError> {
+fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
     let mut settings = Settings::new();
     let mut rest = &payload[..];
     while !rest.is_empty() {
@@ -409,7 +421,7 @@ fn parse_settings(payload: &mut BytesMut) -> Result<Settings, FrameError> {
 /// ID). A truncated or non-minimal integer, or trailing bytes, is
 /// `H3_FRAME_ERROR` (RFC 9114 Sections 7.1 and 10.8).
 #[inline]
-fn take_varint(buf: &mut BytesMut) -> Result<u64, FrameError> {
+fn take_varint(buf: &[u8]) -> Result<u64, FrameError> {
     let Some((value, n)) = parse_varint(buf)? else {
         return Err(FrameError::Frame);
     };

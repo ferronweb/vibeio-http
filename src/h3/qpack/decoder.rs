@@ -107,6 +107,10 @@ pub struct Decoder {
     known_received: u64,
     /// Blocked field sections, in arrival order.
     blocked: VecDeque<BlockedSection>,
+    /// Number of blocked sections per stream. Kept separately so admission
+    /// does not rescan every buffered section (or allocate a temporary list)
+    /// for every field section received while the table is catching up.
+    blocked_by_stream: Vec<(u64, usize)>,
     /// The maximum number of streams that may be blocked at once,
     /// SETTINGS_QPACK_BLOCKED_STREAMS (RFC 9204 Section 5).
     max_blocked_streams: usize,
@@ -125,6 +129,7 @@ impl Decoder {
             max_capacity,
             known_received: 0,
             blocked: VecDeque::new(),
+            blocked_by_stream: Vec::new(),
             max_blocked_streams,
             decoder_stream: Vec::new(),
         }
@@ -223,15 +228,15 @@ impl Decoder {
                         // T=1: static table.
                         let idx = usize::try_from(index).map_err(|_| QpackError::EncoderStream)?;
                         let (name, _) = static_table::get(idx).ok_or(QpackError::EncoderStream)?;
-                        Bytes::copy_from_slice(name)
+                        Bytes::from_static(name)
                     } else {
                         // T=0: dynamic table, relative index (index 0 is the
                         // most recently inserted entry).
                         let (name, _) = self
                             .dynamic
-                            .get_relative(index)
+                            .get_relative_bytes(index)
                             .ok_or(QpackError::EncoderStream)?;
-                        Bytes::copy_from_slice(name)
+                        name
                     };
                     self.insert_entry(name, value)?;
                 }
@@ -265,12 +270,9 @@ impl Decoder {
                             integer::decode(buf, &mut off, 5, header).map_err(enc_stream_err)?;
                         let (name, value) = self
                             .dynamic
-                            .get_relative(index)
+                            .get_relative_bytes(index)
                             .ok_or(QpackError::EncoderStream)?;
-                        self.insert_entry(
-                            Bytes::copy_from_slice(name),
-                            Bytes::copy_from_slice(value),
-                        )?;
+                        self.insert_entry(name, value)?;
                     }
                 }
             }
@@ -284,6 +286,7 @@ impl Decoder {
                 break;
             }
             let front = self.blocked.pop_front().expect("front just inspected");
+            self.remove_blocked_section(front.stream_id);
             if front.ric > 0 {
                 self.acknowledge(front.ric);
                 self.emit_section_ack(front.stream_id);
@@ -327,10 +330,9 @@ impl Decoder {
         now: u64,
     ) -> Result<Option<Vec<(Bytes, Bytes)>>, QpackError> {
         let (ric, _, _) = self.read_prefix(buf)?;
-        if ric > self.dynamic.inserted() || self.stream_has_blocked(stream_id) {
-            if !self.stream_has_blocked(stream_id)
-                && self.blocked_streams() >= self.max_blocked_streams
-            {
+        let stream_blocked = self.stream_has_blocked(stream_id);
+        if ric > self.dynamic.inserted() || stream_blocked {
+            if !stream_blocked && self.blocked_by_stream.len() >= self.max_blocked_streams {
                 return Err(QpackError::DecompressionFailed);
             }
             self.blocked.push_back(BlockedSection {
@@ -339,6 +341,7 @@ impl Decoder {
                 ric,
                 since: now,
             });
+            self.add_blocked_section(stream_id);
             return Ok(None);
         }
         let headers = self.decode_ready(buf)?;
@@ -355,6 +358,7 @@ impl Decoder {
     #[inline]
     pub fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
         self.blocked.retain(|b| b.stream_id != stream_id);
+        self.blocked_by_stream.retain(|(id, _)| *id != stream_id);
         let mut out = Vec::new();
         integer::encode(&mut out, stream_id, 6, STREAM_CANCELLATION);
         self.decoder_stream.extend_from_slice(&out);
@@ -368,13 +372,23 @@ impl Decoder {
     pub fn expire_blocked(&mut self, now: u64, max_age: u64) -> Bytes {
         let mut out = Vec::new();
         let mut cancelled = Vec::new();
-        self.blocked.retain(|b| {
-            if now.saturating_sub(b.since) > max_age && !cancelled.contains(&b.stream_id) {
-                cancelled.push(b.stream_id);
-                integer::encode(&mut out, b.stream_id, 6, STREAM_CANCELLATION);
+        for blocked in &self.blocked {
+            if now.saturating_sub(blocked.since) > max_age
+                && !cancelled.contains(&blocked.stream_id)
+            {
+                cancelled.push(blocked.stream_id);
+                integer::encode(&mut out, blocked.stream_id, 6, STREAM_CANCELLATION);
             }
-            now.saturating_sub(b.since) <= max_age
-        });
+        }
+        if !cancelled.is_empty() {
+            // Cancelling a stream abandons every queued section on it, not
+            // merely the one whose timer fired. Keep the queue and its
+            // per-stream accounting in lockstep.
+            self.blocked
+                .retain(|blocked| !cancelled.contains(&blocked.stream_id));
+            self.blocked_by_stream
+                .retain(|(stream_id, _)| !cancelled.contains(stream_id));
+        }
         self.decoder_stream.extend_from_slice(&out);
         Bytes::from(out)
     }
@@ -400,15 +414,15 @@ impl Decoder {
                         usize::try_from(index).map_err(|_| QpackError::DecompressionFailed)?;
                     let (name, value) =
                         static_table::get(idx).ok_or(QpackError::DecompressionFailed)?;
-                    headers.push((Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)));
+                    headers.push((Bytes::from_static(name), Bytes::from_static(value)));
                 } else {
                     // Dynamic table (T=0): relative index from the Base.
                     let (name, value) = self
                         .dynamic
-                        .get_base_relative(base, index)
+                        .get_base_relative_bytes(base, index)
                         .ok_or(QpackError::DecompressionFailed)?;
                     needed = needed.max(base - index);
-                    headers.push((Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)));
+                    headers.push((name, value));
                 }
             } else if header & 0x40 != 0 {
                 // Literal Field Line with Name Reference (4.5.4).
@@ -420,15 +434,15 @@ impl Decoder {
                         usize::try_from(index).map_err(|_| QpackError::DecompressionFailed)?;
                     let (name, _) =
                         static_table::get(idx).ok_or(QpackError::DecompressionFailed)?;
-                    headers.push((Bytes::copy_from_slice(name), value));
+                    headers.push((Bytes::from_static(name), value));
                 } else {
                     // Dynamic table (T=0): relative index from the Base.
                     let (name, _) = self
                         .dynamic
-                        .get_base_relative(base, index)
+                        .get_base_relative_bytes(base, index)
                         .ok_or(QpackError::DecompressionFailed)?;
                     needed = needed.max(base - index);
-                    headers.push((Bytes::copy_from_slice(name), value));
+                    headers.push((name, value));
                 }
             } else if header & 0x20 != 0 {
                 // Literal Field Line with Literal Name (4.5.6): the N bit is
@@ -444,20 +458,20 @@ impl Decoder {
                 let index = integer::decode(buf, &mut off, 4, header).map_err(dec_failed)?;
                 let (name, value) = self
                     .dynamic
-                    .get_post_base(base, index)
+                    .get_post_base_bytes(base, index)
                     .ok_or(QpackError::DecompressionFailed)?;
                 needed = needed.max(base + index + 1);
-                headers.push((Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)));
+                headers.push((name, value));
             } else {
                 // Literal Field Line with Post-Base Name Reference (4.5.5).
                 let index = integer::decode(buf, &mut off, 3, header).map_err(dec_failed)?;
                 let (name, _) = self
                     .dynamic
-                    .get_post_base(base, index)
+                    .get_post_base_bytes(base, index)
                     .ok_or(QpackError::DecompressionFailed)?;
                 needed = needed.max(base + index + 1);
                 let value = self.read_value_string(buf, &mut off).map_err(dec_failed)?;
-                headers.push((Bytes::copy_from_slice(name), value));
+                headers.push((name, value));
             }
         }
         if ric != needed {
@@ -589,19 +603,41 @@ impl Decoder {
     /// Whether `stream_id` has buffered blocked sections.
     #[inline]
     fn stream_has_blocked(&self, stream_id: u64) -> bool {
-        self.blocked.iter().any(|b| b.stream_id == stream_id)
+        self.blocked_by_stream
+            .iter()
+            .any(|(id, _)| *id == stream_id)
     }
 
-    /// The number of distinct streams with buffered blocked sections.
+    /// Records a newly buffered field section without rescanning the queue.
     #[inline]
-    fn blocked_streams(&self) -> usize {
-        let mut streams: Vec<u64> = Vec::new();
-        for b in &self.blocked {
-            if !streams.contains(&b.stream_id) {
-                streams.push(b.stream_id);
-            }
+    fn add_blocked_section(&mut self, stream_id: u64) {
+        if let Some((_, count)) = self
+            .blocked_by_stream
+            .iter_mut()
+            .find(|(id, _)| *id == stream_id)
+        {
+            *count += 1;
+        } else {
+            self.blocked_by_stream.push((stream_id, 1));
         }
-        streams.len()
+    }
+
+    /// Removes one decoded blocked section from the per-stream count.
+    #[inline]
+    fn remove_blocked_section(&mut self, stream_id: u64) {
+        let Some(index) = self
+            .blocked_by_stream
+            .iter()
+            .position(|(id, _)| *id == stream_id)
+        else {
+            debug_assert!(false, "blocked section missing stream accounting");
+            return;
+        };
+        if self.blocked_by_stream[index].1 == 1 {
+            self.blocked_by_stream.swap_remove(index);
+        } else {
+            self.blocked_by_stream[index].1 -= 1;
+        }
     }
 }
 

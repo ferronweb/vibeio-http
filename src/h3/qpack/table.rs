@@ -143,8 +143,8 @@ impl DynamicTable {
         }
         let mut freed = 0u64;
         let mut evicted = 0u64;
-        for (_, value) in self.entries.iter().rev() {
-            freed += (value.len() as u64) + 32;
+        for (name, value) in self.entries.iter().rev() {
+            freed += Self::entry_size(name, value);
             evicted += 1;
             if freed >= need_freed {
                 break;
@@ -175,14 +175,27 @@ impl DynamicTable {
         self.len() as u64 - survivors
     }
 
-    /// Finds the most recently inserted entry matching `name` and `value`.
-    ///
-    /// Returns the entry's absolute index; entries are matched newest first
-    /// (RFC 9204 Section 3.2.5.1).
+    /// Finds the most recent exact match and the most recent name match in
+    /// one pass. The encoder uses both results when choosing a field-line
+    /// representation, so this avoids scanning a busy dynamic table twice.
     #[inline]
-    pub(crate) fn find(&self, name: &[u8], value: &[u8]) -> Option<u64> {
-        self.find_name(name)
-            .filter(|&abs| self.get_absolute(abs).is_some_and(|(_, v)| v == value))
+    pub(crate) fn find_full_or_name(
+        &self,
+        name: &[u8],
+        value: &[u8],
+    ) -> (Option<u64>, Option<u64>) {
+        let mut name_match = None;
+        for (i, (entry_name, entry_value)) in self.entries.iter().enumerate() {
+            if entry_name != name {
+                continue;
+            }
+            let abs = self.inserted - 1 - i as u64;
+            name_match.get_or_insert(abs);
+            if entry_value == value {
+                return (Some(abs), name_match);
+            }
+        }
+        (None, name_match)
     }
 
     /// Finds the most recently inserted entry whose name matches `name`.
@@ -216,6 +229,7 @@ impl DynamicTable {
     }
 
     /// Returns the (name, value) pair with the given absolute index.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn get_absolute(&self, abs: u64) -> Option<(&[u8], &[u8])> {
         let last = self.last_absolute();
@@ -227,6 +241,7 @@ impl DynamicTable {
 
     /// Returns the (name, value) pair referenced by an encoder-stream
     /// relative index: 0 is the most recently inserted entry.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn get_relative(&self, index: u64) -> Option<(&[u8], &[u8])> {
         self.entry_at(index)
@@ -235,6 +250,7 @@ impl DynamicTable {
     /// Returns the (name, value) pair referenced by a field line
     /// representation relative index: index 0 is the entry with absolute
     /// index `base - 1`.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn get_base_relative(&self, base: u64, index: u64) -> Option<(&[u8], &[u8])> {
         if index >= base {
@@ -246,6 +262,7 @@ impl DynamicTable {
 
     /// Returns the (name, value) pair referenced by a post-base index:
     /// index 0 is the entry with absolute index `base`.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn get_post_base(&self, base: u64, index: u64) -> Option<(&[u8], &[u8])> {
         base.checked_add(index)
@@ -259,6 +276,48 @@ impl DynamicTable {
         let i = usize::try_from(i).ok()?;
         let (name, value) = self.entries.get(i)?;
         Some((name.as_ref(), value.as_ref()))
+    }
+
+    /// Clones the reference-counted bytes at a deque position. This is used
+    /// by the decoder when materializing a field section: dynamic entries
+    /// can be shared with the output instead of copied into new allocations.
+    #[inline]
+    pub(crate) fn entry_bytes_at(&self, i: u64) -> Option<(Bytes, Bytes)> {
+        let i = usize::try_from(i).ok()?;
+        let (name, value) = self.entries.get(i)?;
+        Some((name.clone(), value.clone()))
+    }
+
+    /// Returns a dynamic entry by absolute index as cheap `Bytes` clones.
+    #[inline]
+    pub(crate) fn get_absolute_bytes(&self, abs: u64) -> Option<(Bytes, Bytes)> {
+        let last = self.last_absolute();
+        if abs > last {
+            return None;
+        }
+        self.entry_bytes_at(last - abs)
+    }
+
+    /// Returns an encoder-stream relative entry as cheap `Bytes` clones.
+    #[inline]
+    pub(crate) fn get_relative_bytes(&self, index: u64) -> Option<(Bytes, Bytes)> {
+        self.entry_bytes_at(index)
+    }
+
+    /// Returns a field-section base-relative entry as cheap `Bytes` clones.
+    #[inline]
+    pub(crate) fn get_base_relative_bytes(&self, base: u64, index: u64) -> Option<(Bytes, Bytes)> {
+        if index >= base {
+            return None;
+        }
+        self.get_absolute_bytes(base - 1 - index)
+    }
+
+    /// Returns a field-section post-base entry as cheap `Bytes` clones.
+    #[inline]
+    pub(crate) fn get_post_base_bytes(&self, base: u64, index: u64) -> Option<(Bytes, Bytes)> {
+        base.checked_add(index)
+            .and_then(|abs| self.get_absolute_bytes(abs))
     }
 
     /// Evicts entries from the dropping point until `size <= max_size`.

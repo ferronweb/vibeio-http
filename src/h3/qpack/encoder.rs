@@ -150,20 +150,24 @@ impl Encoder {
             }
 
             // Full match, dynamic table first (newest first), then static.
+            // Preserve the corresponding name matches so the literal path
+            // below does not repeat either table scan.
+            let dynamic_match = usable.then(|| self.dynamic.find_full_or_name(name, value));
             if usable {
-                if let Some(abs) = self.dynamic.find(name, value) {
+                if let Some(abs) = dynamic_match.and_then(|(full, _)| full) {
                     self.encode_indexed(abs, base, &mut block, &mut ric, &mut min_rel_ref);
                     continue;
                 }
             }
-            if let Some(idx) = static_table::find(name, value) {
+            let static_match = static_table::find_full_or_name(name, value);
+            if let Some(idx) = static_match.0 {
                 // Indexed Field Line, static table (T=1).
                 integer::encode(&mut block, idx as u64, 6, INDEXED | 0x40);
                 continue;
             }
 
             if usable {
-                if let Some(abs) = self.dynamic.find_name(name) {
+                if let Some(abs) = dynamic_match.and_then(|(_, name)| name) {
                     if abs >= base {
                         // Post-Base name reference (4.5.5). Only reachable on
                         // the vector path, which fixes Base below the insert
@@ -190,7 +194,7 @@ impl Encoder {
                     continue;
                 }
             }
-            if let Some(idx) = static_table::find_name(name) {
+            if let Some(idx) = static_match.1 {
                 // Literal with Name Reference, static table (T=1).
                 self.encode_literal_with_static_name_ref(idx, value, &mut block);
                 continue;
@@ -233,6 +237,7 @@ impl Encoder {
         // Encoded Field Section Prefix (RFC 9204 4.5.1).
         let mut prefix = Vec::new();
         self.encode_prefix(&mut prefix, ric, base);
+        prefix.reserve(block.len());
         prefix.extend_from_slice(&block);
 
         EncodedSection {
@@ -354,12 +359,15 @@ impl Encoder {
     /// an (N-1)-bit prefix.
     #[inline]
     fn push_string(&self, out: &mut Vec<u8>, value: &[u8], prefix: u8, header: u8) {
-        let huffman_bits = huffman::encoded_len(value);
-        let huffman = self.huffman && huffman_bits < value.len() * 8;
-        let len = if huffman {
-            huffman_bits.div_ceil(8) as u64
+        let (huffman, len) = if self.huffman {
+            let huffman_bits = huffman::encoded_len(value);
+            if huffman_bits < value.len() * 8 {
+                (true, huffman_bits.div_ceil(8) as u64)
+            } else {
+                (false, value.len() as u64)
+            }
         } else {
-            value.len() as u64
+            (false, value.len() as u64)
         };
         integer::encode(
             out,
