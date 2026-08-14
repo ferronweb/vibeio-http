@@ -57,3 +57,10 @@ path = "fuzz_targets/http3_frames.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http3_control"
+path = "fuzz_targets/http3_control.rs"
+test = false
+doc = false
+bench = false
