@@ -21,15 +21,24 @@
 //!
 //! Inserts are speculative but bounded: an entry is only inserted when it
 //! fits and when the eviction it would cause cannot invalidate an index
-//! already referenced by the section being encoded.
+//! already referenced by the section being encoded, nor remove an entry the
+//! decoder still needs. The decoder's acknowledgments (Section 4.4
+//! instructions on its decoder stream) raise a Known Received Count and free
+//! the references of acknowledged field sections; an entry is evictable only
+//! below the lower of the Known Received Count and the smallest reference
+//! still outstanding (RFC 9204 Sections 2.1.1 and 2.1.4). The encoder never
+//! evicts above that floor, so the peer's decoder never has to reject an
+//! insert as a QPACK_ENCODER_STREAM_ERROR.
 //!
 //! Huffman encoding follows RFC 9204 Section 4.1.2: a string is Huffman
 //! encoded when that is shorter, matching HPACK practice.
 #![expect(dead_code)]
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 
-use crate::h3::qpack::static_table;
+use crate::h3::qpack::{static_table, QpackError};
 use crate::h3::qpack::table::DynamicTable;
 use crate::hpack::{huffman, integer};
 
@@ -41,6 +50,13 @@ const INSERT_WITH_NAME_REF: u8 = 0b1000_0000;
 const INSERT_WITH_LITERAL_NAME: u8 = 0b0100_0000;
 /// `000` + 5-bit relative index: Duplicate (RFC 9204 4.3.4).
 const DUPLICATE: u8 = 0b0000_0000;
+
+/// `1` + 7-bit stream ID: Section Acknowledgment (RFC 9204 4.4.1).
+const SECTION_ACK: u8 = 0x80;
+/// `01` + 6-bit stream ID: Stream Cancellation (RFC 9204 4.4.2).
+const STREAM_CANCELLATION: u8 = 0x40;
+/// `00` + 6-bit increment: Insert Count Increment (RFC 9204 4.4.3).
+const INSERT_COUNT_INCREMENT: u8 = 0x00;
 
 /// `1 T` + 6-bit index: Indexed Field Line (RFC 9204 4.5.2).
 const INDEXED: u8 = 0b1000_0000;
@@ -81,6 +97,15 @@ pub struct Encoder {
     max_capacity: u64,
     /// Whether string literals are Huffman encoded when that is shorter.
     huffman: bool,
+    /// Number of dynamic table insertions and duplications acknowledged by
+    /// the decoder (RFC 9204 Section 2.1.4). Absolute indexes below it are
+    /// acknowledged and can be evicted.
+    known_received: u64,
+    /// Smallest absolute index referenced by each unacknowledged field
+    /// section that has dynamic references, in send order (RFC 9204
+    /// Sections 2.1.1 and 4.4.1). A section is freed by a Section
+    /// Acknowledgment for its stream or by a Stream Cancellation.
+    pending_refs: VecDeque<(u64, u64)>,
 }
 
 impl Encoder {
@@ -92,6 +117,8 @@ impl Encoder {
             dynamic: DynamicTable::new(0),
             max_capacity,
             huffman,
+            known_received: 0,
+            pending_refs: VecDeque::new(),
         }
     }
 
@@ -101,15 +128,32 @@ impl Encoder {
         self.max_capacity
     }
 
-    /// Encodes `headers` into an encoded field section plus the encoder
-    /// stream instructions the decoder needs to process it.
+    /// The lowest absolute index at or above which entries are NOT
+    /// evictable: the lower of the Known Received Count and the smallest
+    /// reference of any unacknowledged field section (RFC 9204
+    /// Sections 2.1.1 and 2.1.4). An insert whose eviction would reach it
+    /// is skipped.
+    #[inline]
+    fn evictable_floor(&self) -> u64 {
+        let pending = self
+            .pending_refs
+            .iter()
+            .map(|(_, min_ref)| *min_ref)
+            .min()
+            .unwrap_or(u64::MAX);
+        self.known_received.min(pending)
+    }
+
+    /// Encodes `headers` for the field section on `stream_id` into an
+    /// encoded field section plus the encoder stream instructions the
+    /// decoder needs to process it.
     ///
     /// The dynamic table is used only when the decoder allows a capacity of
     /// at least one entry (RFC 9204 Section 3.2.3): a maximum capacity below
     /// 32 bytes cannot hold any entry and disables the dynamic table.
     #[inline]
-    pub fn encode_section(&mut self, headers: &[(Bytes, Bytes)]) -> EncodedSection {
-        self.encode_section_with_base(headers, self.dynamic.inserted())
+    pub fn encode_section(&mut self, stream_id: u64, headers: &[(Bytes, Bytes)]) -> EncodedSection {
+        self.encode_section_with_base(stream_id, headers, self.dynamic.inserted())
     }
 
     /// The insert count a decoder must have reached to process the most
@@ -122,6 +166,7 @@ impl Encoder {
     #[inline]
     fn encode_section_with_base(
         &mut self,
+        stream_id: u64,
         headers: &[(Bytes, Bytes)],
         base: u64,
     ) -> EncodedSection {
@@ -201,18 +246,17 @@ impl Encoder {
             // No name match anywhere: emit a literal name, and insert the
             // entry so later sections can reference it (Section 4.4).
             let size = DynamicTable::entry_size(name, value);
-            let safe = match min_rel_ref {
-                None => true,
-                Some(min) => {
-                    // An insert only evicts the oldest entries: the absolute
-                    // index of the first surviving entry is the insert count
-                    // minus the current length plus the number evicted. It
-                    // must stay above every referenced index.
-                    self.dynamic.inserted() - self.dynamic.len() as u64
-                        + self.dynamic.would_evict(size)
-                        <= min
-                }
-            };
+            // An insert only evicts the oldest entries, so it is allowed
+            // when the first surviving entry sits at or below every entry
+            // the section references and everything the decoder still
+            // needs (RFC 9204 Section 2.1.1): evicting below that floor is
+            // what the decoder's mirror of this table permits.
+            let boundary = min_rel_ref
+                .unwrap_or(u64::MAX)
+                .min(self.evictable_floor());
+            let safe = self.dynamic.inserted() - self.dynamic.len() as u64
+                + self.dynamic.would_evict(size)
+                <= boundary;
             if usable && size <= self.max_capacity && safe {
                 // Set Dynamic Table Capacity (4.3.1), emitted lazily right
                 // before the first insert of this section.
@@ -230,6 +274,13 @@ impl Encoder {
             } else {
                 self.encode_literal(name, value, false, &mut block);
             }
+        }
+
+        // A section with dynamic references pins the referenced entries
+        // until the decoder acknowledges it (Section 4.4.1).
+        if ric > 0 {
+            self.pending_refs
+                .push_back((stream_id, min_rel_ref.unwrap_or(0)));
         }
 
         // Encoded Field Section Prefix (RFC 9204 4.5.1).
@@ -385,7 +436,8 @@ impl Encoder {
     /// when the entry does not fit in the dynamic table.
     #[inline]
     pub(crate) fn insert_literal(&mut self, name: &[u8], value: &[u8]) -> Option<Bytes> {
-        if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
+        let size = DynamicTable::entry_size(name, value);
+        if size > self.dynamic.capacity() || self.insert_would_evict_needed(size) {
             return None;
         }
         let mut out = Vec::new();
@@ -405,7 +457,8 @@ impl Encoder {
     /// when the name is not indexed anywhere or the entry does not fit.
     #[inline]
     pub(crate) fn insert_with_name_ref(&mut self, name: &[u8], value: &[u8]) -> Option<Bytes> {
-        if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
+        let size = DynamicTable::entry_size(name, value);
+        if size > self.dynamic.capacity() || self.insert_would_evict_needed(size) {
             return None;
         }
         let mut out = Vec::new();
@@ -444,7 +497,8 @@ impl Encoder {
         // The relative index is the deque position: 0 is the most recently
         // inserted entry.
         let (name, value) = self.dynamic.entry_at(relative)?;
-        if DynamicTable::entry_size(name, value) > self.dynamic.capacity() {
+        let size = DynamicTable::entry_size(name, value);
+        if size > self.dynamic.capacity() || self.insert_would_evict_needed(size) {
             return None;
         }
         let mut out = Vec::new();
@@ -458,17 +512,90 @@ impl Encoder {
     }
 
     /// Sets the dynamic table capacity (4.3.1), evicting as needed. Returns
-    /// the instruction, or `None` when the capacity is unchanged or exceeds
-    /// the decoder's maximum.
+    /// the instruction, or `None` when the capacity is unchanged, exceeds
+    /// the decoder's maximum, or the reduction would evict entries the
+    /// decoder still needs (RFC 9204 Section 2.1.1).
     #[inline]
     pub fn set_capacity(&mut self, capacity: u64) -> Option<Bytes> {
         if capacity > self.max_capacity || capacity == self.dynamic.capacity() {
             return None;
         }
+        if capacity < self.dynamic.capacity() {
+            let evicted = self.dynamic.evict_for_capacity(capacity);
+            if self.dynamic.inserted() - self.dynamic.len() as u64 + evicted
+                > self.evictable_floor()
+            {
+                return None;
+            }
+        }
         let mut out = Vec::new();
         integer::encode(&mut out, capacity, 5, SET_CAPACITY);
         self.dynamic.set_capacity(capacity);
         Some(Bytes::from(out))
+    }
+
+    /// Whether inserting an entry of `size` bytes would evict an entry the
+    /// decoder still needs (RFC 9204 Section 2.1.1): one that is not yet
+    /// acknowledged or is referenced by an unacknowledged field section.
+    #[inline]
+    fn insert_would_evict_needed(&self, size: u64) -> bool {
+        self.dynamic.inserted() - self.dynamic.len() as u64 + self.dynamic.would_evict(size)
+            > self.evictable_floor()
+    }
+
+    /// Processes the decoder stream instructions in `buf`. Section
+    /// Acknowledgments (4.4.1) free a field section's references, Stream
+    /// Cancellations (4.4.2) free every reference of a cancelled stream,
+    /// and Insert Count Increments (4.4.3) raise the Known Received Count.
+    ///
+    /// Per RFC 9204 Section 4.4, acknowledging a field section that was
+    /// never sent, cancelling a stream without outstanding field sections,
+    /// or incrementing past the number of inserts is a connection error of
+    /// type QPACK_DECODER_STREAM_ERROR.
+    #[inline]
+    pub fn feed_decoder_stream(&mut self, buf: &[u8]) -> Result<(), QpackError> {
+        let mut off = 0;
+        while off < buf.len() {
+            let header = buf[off];
+            off += 1;
+            if header & 0x80 != 0 {
+                // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1).
+                // The top bit is the instruction type; the remaining 7 bits
+                // (and any continuation bytes) are the Stream ID, so this
+                // arm must catch every byte with the high bit set, including
+                // IDs at or above 64 whose prefix byte is `0xC0`.
+                let stream_id =
+                    integer::decode(buf, &mut off, 7, header).map_err(|_| QpackError::DecoderStream)?;
+                let pos = self
+                    .pending_refs
+                    .iter()
+                    .position(|(id, _)| *id == stream_id)
+                    .ok_or(QpackError::DecoderStream)?;
+                self.pending_refs.remove(pos);
+            } else if header & 0x40 != 0 {
+                // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
+                let stream_id =
+                    integer::decode(buf, &mut off, 6, header).map_err(|_| QpackError::DecoderStream)?;
+                let before = self.pending_refs.len();
+                self.pending_refs.retain(|(id, _)| *id != stream_id);
+                if self.pending_refs.len() == before {
+                    return Err(QpackError::DecoderStream);
+                }
+            } else {
+                // `00` + 6-bit increment: Insert Count Increment (4.4.3).
+                // A zero increment is forbidden, and the total may not
+                // exceed the number of inserts sent.
+                let increment =
+                    integer::decode(buf, &mut off, 6, header).map_err(|_| QpackError::DecoderStream)?;
+                if increment == 0
+                    || self.known_received.saturating_add(increment) > self.dynamic.inserted()
+                {
+                    return Err(QpackError::DecoderStream);
+                }
+                self.known_received += increment;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -490,11 +617,41 @@ mod tests {
     }
 
     #[test]
+    fn decoder_stream_section_ack_classifies_high_stream_id() {
+        // A Section Acknowledgment for stream ID 64 encodes to `0xC0`
+        // (top bit set, 0x40 bit also set by the 7-bit Stream ID). The
+        // instruction is identified by the high bit alone; misclassifying
+        // it as an Insert Count Increment (which rejects a zero value)
+        // was a latent bug that only surfaced for stream IDs at or above
+        // 64 (RFC 9204 Section 4.4.1).
+        let mut enc = Encoder::new(256, false);
+        enc.encode_section(64, &[hdr("a", "b")]);
+        assert!(enc.pending_refs.iter().any(|(id, _)| *id == 64));
+        // 0xC0: Section Acknowledgment, Stream ID 64.
+        assert!(enc.feed_decoder_stream(&[0xC0]).is_ok());
+        assert!(!enc.pending_refs.iter().any(|(id, _)| *id == 64));
+
+        // Stream Cancellation for a low stream ID (0x44 = Stream ID 4)
+        // frees its pending reference.
+        enc.encode_section(4, &[hdr("a", "b")]);
+        assert!(enc.pending_refs.iter().any(|(id, _)| *id == 4));
+        assert!(enc.feed_decoder_stream(&[0x44]).is_ok());
+        assert!(!enc.pending_refs.iter().any(|(id, _)| *id == 4));
+
+        // Insert Count Increment (0x01 = increment 1) is accepted once the
+        // encoder has inserted at least one entry.
+        let inserted = enc.dynamic.inserted();
+        assert!(inserted >= 1);
+        assert!(enc.feed_decoder_stream(&[0x01]).is_ok());
+        assert_eq!(enc.known_received, 1);
+    }
+
+    #[test]
     fn vector_b1_static_name_ref() {
         // RFC 9204 B.1: literal field line with a static name reference. The
         // decoder advertises capacity 0, so the dynamic table is unused.
         let mut enc = Encoder::new(0, false);
-        let out = enc.encode_section(&[hdr(":path", "/index.html")]);
+        let out = enc.encode_section(0, &[hdr(":path", "/index.html")]);
         assert_eq!(hex(&out.block), "0000510b2f696e6465782e68746d6c");
         assert!(out.encoder_stream.is_empty());
     }
@@ -516,6 +673,7 @@ mod tests {
         // Vector path: Base fixed at 0 (the acknowledged count), so the two
         // entries are referenced post-Base.
         let block = enc.encode_section_with_base(
+            0,
             &[
                 hdr(":authority", "www.example.com"),
                 hdr(":path", "/sample/path"),
@@ -555,7 +713,7 @@ mod tests {
         assert_eq!(hex(&enc.duplicate(2).unwrap()), "02");
         assert_eq!(enc.dynamic.len(), 4);
 
-        let block = enc.encode_section_with_base(&[hdr(":authority", "www.example.com")], 4);
+        let block = enc.encode_section_with_base(0, &[hdr(":authority", "www.example.com")], 4);
         assert_eq!(hex(&block.block), "050080");
     }
 
@@ -564,7 +722,7 @@ mod tests {
         // A name that matches nothing is inserted with a literal name
         // instruction, then the section references it post-Base.
         let mut enc = Encoder::new(220, false);
-        let out = enc.encode_section(&[hdr("custom-key", "custom-value")]);
+        let out = enc.encode_section(0, &[hdr("custom-key", "custom-value")]);
         assert_eq!(
             hex(&out.encoder_stream),
             "3fbd014a637573746f6d2d6b65790c637573746f6d2d76616c7565"
@@ -578,7 +736,7 @@ mod tests {
     #[test]
     fn indexed_static_full_match() {
         let mut enc = Encoder::new(0, false);
-        let out = enc.encode_section(&[hdr(":method", "GET")]);
+        let out = enc.encode_section(0, &[hdr(":method", "GET")]);
         let idx = static_table::find(b":method", b"GET").unwrap() as u8;
         assert_eq!(hex(&out.block), format!("0000{:02x}", 0xc0 | idx));
     }
@@ -591,7 +749,7 @@ mod tests {
         enc.set_capacity(220);
         enc.insert_with_name_ref(b":authority", b"www.example.com");
         enc.insert_with_name_ref(b":path", b"/sample/path");
-        let out = enc.encode_section(&[hdr(":path", "/sample/path")]);
+        let out = enc.encode_section(0, &[hdr(":path", "/sample/path")]);
         // Required Insert Count = 2 -> (2 mod 12) + 1 = 3; relative index of
         // absolute 1 from Base 2 is 0.
         assert_eq!(hex(&out.block), "030080");
@@ -601,7 +759,7 @@ mod tests {
     #[test]
     fn huffman_used_when_shorter() {
         let mut enc = Encoder::new(0, true);
-        let out = enc.encode_section(&[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")]);
+        let out = enc.encode_section(0, &[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")]);
         let block = out.block.as_ref();
         assert_eq!(&block[..2], &[0x00, 0x00]);
         // Literal with Name Reference, static :path (0x51).
@@ -618,7 +776,7 @@ mod tests {
     #[test]
     fn sensitive_never_indexed() {
         let mut enc = Encoder::new(220, false);
-        let out = enc.encode_section(&[hdr("authorization", "Bearer xyz")]);
+        let out = enc.encode_section(0, &[hdr("authorization", "Bearer xyz")]);
         // No encoder stream instruction: the field is never stored.
         assert!(out.encoder_stream.is_empty());
         // Literal with Literal Name, N=1: the N bit (0x10) is set.
@@ -635,7 +793,7 @@ mod tests {
         let mut enc = Encoder::new(100, false);
         enc.set_capacity(100);
         enc.insert_with_name_ref(b":authority", b"www.example.com");
-        let out = enc.encode_section(&[
+        let out = enc.encode_section(0, &[
             hdr(":authority", "www.example.com"),
             hdr("x-custom", "0123456789012345678901234567890123456789"),
         ]);
@@ -653,14 +811,14 @@ mod tests {
     fn no_duplicate_set_capacity_instruction() {
         let mut enc = Encoder::new(220, false);
         enc.set_capacity(220);
-        let out = enc.encode_section(&[hdr(":path", "/sample/path")]);
+        let out = enc.encode_section(0, &[hdr(":path", "/sample/path")]);
         assert!(out.encoder_stream.is_empty());
     }
 
     #[test]
     fn empty_section() {
         let mut enc = Encoder::new(220, false);
-        let out = enc.encode_section(&[]);
+        let out = enc.encode_section(0, &[]);
         // Prefix only: Required Insert Count 0, Sign 0, Delta Base 0.
         assert_eq!(hex(&out.block), "0000");
         assert!(out.encoder_stream.is_empty());
@@ -675,7 +833,7 @@ mod tests {
         let mut enc = Encoder::new(220, false);
         enc.set_capacity(220);
         enc.insert_with_name_ref(b":authority", b"www.example.com");
-        let out = enc.encode_section(&[hdr(":method", "GET")]);
+        let out = enc.encode_section(0, &[hdr(":method", "GET")]);
         // Prefix: RIC 0, Base = insert count 1 (Sign 0, Delta 1); then the
         // static index of ":method GET" (17) as an Indexed Field Line.
         assert_eq!(hex(&out.block), "0001d1");

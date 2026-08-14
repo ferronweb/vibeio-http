@@ -211,23 +211,22 @@ impl Decoder {
         while off < buf.len() {
             let header = buf[off];
             off += 1;
-            match header & 0xC0 {
-                // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1).
-                0x80 => {
-                    integer::decode(buf, &mut off, 7, header).map_err(dec_stream_err)?;
-                }
+            if header & 0x80 != 0 {
+                // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1). The
+                // top bit is the instruction type, so this arm must catch
+                // every byte with the high bit set, including IDs at or
+                // above 64 whose prefix byte is `0xC0`.
+                integer::decode(buf, &mut off, 7, header).map_err(dec_stream_err)?;
+            } else if header & 0x40 != 0 {
                 // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
-                0x40 => {
-                    integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
-                }
+                integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
+            } else {
                 // `00` + 6-bit increment: Insert Count Increment (4.4.3). A
                 // zero increment is forbidden.
-                _ => {
-                    let increment =
-                        integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
-                    if increment == 0 {
-                        return Err(QpackError::DecoderStream);
-                    }
+                let increment =
+                    integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
+                if increment == 0 {
+                    return Err(QpackError::DecoderStream);
                 }
             }
         }
@@ -786,7 +785,7 @@ mod tests {
             hdr("x-custom-header", "hello-world"),
             hdr("x-another", "value-2"),
         ];
-        let s1 = enc.encode_section(&response);
+        let s1 = enc.encode_section(0, &response);
         // Reference-before-data: the section arrives first, blocks, then the
         // encoder stream unblocks it.
         assert!(dec.decode_block(&s1.block, 0, 0).unwrap().is_none());
@@ -795,7 +794,7 @@ mod tests {
         assert_eq!(unblocked[0].headers.as_slice(), response.as_slice());
 
         // A second section referencing the entries from the first.
-        let s2 = enc.encode_section(&[
+        let s2 = enc.encode_section(0, &[
             hdr(":status", "200"),
             hdr("x-custom-header", "hello-world"),
         ]);
@@ -818,7 +817,7 @@ mod tests {
     fn vector_b2_round_trip() {
         // RFC 9204 B.2: Set Capacity 220, two inserts, then a section
         // referencing them post-Base (Required Insert Count 2, Sign 1).
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(
@@ -851,7 +850,7 @@ mod tests {
     #[test]
     fn vector_b4_round_trip() {
         // RFC 9204 B.4: relative index after a duplicate.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(
@@ -884,11 +883,11 @@ mod tests {
     #[test]
     fn relative_ref_round_trip() {
         // Entries inserted beforehand are referenced with a relative index.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_with_name_ref(b":path", b"/sample/path").unwrap());
-        let block = enc.encode_section(&[hdr(":path", "/sample/path")]).block;
+        let block = enc.encode_section(0, &[hdr(":path", "/sample/path")]).block;
 
         let mut dec = Decoder::new(220, 8);
         assert!(dec.feed_encoder_stream(&es).unwrap().is_empty());
@@ -908,7 +907,7 @@ mod tests {
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_with_name_ref(b":path", b"/sample/path").unwrap());
         let block = enc
-            .encode_section(&[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")])
+            .encode_section(0, &[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")])
             .block;
 
         let mut dec = Decoder::new(220, 8);
@@ -925,8 +924,8 @@ mod tests {
         // The encoder inserts a new name mid-section and references it
         // post-Base; the decoder must materialize it from the encoder stream
         // that accompanies the block.
-        let mut enc = Encoder::new(220, false);
-        let out = enc.encode_section(&[hdr("custom-key", "custom-value")]);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
+        let out = enc.encode_section(0, &[hdr("custom-key", "custom-value")]);
 
         let mut dec = Decoder::new(220, 8);
         assert!(dec
@@ -945,12 +944,12 @@ mod tests {
     fn blocked_then_unblocked() {
         // The decoder receives a section before the encoder stream data that
         // unblocks it; the section is buffered and returned by the feed.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
         let block = enc
-            .encode_section(&[hdr("custom-key", "custom-value")])
+            .encode_section(0, &[hdr("custom-key", "custom-value")])
             .block;
 
         let mut dec = Decoder::new(220, 8);
@@ -971,12 +970,12 @@ mod tests {
 
     #[test]
     fn blocked_stream_limit() {
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
         let block = enc
-            .encode_section(&[hdr("custom-key", "custom-value")])
+            .encode_section(0, &[hdr("custom-key", "custom-value")])
             .block;
 
         let mut dec = Decoder::new(220, 1);
@@ -995,7 +994,7 @@ mod tests {
         // A second section on a blocked stream is queued behind the first,
         // even when it could be decoded already; both are returned in order
         // by the feed.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(
@@ -1004,9 +1003,9 @@ mod tests {
         );
         es.extend_from_slice(&enc.insert_with_name_ref(b":path", b"/sample/path").unwrap());
         let first = enc
-            .encode_section(&[hdr(":authority", "www.example.com")])
+            .encode_section(0, &[hdr(":authority", "www.example.com")])
             .block;
-        let second = enc.encode_section(&[hdr(":method", "GET")]).block;
+        let second = enc.encode_section(0, &[hdr(":method", "GET")]).block;
 
         let mut dec = Decoder::new(220, 8);
         assert!(dec.decode_block(&first, 3, 0).unwrap().is_none());
@@ -1053,7 +1052,7 @@ mod tests {
     fn post_base_literal_name_ref() {
         // Literal Field Line with Post-Base Name Reference (4.5.5): Base 0,
         // post-Base index 0, literal value.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"foo", b"bar").unwrap());
@@ -1156,12 +1155,12 @@ mod tests {
         // The cap is enforced when the section is decoded, so a section
         // buffered as blocked is rejected by the feed once the encoder
         // stream unblocks it.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
         let block = enc
-            .encode_section(&[hdr("custom-key", "custom-value")])
+            .encode_section(0, &[hdr("custom-key", "custom-value")])
             .block;
 
         let mut dec = Decoder::new(220, 8);
@@ -1179,12 +1178,12 @@ mod tests {
     fn blocked_section_charges_the_stream_budget() {
         // A section unblocked later charges the stream's budget: it can
         // push a stream that already used part of its budget over the cap.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
         let block = enc
-            .encode_section(&[hdr("custom-key", "custom-value")])
+            .encode_section(0, &[hdr("custom-key", "custom-value")])
             .block;
 
         let mut dec = Decoder::new(220, 8);
@@ -1211,7 +1210,7 @@ mod tests {
     fn ric_wrap_round_trip() {
         // 15 inserts at capacity 220 wrap the 8-bit Required Insert Count
         // (2 * MaxEntries = 12): entry 15 encodes as (15 mod 12) + 1 = 4.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es: Vec<Vec<u8>> = Vec::new();
         es.push(enc.set_capacity(220).unwrap().to_vec());
         for i in 0..15 {
@@ -1220,13 +1219,22 @@ mod tests {
                     .unwrap()
                     .to_vec(),
             );
+            // Acknowledge each insert like a peer decoder would, so later
+            // inserts can turn the table over.
+            enc.feed_decoder_stream(&[1]).unwrap();
         }
-        let block = enc.encode_section(&[hdr("h14", "v")]).block;
+        let block = enc.encode_section(0, &[hdr("h14", "v")]).block;
         assert_eq!(&block[..2], &[4, 0], "enc_ric 4, Sign 0 Delta 0");
 
         let mut dec = Decoder::new(220, 8);
-        for batch in &es {
-            assert!(dec.feed_encoder_stream(batch).unwrap().is_empty());
+        // Chunked like the wire: the decoder acknowledges each batch, so
+        // eviction inside a later batch only reaches acknowledged entries.
+        for batch in es.chunks(6) {
+            let mut joined = Vec::new();
+            for part in batch {
+                joined.extend_from_slice(part);
+            }
+            assert!(dec.feed_encoder_stream(&joined).unwrap().is_empty());
         }
         assert_eq!(dec.inserted(), 15);
         assert_eq!(dec.known_received(), 15);
@@ -1237,7 +1245,7 @@ mod tests {
     #[test]
     fn increment_coalesced() {
         // Insert Count Increments cover exactly the new entries per batch.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut set = Vec::new();
         set.extend_from_slice(&enc.set_capacity(220).unwrap());
         let a = enc.insert_literal(b"a", b"a").unwrap();
@@ -1257,12 +1265,12 @@ mod tests {
 
     #[test]
     fn stream_cancelled_drops_blocked() {
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
         let block = enc
-            .encode_section(&[hdr("custom-key", "custom-value")])
+            .encode_section(0, &[hdr("custom-key", "custom-value")])
             .block;
 
         let mut dec = Decoder::new(220, 8);
@@ -1275,12 +1283,12 @@ mod tests {
 
     #[test]
     fn expire_blocked_emits_cancellations() {
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
         let block = enc
-            .encode_section(&[hdr("custom-key", "custom-value")])
+            .encode_section(0, &[hdr("custom-key", "custom-value")])
             .block;
 
         let mut dec = Decoder::new(220, 8);
@@ -1302,44 +1310,58 @@ mod tests {
     fn eviction_into_unacknowledged_rejected() {
         // Evicting an entry with an absolute index at or above the Known
         // Received Count is an encoder stream error (RFC 9204 Section 2.1.1).
-        let mut enc = Encoder::new(88, false);
-        let mut es = Vec::new();
-        es.extend_from_slice(&enc.set_capacity(88).unwrap());
-        es.extend_from_slice(&enc.insert_literal(b"a", b"a").unwrap());
-        es.extend_from_slice(&enc.insert_literal(b"b", b"b").unwrap());
-        // The third 34-byte entry evicts the first, which has never been
-        // acknowledged.
-        es.extend_from_slice(&enc.insert_literal(b"c", b"c").unwrap());
+        // The encoder refuses to emit such an insert, so this feeds a
+        // hostile peer's bytes directly.
         let mut dec = Decoder::new(88, 8);
+        // Set Dynamic Table Capacity 88, insert (a,a) and (b,b) — the table
+        // holds two 34-byte entries — then insert (c,c), which evicts the
+        // never-acknowledged first entry.
+        let es = [
+            0x3f, 0x39, // Set Dynamic Table Capacity 88
+            0x41, b'a', 0x01, b'a', // Insert with Literal Name (a,a)
+            0x41, b'b', 0x01, b'b',
+            0x41, b'c', 0x01, b'c',
+        ];
         assert_eq!(dec.feed_encoder_stream(&es), Err(QpackError::EncoderStream));
+    }
+
+    #[test]
+    fn decoder_stream_section_ack_classifies_high_stream_id() {
+        // A Section Acknowledgment for stream ID 64 encodes to `0xC0`; the
+        // validation parser must accept it as a Section Acknowledgment
+        // (high bit set) rather than misreading it as an Insert Count
+        // Increment with a forbidden zero value (RFC 9204 Section 4.4.1).
+        let mut dec = Decoder::new(0, 8);
+        assert!(dec.feed_decoder_stream(&[0xC0]).is_ok());
+        // Stream Cancellation (0x44 = Stream ID 4) and a non-zero Insert
+        // Count Increment (0x01) validate too.
+        assert!(dec.feed_decoder_stream(&[0x44]).is_ok());
+        assert!(dec.feed_decoder_stream(&[0x01]).is_ok());
+        // A zero Insert Count Increment is rejected.
+        assert_eq!(
+            dec.feed_decoder_stream(&[0x00]),
+            Err(QpackError::DecoderStream)
+        );
     }
 
     #[test]
     fn capacity_eviction_guard() {
         // A capacity reduction in the same batch as the inserts it evicts is
-        // also rejected while nothing is acknowledged.
-        let mut enc = Encoder::new(220, false);
-        let mut es = Vec::new();
-        es.extend_from_slice(&enc.set_capacity(220).unwrap());
-        es.extend_from_slice(&enc.insert_literal(b"a", b"a").unwrap());
-        es.extend_from_slice(&enc.insert_literal(b"b", b"b").unwrap());
-        es.extend_from_slice(&enc.set_capacity(34).unwrap());
+        // rejected while nothing is acknowledged.
         let mut dec = Decoder::new(220, 8);
+        let es = [
+            0x3f, 0xbd, 0x01, // Set Dynamic Table Capacity 220
+            0x41, b'a', 0x01, b'a', // Insert with Literal Name (a,a)
+            0x41, b'b', 0x01, b'b',
+            0x3f, 0x03, // Set Dynamic Table Capacity 34
+        ];
         assert_eq!(dec.feed_encoder_stream(&es), Err(QpackError::EncoderStream));
 
         // The same reduction is fine once the entries are acknowledged.
-        let mut enc = Encoder::new(220, false);
-        let set = enc.set_capacity(220).unwrap();
-        let a = enc.insert_literal(b"a", b"a").unwrap();
-        let b = enc.insert_literal(b"b", b"b").unwrap();
-        let shrink = enc.set_capacity(34).unwrap();
         let mut dec = Decoder::new(220, 8);
-        let mut first = Vec::new();
-        first.extend_from_slice(&set);
-        first.extend_from_slice(&a);
-        first.extend_from_slice(&b);
+        let first = [0x3f, 0xbd, 0x01, 0x41, b'a', 0x01, b'a', 0x41, b'b', 0x01, b'b'];
         assert!(dec.feed_encoder_stream(&first).unwrap().is_empty());
-        assert!(dec.feed_encoder_stream(&shrink).unwrap().is_empty());
+        assert!(dec.feed_encoder_stream(&[0x3f, 0x03]).unwrap().is_empty());
         assert_eq!(dec.dynamic.len(), 1);
         assert_eq!(
             dec.dynamic.get_absolute(1),
@@ -1370,22 +1392,29 @@ mod tests {
     fn encoder_stream_refs_evicted_entry() {
         // Insert with Name Reference to an entry evicted by a capacity
         // reduction is an encoder stream error (RFC 9204 Section 3.2.2).
-        let mut enc = Encoder::new(220, false);
-        let mut es = Vec::new();
-        es.extend_from_slice(&enc.set_capacity(220).unwrap());
-        es.extend_from_slice(&enc.insert_literal(b"a", b"a").unwrap());
-        es.extend_from_slice(&enc.insert_literal(b"b", b"b").unwrap());
-        es.extend_from_slice(&enc.insert_literal(b"c", b"c").unwrap());
-        let shrink = enc.set_capacity(34).unwrap();
+        // The encoder refuses to emit such an insert, so this feeds a
+        // hostile peer's bytes directly.
+        let mut dec = Decoder::new(220, 8);
+        // Set Dynamic Table Capacity 220, insert (a,a), (b,b), (c,c), then
+        // reduce the capacity to 34 so only c survives.
+    assert!(dec
+        .feed_encoder_stream(&[
+            0x3f, 0xbd, 0x01, 0x41, b'a', 0x01, b'a', 0x41, b'b', 0x01, b'b', 0x41, b'c', 0x01, b'c',
+        ])
+        .unwrap()
+        .is_empty());
+    assert!(dec.feed_encoder_stream(&[0x3f, 0x03]).unwrap().is_empty());
+        assert_eq!(dec.dynamic.len(), 1);
+        assert_eq!(
+            dec.dynamic.get_absolute(2),
+            Some((b"c".as_slice(), b"c".as_slice()))
+        );
+        // An Insert with Name Reference to the evicted entry (relative
+        // index 1, the second-newest at insert time) is rejected.
         let mut ref_instr = Vec::new();
         integer::encode(&mut ref_instr, 1, 6, INSERT_WITH_NAME_REF);
         ref_instr.push(1);
         ref_instr.push(b'v');
-
-        let mut dec = Decoder::new(220, 8);
-        assert!(dec.feed_encoder_stream(&es).unwrap().is_empty());
-        assert!(dec.feed_encoder_stream(&shrink).unwrap().is_empty());
-        assert_eq!(dec.dynamic.len(), 1);
         assert_eq!(
             dec.feed_encoder_stream(&ref_instr),
             Err(QpackError::EncoderStream)
@@ -1416,7 +1445,7 @@ mod tests {
     #[test]
     fn post_base_beyond_table() {
         // One insert received, but the section references post-Base index 5.
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"a", b"a").unwrap());
@@ -1433,7 +1462,7 @@ mod tests {
         // Announce a Required Insert Count of 2 for a section that references
         // only one entry (RFC 9204 Section 2.1.2: RIC is one larger than the
         // largest referenced absolute index).
-        let mut enc = Encoder::new(220, false);
+        let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
         let mut es = Vec::new();
         es.extend_from_slice(&enc.set_capacity(220).unwrap());
         es.extend_from_slice(&enc.insert_literal(b"a", b"a").unwrap());
@@ -1486,12 +1515,12 @@ mod tests {
         // Two sections referencing entries inserted by the first, with a
         // static-only section in between.
         let mut enc = Encoder::new(300, false);
-        let first = enc.encode_section(&[
+        let first = enc.encode_section(0, &[
             hdr("custom-key", "custom-value"),
             hdr("x-more", "0123456789"),
         ]);
-        let second = enc.encode_section(&[hdr("custom-key", "custom-value")]);
-        let third = enc.encode_section(&[hdr(":method", "GET")]);
+        let second = enc.encode_section(0, &[hdr("custom-key", "custom-value")]);
+        let third = enc.encode_section(0, &[hdr(":method", "GET")]);
 
         let mut dec = Decoder::new(300, 8);
         assert!(dec

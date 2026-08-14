@@ -279,7 +279,7 @@ fn replay_encode(story: &Story) {
             .iter()
             .map(|(name, value)| (Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)))
             .collect();
-        let encoded = encoder.encode_section(&headers);
+        let encoded = encoder.encode_section(0, &headers);
         for section in decoder
             .feed_encoder_stream(&encoded.encoder_stream)
             .expect("encoder stream accepted")

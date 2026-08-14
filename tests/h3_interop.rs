@@ -29,7 +29,7 @@ use quinn::Endpoint;
 use tokio_util::sync::CancellationToken;
 use vibeio::RuntimeBuilder;
 use vibeio_http::{
-    qpack::{Decoder, Encoder},
+    qpack::{Decoder, Encoder, UnblockedSection},
     Frame, FrameDecoder, Http3, Http3Options, HttpProtocol, Incoming, Settings,
 };
 
@@ -234,7 +234,7 @@ impl Fixture {
         headers: &[(Bytes, Bytes)],
     ) -> (quinn::SendStream, quinn::RecvStream) {
         let (mut send, recv) = self.conn.open_bi().await.expect("open request stream");
-        let section = self.encoder.encode_section(headers);
+        let section = self.encoder.encode_section(0, headers);
         if !section.encoder_stream.is_empty() {
             self.encoder_stream
                 .write_all(&section.encoder_stream)
@@ -303,11 +303,11 @@ impl Fixture {
 
     /// Reads one chunk of the server's QPACK encoder stream into the
     /// decoder, which unblocks any field section whose Required Insert
-    /// Count has been reached.
-    async fn feed_server_encoder(&mut self) {
+    /// Count has been reached. Returns the field sections that unblocked.
+    async fn feed_server_encoder(&mut self) -> Vec<UnblockedSection> {
         let recv = match self.server_encoder.as_mut() {
             Some(recv) => recv,
-            None => return,
+            None => return Vec::new(),
         };
         if let Some(chunk) = recv
             .read_chunk(64 * 1024, true)
@@ -316,7 +316,9 @@ impl Fixture {
         {
             self.decoder
                 .feed_encoder_stream(&chunk.bytes)
-                .expect("valid encoder instructions");
+                .expect("valid encoder instructions")
+        } else {
+            Vec::new()
         }
     }
 
@@ -324,19 +326,47 @@ impl Fixture {
     /// decoder, pumping the server's encoder stream until the block
     /// unblocks. This mirrors Chromium's blocked-decoding flow.
     async fn decode_dynamic(&mut self, block: &[u8], stream_id: u64) -> Vec<(Bytes, Bytes)> {
+        let now = self.started_at.elapsed().as_nanos() as u64;
+        if let Some(headers) = self
+            .decoder
+            .decode_block(block, stream_id, now)
+            .expect("decode response headers")
+        {
+            // A real client acknowledges decoded field sections on its
+            // decoder stream, which lets the server's encoder evict and
+            // reuse dynamic-table entries (RFC 9204 Section 2.1.1).
+            self.flush_acks().await;
+            return headers;
+        }
+        // The block was buffered as blocked. Pump the server's encoder
+        // stream: `feed_encoder_stream` unblocks and decodes the section
+        // exactly once (and the decoder queues its Section Acknowledgment),
+        // so we return that result instead of re-decoding the block, which
+        // would re-acknowledge the same section and abort the connection.
         loop {
-            let now = self.started_at.elapsed().as_nanos() as u64;
-            if let Some(headers) = self
-                .decoder
-                .decode_block(block, stream_id, now)
-                .expect("decode response headers")
-            {
-                return headers;
-            }
             if self.server_encoder.is_none() {
                 self.pump_server_unis().await;
             }
-            self.feed_server_encoder().await;
+            let unblocked = self.feed_server_encoder().await;
+            if let Some(section) = unblocked
+                .into_iter()
+                .find(|section| section.stream_id == stream_id)
+            {
+                self.flush_acks().await;
+                return section.headers;
+            }
+        }
+    }
+
+    /// Flushes any accumulated QPACK decoder-stream instructions (section
+    /// acknowledgements) to the server.
+    async fn flush_acks(&mut self) {
+        let ack = self.decoder.take_decoder_stream();
+        if !ack.is_empty() {
+            self.decoder_stream
+                .write_all(&ack)
+                .await
+                .expect("write decoder stream ack");
         }
     }
 }
@@ -1121,4 +1151,94 @@ async fn fixture_client_connect() {
     })
     .await
     .expect("fixture_client_connect timed out");
+}
+
+/// Like [`dyn_handler`], but the `x-dyn-token` value is derived from the
+/// request path, so every distinct path forces the server's encoder to
+/// insert a *new* dynamic entry rather than reference an existing one.
+async fn dyn_handler_unique(
+    request: Request<Incoming>,
+) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+    let (parts, _) = request.into_parts();
+    let token = format!("token-{}", parts.uri.path());
+    let payload = format!("dyn-ok {}", parts.uri.path());
+    Ok::<_, std::convert::Infallible>(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("x-dyn-token", token)
+            .body(Full::new(Bytes::from(payload)))
+            .expect("response"),
+    )
+}
+
+/// Many requests, each with a unique `x-dyn-token` value, against a *small*
+/// dynamic table. The server must keep inserting and evicting entries; with
+/// the RFC 9204 §2.1.1 fix the server evicts only acknowledged entries
+/// (the fixture acknowledges every decoded section on its decoder stream)
+/// and the connection survives. Without the fix the server would evict
+/// unacknowledged entries and a strict peer would abort the connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_dynamic_table_eviction_pressure() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new(),
+            cancel.clone(),
+            dyn_handler_unique,
+        );
+        // A small capacity forces eviction after a handful of inserts.
+        let mut fixture = Fixture::new_with_capacity(client_conn, 600, 100).await;
+        let count = 200;
+        for i in 0..count {
+            let path = format!("/p{i}");
+            let (mut send, mut recv) = fixture
+                .request_open(&pseudo(&[
+                    (":method", "GET"),
+                    (":scheme", "https"),
+                    (":authority", "localhost"),
+                    (":path", &path),
+                ]))
+                .await;
+            send.finish().expect("finish request");
+            let stream_id = u64::from(recv.id());
+            let mut reader = FrameReader::new();
+            let mut token = String::new();
+            let mut data = Vec::new();
+            while let Some(frame) = reader.next(&mut recv).await {
+                match frame {
+                    Frame::Headers(block) => {
+                        let headers = field_map(fixture.decode_dynamic(&block, stream_id).await);
+                        assert_eq!(
+                            headers.get(":status").map(String::as_str),
+                            Some("200"),
+                            "request {i} headers"
+                        );
+                        token = headers
+                            .get("x-dyn-token")
+                            .cloned()
+                            .expect("x-dyn-token present");
+                    }
+                    Frame::Data(chunk) => data.extend_from_slice(&chunk),
+                    other => panic!("unexpected frame on request stream: {other:?}"),
+                }
+            }
+            assert_eq!(
+                token,
+                format!("token-{path}"),
+                "request {i} token matches path"
+            );
+            assert_eq!(data, format!("dyn-ok {path}").into_bytes());
+        }
+        drop(fixture);
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_dynamic_table_eviction_fix timed out");
 }

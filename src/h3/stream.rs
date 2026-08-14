@@ -567,7 +567,7 @@ impl RequestStream {
         }
         let mut shared = self.shared.lock();
         let encoder = shared.encoder.as_mut().expect("encoder ensured");
-        let section = encoder.encode_section(lines);
+        let section = encoder.encode_section(self.stream_id, lines);
         let size = section.block.len() as u64;
         if let Some(limit) = shared.peer_max_field_section_size {
             if size > limit {
@@ -1059,7 +1059,7 @@ mod tests {
     fn full_request_exchange() {
         let (shared, mut enc) = shared_and_peer_encoder();
         let mut wire = BytesMut::new();
-        let section = enc.encode_section(&request_lines("POST", "/submit"));
+        let section = enc.encode_section(0, &request_lines("POST", "/submit"));
         shared
             .lock()
             .decoder
@@ -1069,7 +1069,7 @@ mod tests {
         Frame::Data(Bytes::from_static(b"hello")).encode(&mut wire);
         let body2 = Bytes::from_static(b"world");
         Frame::Data(body2).encode(&mut wire);
-        let section = enc.encode_section(&[(
+        let section = enc.encode_section(0, &[(
             Bytes::from_static(b"x-checksum"),
             Bytes::from_static(b"sum"),
         )]);
@@ -1123,7 +1123,7 @@ mod tests {
     fn request_without_body_is_finished_by_fin() {
         let (shared, mut enc) = shared_and_peer_encoder();
         let mut wire = BytesMut::new();
-        let section = enc.encode_section(&request_lines("GET", "/index"));
+        let section = enc.encode_section(0, &request_lines("GET", "/index"));
         shared
             .lock()
             .decoder
@@ -1209,14 +1209,14 @@ mod tests {
     fn empty_body_with_trailers() {
         let (shared, mut enc) = shared_and_peer_encoder();
         let mut wire = BytesMut::new();
-        let section = enc.encode_section(&request_lines("PUT", "/x"));
+        let section = enc.encode_section(0, &request_lines("PUT", "/x"));
         shared
             .lock()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
-        let section = enc.encode_section(&[(Bytes::from_static(b"x-a"), Bytes::from_static(b"1"))]);
+        let section = enc.encode_section(0, &[(Bytes::from_static(b"x-a"), Bytes::from_static(b"1"))]);
         shared
             .lock()
             .decoder
@@ -1242,7 +1242,7 @@ mod tests {
     fn trailers_with_pseudo_headers_are_message_error() {
         let (shared, mut enc) = shared_and_peer_encoder();
         let mut wire = BytesMut::new();
-        let section = enc.encode_section(&request_lines("GET", "/x"));
+        let section = enc.encode_section(0, &request_lines("GET", "/x"));
         shared
             .lock()
             .decoder
@@ -1250,7 +1250,7 @@ mod tests {
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
         let section =
-            enc.encode_section(&[(Bytes::from_static(b":status"), Bytes::from_static(b"200"))]);
+            enc.encode_section(0, &[(Bytes::from_static(b":status"), Bytes::from_static(b"200"))]);
         shared
             .lock()
             .decoder
@@ -1273,14 +1273,14 @@ mod tests {
     fn known_frame_after_trailers_is_frame_unexpected() {
         let (shared, mut enc) = shared_and_peer_encoder();
         let mut wire = BytesMut::new();
-        let section = enc.encode_section(&request_lines("GET", "/x"));
+        let section = enc.encode_section(0, &request_lines("GET", "/x"));
         shared
             .lock()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
-        let section = enc.encode_section(&[]);
+        let section = enc.encode_section(0, &[]);
         shared
             .lock()
             .decoder
@@ -1309,14 +1309,14 @@ mod tests {
     fn unknown_frames_after_trailers_are_ignored() {
         let (shared, mut enc) = shared_and_peer_encoder();
         let mut wire = BytesMut::new();
-        let section = enc.encode_section(&request_lines("GET", "/x"));
+        let section = enc.encode_section(0, &request_lines("GET", "/x"));
         shared
             .lock()
             .decoder
             .feed_encoder_stream(&section.encoder_stream)
             .expect("valid");
         Frame::Headers(section.block).encode(&mut wire);
-        let section = enc.encode_section(&[]);
+        let section = enc.encode_section(0, &[]);
         shared
             .lock()
             .decoder
@@ -1353,7 +1353,7 @@ mod tests {
             Bytes::from_static(b"wednesday"),
         ));
         let mut peer_enc = Encoder::new(64, true);
-        let section = peer_enc.encode_section(&lines);
+        let section = peer_enc.encode_section(0, &lines);
         assert!(!section.encoder_stream.is_empty());
 
         let mut wire = BytesMut::new();
@@ -1525,7 +1525,7 @@ mod tests {
     fn missing_method_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(&[
+        let section = peer_enc.encode_section(0, &[
             (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
             (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
             (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
@@ -1553,7 +1553,7 @@ mod tests {
     fn unknown_pseudo_header_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(&[
+        let section = peer_enc.encode_section(0, &[
             (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
             (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
             (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
@@ -1580,7 +1580,7 @@ mod tests {
     fn pseudo_header_after_regular_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(&[
+        let section = peer_enc.encode_section(0, &[
             (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
             (Bytes::from_static(b":scheme"), Bytes::from_static(b"https")),
             (Bytes::from_static(b":authority"), Bytes::from_static(b"x")),
@@ -1612,7 +1612,7 @@ mod tests {
         // Plain CONNECT: only :method and :authority.
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(&[
+        let section = peer_enc.encode_section(0, &[
             (
                 Bytes::from_static(b":method"),
                 Bytes::from_static(b"CONNECT"),
@@ -1647,7 +1647,7 @@ mod tests {
         // Extended CONNECT: adds :scheme and :protocol, never :path.
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(&[
+        let section = peer_enc.encode_section(0, &[
             (
                 Bytes::from_static(b":method"),
                 Bytes::from_static(b"CONNECT"),
@@ -1685,7 +1685,7 @@ mod tests {
     fn connect_with_path_is_message_error() {
         let shared = shared_with_encoder();
         let mut peer_enc = Encoder::new(4096, true);
-        let section = peer_enc.encode_section(&[
+        let section = peer_enc.encode_section(0, &[
             (
                 Bytes::from_static(b":method"),
                 Bytes::from_static(b"CONNECT"),

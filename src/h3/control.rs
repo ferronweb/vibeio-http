@@ -509,12 +509,18 @@ impl ControlStreams {
             // Feed the peer's QPACK decoder stream to the decoder. Its
             // instructions (Section Acknowledgments, Stream Cancellations,
             // Insert Count Increments) acknowledge our encoder's output; the
-            // encoder does not track them, but an Insert Count Increment of 0
-            // is a decoder stream error (RFC 9204 Section 4.4.3).
+            // decoder validates them and the encoder tracks what they free
+            // (RFC 9204 Sections 2.1.1 and 4.4).
             if let Some(stream) = self.in_decoder.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(chunk)) => {
                         let mut shared = self.shared.lock();
+                        if let Some(encoder) = shared.encoder.as_mut() {
+                            if let Err(err) = encoder.feed_decoder_stream(&chunk) {
+                                drop(shared);
+                                return Poll::Ready(Err(ControlError::Qpack(err)));
+                            }
+                        }
                         if let Err(err) = shared.decoder.feed_decoder_stream(&chunk) {
                             drop(shared);
                             return Poll::Ready(Err(ControlError::Qpack(err)));
