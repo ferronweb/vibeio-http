@@ -48,14 +48,17 @@ rcgen = "0.14"
 
 [[bench]]
 name = "h2_hpack"
+required-features = ["h2"]
 harness = false
 
 [[bench]]
 name = "h3_qpack"
+required-features = ["h3"]
 harness = false
 
 [[bench]]
 name = "h3_server"
+required-features = ["h3", "h3-quinn"]
 harness = false
 
 [features]

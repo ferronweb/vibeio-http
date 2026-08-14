@@ -60,6 +60,11 @@ for desc in "${KNOWN_FAILING[@]}"; do
     SKIP_ARGS+=(-s "$desc")
 done
 
+if [ ! -x "$BIN" ]; then
+    echo "==> building h3spec_server example"
+    cargo build --example h3spec_server --features h3,h3-quinn
+fi
+
 echo "==> starting h3spec_server on ${HOST}:${PORT}"
 "$BIN" &
 SERVER_PID=$!
