@@ -28,7 +28,7 @@
 //! `Pending`.
 #![allow(dead_code)] // consumed by the connection driver (step 15)
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -37,6 +37,7 @@ use futures_util::ready;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use http::{Method, Request, StatusCode, Uri, Version};
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 
 use crate::h3::error::{H3Error, TransportError};
 use crate::h3::frame::{
@@ -161,7 +162,7 @@ pub(crate) struct SharedCodecs {
     /// field section blocked on a dynamic-table entry, or the send side
     /// waiting for the peer's SETTINGS to create the encoder. Keyed by
     /// stream ID; the control plane wakes them when the state changes.
-    pub(crate) waiters: HashMap<u64, Waker>,
+    pub(crate) waiters: FxHashMap<u64, Waker>,
 }
 
 impl SharedCodecs {
@@ -187,7 +188,7 @@ impl SharedCodecs {
             encoder_stream: VecDeque::new(),
             unblocked: Vec::new(),
             peer_max_field_section_size: None,
-            waiters: HashMap::new(),
+            waiters: FxHashMap::default(),
         }
     }
 
