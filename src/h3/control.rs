@@ -32,7 +32,7 @@
 //! The peer's QPACK decoder stream is drained and discarded: the encoder
 //! emits instructions without tracking acknowledgements, so the stream is
 //! consumed only to keep flow control moving.
-#![allow(dead_code)] // consumed by the connection driver (step 15)
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::Arc;

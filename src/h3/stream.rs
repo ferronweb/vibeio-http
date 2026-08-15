@@ -26,7 +26,7 @@
 //! All methods are polling-based: the connection driver runs the request
 //! stream on its own task, and the transport's flow control shows up as
 //! `Pending`.
-#![allow(dead_code)] // consumed by the connection driver (step 15)
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -242,9 +242,7 @@ pub(crate) struct RequestStream {
 
     // Send state.
     sent_headers: bool,
-    #[allow(dead_code)] // written by the driver (step 15)
     sent_trailers: bool,
-    #[allow(dead_code)] // written by the driver (step 15)
     sent_fin: bool,
     pending_send: PendingSend,
     send_buf: VecDeque<Bytes>,

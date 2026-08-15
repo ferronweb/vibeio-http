@@ -10,7 +10,7 @@
 //! Validation of the SETTINGS *frame* (reserved identifiers, duplicates)
 //! is the frame codec's job; this module only extracts values and tracks
 //! which identifiers the peer sent.
-#![allow(dead_code)] // getters consumed by the request-stream handler (step 13)
+#![allow(dead_code)]
 
 use crate::h3::frame::{
     Settings as FrameSettings, SETTINGS_ENABLE_CONNECT_PROTOCOL, SETTINGS_MAX_FIELD_SECTION_SIZE,
