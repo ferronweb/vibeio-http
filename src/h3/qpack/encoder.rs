@@ -58,6 +58,12 @@ const STREAM_CANCELLATION: u8 = 0x40;
 /// `00` + 6-bit increment: Insert Count Increment (RFC 9204 4.4.3).
 const INSERT_COUNT_INCREMENT: u8 = 0x00;
 
+/// Upper bound on `decoder_stream_pending`. A complete decoder-stream
+/// instruction is a single prefixed integer of at most 10 bytes (a 62-bit
+/// integer), so a buffered prefix far larger than this can never become a
+/// valid instruction.
+const MAX_DECODER_STREAM_PENDING: usize = 64;
+
 /// `1 T` + 6-bit index: Indexed Field Line (RFC 9204 4.5.2).
 const INDEXED: u8 = 0b1000_0000;
 /// `0001` + 4-bit post-Base index: Indexed Field Line with Post-Base Index
@@ -106,6 +112,12 @@ pub struct Encoder {
     /// Sections 2.1.1 and 4.4.1). A section is freed by a Section
     /// Acknowledgment for its stream or by a Stream Cancellation.
     pending_refs: VecDeque<(u64, u64)>,
+    /// Bytes of the peer's decoder stream received so far but not yet forming
+    /// a complete instruction. QPACK decoder-stream instructions can span the
+    /// arbitrary chunk boundaries of the underlying QUIC stream, so partial
+    /// instructions are buffered here until the rest arrives (RFC 9204
+    /// Section 4.4) instead of being treated as a stream error.
+    decoder_stream_pending: Vec<u8>,
 }
 
 impl Encoder {
@@ -119,6 +131,7 @@ impl Encoder {
             huffman,
             known_received: 0,
             pending_refs: VecDeque::new(),
+            decoder_stream_pending: Vec::new(),
         }
     }
 
@@ -584,19 +597,41 @@ impl Encoder {
     /// rather than closing the connection.
     #[inline]
     pub fn feed_decoder_stream(&mut self, buf: &[u8]) -> Result<(), QpackError> {
-        let mut off = 0;
-        while off < buf.len() {
-            let header = buf[off];
-            off += 1;
+        self.decoder_stream_pending.extend_from_slice(buf);
+        // A decoder-stream instruction is a single prefixed integer, so its
+        // length is known once enough bytes have arrived. Parse only complete
+        // instructions, leaving any trailing partial instruction buffered for
+        // the next call (RFC 9204 Section 4.4). The QUIC stream beneath can
+        // deliver an instruction split across several `poll_recv` chunks.
+        // A complete instruction is at most 10 bytes (a 62-bit integer), so a
+        // much larger buffered prefix can never become one and is rejected to
+        // bound memory against a peer that streams continuation bytes.
+        if self.decoder_stream_pending.len() > MAX_DECODER_STREAM_PENDING {
+            return Err(QpackError::DecoderStream);
+        }
+        let data = &self.decoder_stream_pending;
+        let mut consumed = 0;
+        while consumed < data.len() {
+            let header = data[consumed];
+            // Every decoder-stream instruction carries one prefixed integer:
+            // a Section Acknowledgment (4.4.1) uses a 7-bit prefix, the other
+            // two types use 6 bits.
+            let prefix_bits: u8 = if header & 0x80 != 0 { 7 } else { 6 };
+            let Some(len) = integer::encoded_len(&data[consumed..], prefix_bits) else {
+                // Instruction is truncated; wait for more bytes.
+                break;
+            };
+            if consumed + len > data.len() {
+                break;
+            }
+            let instr = &data[consumed..consumed + len];
+            let mut off = 0;
             if header & 0x80 != 0 {
                 // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1).
-                // The top bit is the instruction type; the remaining 7 bits
-                // (and any continuation bytes) are the Stream ID, so this
-                // arm must catch every byte with the high bit set, including
-                // IDs at or above 64 whose prefix byte is `0xC0`. A matching
-                // field section is freed; a stray acknowledgment (already
-                // freed, or never outstanding) is ignored.
-                let stream_id = integer::decode(buf, &mut off, 7, header)
+                // A matching field section is freed; a stray
+                // acknowledgment (already freed, or never outstanding) is
+                // ignored.
+                let stream_id = integer::decode(instr, &mut off, 7, header)
                     .map_err(|_| QpackError::DecoderStream)?;
                 if let Some(pos) = self
                     .pending_refs
@@ -609,14 +644,14 @@ impl Encoder {
                 // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
                 // Every outstanding reference of the stream is dropped; a
                 // cancellation for a stream with none is a no-op.
-                let stream_id = integer::decode(buf, &mut off, 6, header)
+                let stream_id = integer::decode(instr, &mut off, 6, header)
                     .map_err(|_| QpackError::DecoderStream)?;
                 self.pending_refs.retain(|(id, _)| *id != stream_id);
             } else {
                 // `00` + 6-bit increment: Insert Count Increment (4.4.3).
                 // A zero increment is forbidden, and the total may not
                 // exceed the number of inserts sent.
-                let increment = integer::decode(buf, &mut off, 6, header)
+                let increment = integer::decode(instr, &mut off, 6, header)
                     .map_err(|_| QpackError::DecoderStream)?;
                 if increment == 0
                     || self.known_received.saturating_add(increment) > self.dynamic.inserted()
@@ -625,7 +660,9 @@ impl Encoder {
                 }
                 self.known_received += increment;
             }
+            consumed += len;
         }
+        self.decoder_stream_pending.drain(..consumed);
         Ok(())
     }
 }
@@ -1042,6 +1079,45 @@ mod tests {
             .expect("strict QPACK decoder must parse the insert");
         assert_eq!(name, b"x-custom-header");
         assert_eq!(value, b"hello-world");
+    }
+
+    #[test]
+    fn neqo_ici_roundtrip_repro() {
+        use crate::h3::qpack::decoder::Decoder;
+        let mut enc = Encoder::new(4096, false);
+        let mut dec = Decoder::new(4096, 16);
+        for i in 0..64u64 {
+            let name = Bytes::from(format!("x-header-{i}"));
+            let value = Bytes::from(format!("value-{i}"));
+            let section = enc.encode_section_with_ack_base(2, &[(name, value)]);
+            let _ = dec
+                .feed_encoder_stream(&section.encoder_stream)
+                .expect("client decoder ingests inserts");
+            let _ = dec
+                .decode_block(&section.block, 2, 0)
+                .expect("client decoder decodes section")
+                .expect("section not blocked");
+            let client_dec = dec.take_decoder_stream();
+            enc.feed_decoder_stream(&client_dec)
+                .unwrap_or_else(|e| panic!("feed_decoder_stream failed on iter {i}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn split_decoder_stream_chunk_repro() {
+        // A Section Acknowledgment for stream ID 128 needs two bytes
+        // (0xFF + 0x01): the 7-bit Stream ID prefix overflows into a
+        // continuation byte. QUIC `poll_recv` can deliver these bytes in
+        // separate chunks. Feeding the first byte alone must NOT error.
+        let mut enc = Encoder::new(256, false);
+        enc.encode_section(128, &[hdr("a", "b")]);
+        // First byte only — must be tolerated (buffered), not a connection error.
+        assert!(
+            enc.feed_decoder_stream(&[0xFF]).is_ok(),
+            "partial instruction must not raise QPACK_DECODER_STREAM_ERROR"
+        );
+        // Second byte completes the instruction.
+        assert!(enc.feed_decoder_stream(&[0x01]).is_ok());
     }
 
     #[test]

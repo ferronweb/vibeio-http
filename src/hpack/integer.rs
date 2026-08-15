@@ -72,6 +72,30 @@ pub(crate) fn decode(
     }
 }
 
+/// Returns the number of bytes a prefixed integer occupies starting at the
+/// beginning of `buf`, or `None` when `buf` is too short to hold the full
+/// integer (more bytes are required before it can be decoded).
+///
+/// This lets a streaming parser tell a *truncated* integer (wait for more
+/// bytes) apart from a *malformed* one (the integer's own continuation bytes
+/// are present but invalid) without attempting the decode.
+#[inline]
+pub(crate) fn encoded_len(buf: &[u8], prefix_bits: u8) -> Option<usize> {
+    let mask = (1u64 << prefix_bits) - 1;
+    let first = *buf.first()?;
+    if (u64::from(first) & mask) < mask {
+        return Some(1);
+    }
+    let mut len = 1;
+    loop {
+        let b = *buf.get(len)?;
+        len += 1;
+        if b & 0x80 == 0 {
+            return Some(len);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
