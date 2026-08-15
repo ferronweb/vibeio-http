@@ -137,6 +137,77 @@ pub struct Decoder {
     max_field_section_size: usize,
     /// Decoder stream instructions awaiting transmission.
     decoder_stream: Vec<u8>,
+    /// Bytes of the peer's encoder stream received so far but not yet forming
+    /// a complete instruction. QPACK encoder-stream instructions carry
+    /// variable-length strings and can span the arbitrary chunk boundaries of
+    /// the underlying QUIC stream, so partial instructions are buffered here
+    /// until the rest arrives (RFC 9204 Section 4.3) instead of being treated
+    /// as a stream error.
+    encoder_stream_pending: Vec<u8>,
+    /// Bytes of the peer's decoder stream received so far but not yet forming
+    /// a complete instruction. The same chunk-boundary buffering as
+    /// `encoder_stream_pending` (RFC 9204 Section 4.4).
+    decoder_stream_pending: Vec<u8>,
+}
+
+/// Upper bound on the buffered prefix of either peer stream. A complete
+/// decoder-stream instruction is a single prefixed integer of at most 10
+/// bytes, so a buffered prefix far larger than this can never become one.
+const MAX_DECODER_STREAM_PENDING: usize = 64;
+
+/// Byte length of a string literal whose length integer starts at the
+/// beginning of `buf` with `prefix_bits` (the Huffman/control bit occupies the
+/// high bit of that prefix, so the integer itself uses `prefix_bits - 1`
+/// bits). Returns `None` when `buf` is too short to hold the length integer
+/// or its advertised content.
+fn string_len(buf: &[u8], prefix_bits: u8) -> Option<usize> {
+    let int_prefix = prefix_bits - 1;
+    let int_len = integer::encoded_len(buf, int_prefix)?;
+    // `decode` consumes `buf[0]` as the header, then continuation octets from
+    // `off` onward, so `off` must point past the header byte.
+    let mut off = 1;
+    let len = integer::decode(buf, &mut off, int_prefix, buf[0]).ok()?;
+    let content = usize::try_from(len).ok()?;
+    let total = int_len.checked_add(content)?;
+    if buf.len() < total {
+        return None;
+    }
+    Some(total)
+}
+
+/// Byte length of one encoder-stream instruction (RFC 9204 Section 4.3)
+/// starting at the beginning of `buf`, or `None` when `buf` is too short to
+/// contain the whole instruction.
+fn encoder_instruction_len(buf: &[u8]) -> Option<usize> {
+    let header = *buf.first()?;
+    match header & 0xC0 {
+        // Insert with Name Reference (4.3.2): relative/static index (6-bit
+        // prefix) followed by the value string.
+        0x80 | 0xC0 => {
+            let index_len = integer::encoded_len(buf, 6)?;
+            let value_len = string_len(buf.get(index_len..)?, 8)?;
+            Some(index_len + value_len)
+        }
+        // Insert with Literal Name (4.3.3): name string (the instruction's
+        // first byte doubles as the name-length prefix, 6-bit prefix) followed
+        // by the value string (8-bit prefix).
+        0x40 => {
+            let name_len = string_len(buf, 6)?;
+            let value_len = string_len(buf.get(name_len..)?, 8)?;
+            Some(name_len + value_len)
+        }
+        // `00`: Set Dynamic Table Capacity (4.3.1) or Duplicate (4.3.4), each
+        // a 5-bit prefixed integer.
+        _ => integer::encoded_len(buf, 5),
+    }
+}
+
+/// Byte length of one decoder-stream instruction (RFC 9204 Section 4.4)
+/// starting at the beginning of `buf`, or `None` when `buf` is too short.
+fn decoder_instruction_len(buf: &[u8]) -> Option<usize> {
+    let header = *buf.first()?;
+    let prefix_bits: u8 = if header & 0x80 != 0 { 7 } else { 6 };
+    integer::encoded_len(buf, prefix_bits)
 }
 
 impl Decoder {
@@ -155,6 +226,8 @@ impl Decoder {
             max_blocked_streams,
             max_field_section_size: usize::MAX,
             decoder_stream: Vec::new(),
+            encoder_stream_pending: Vec::new(),
+            decoder_stream_pending: Vec::new(),
         }
     }
 
@@ -207,29 +280,44 @@ impl Decoder {
     /// acknowledgements, so it only needs to validate what the peer sends.
     #[inline]
     pub fn feed_decoder_stream(&mut self, buf: &[u8]) -> Result<(), QpackError> {
-        let mut off = 0;
-        while off < buf.len() {
-            let header = buf[off];
-            off += 1;
+        self.decoder_stream_pending.extend_from_slice(buf);
+        // A decoder-stream instruction is a single prefixed integer whose
+        // length is known once enough bytes arrive; parse only complete
+        // instructions and buffer any trailing partial one (RFC 9204 4.4). The
+        // QUIC stream beneath can deliver an instruction split across chunks.
+        if self.decoder_stream_pending.len() > MAX_DECODER_STREAM_PENDING {
+            return Err(QpackError::DecoderStream);
+        }
+        let mut consumed = 0;
+        while consumed < self.decoder_stream_pending.len() {
+            let Some(len) = decoder_instruction_len(&self.decoder_stream_pending[consumed..])
+            else {
+                break;
+            };
+            if consumed + len > self.decoder_stream_pending.len() {
+                break;
+            }
+            let instr = &self.decoder_stream_pending[consumed..consumed + len];
+            let mut off = 0;
+            let header = instr[0];
             if header & 0x80 != 0 {
-                // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1). The
-                // top bit is the instruction type, so this arm must catch
-                // every byte with the high bit set, including IDs at or
-                // above 64 whose prefix byte is `0xC0`.
-                integer::decode(buf, &mut off, 7, header).map_err(dec_stream_err)?;
+                // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1).
+                integer::decode(instr, &mut off, 7, header).map_err(dec_stream_err)?;
             } else if header & 0x40 != 0 {
                 // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
-                integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
+                integer::decode(instr, &mut off, 6, header).map_err(dec_stream_err)?;
             } else {
                 // `00` + 6-bit increment: Insert Count Increment (4.4.3). A
                 // zero increment is forbidden.
                 let increment =
-                    integer::decode(buf, &mut off, 6, header).map_err(dec_stream_err)?;
+                    integer::decode(instr, &mut off, 6, header).map_err(dec_stream_err)?;
                 if increment == 0 {
                     return Err(QpackError::DecoderStream);
                 }
             }
+            consumed += len;
         }
+        self.decoder_stream_pending.drain(..consumed);
         Ok(())
     }
 
@@ -242,76 +330,34 @@ impl Decoder {
     /// when the table grew beyond the acknowledged count.
     #[inline]
     pub fn feed_encoder_stream(&mut self, buf: &[u8]) -> Result<Vec<UnblockedSection>, QpackError> {
-        let mut off = 0;
-        while off < buf.len() {
-            let header = buf[off];
-            off += 1;
-            match header & 0xC0 {
-                // `1 T` + 6-bit name index: Insert with Name Reference
-                // (4.3.2). The T bit being set masks to 0xC0, hence the
-                // two-arm pattern.
-                0x80 | 0xC0 => {
-                    // Insert with Name Reference (4.3.2).
-                    let index =
-                        integer::decode(buf, &mut off, 6, header).map_err(enc_stream_err)?;
-                    let value = self
-                        .read_value_string(buf, &mut off)
-                        .map_err(enc_stream_err)?;
-                    let name = if header & 0x40 != 0 {
-                        // T=1: static table.
-                        let idx = usize::try_from(index).map_err(|_| QpackError::EncoderStream)?;
-                        let (name, _) = static_table::get(idx).ok_or(QpackError::EncoderStream)?;
-                        Bytes::from_static(name)
-                    } else {
-                        // T=0: dynamic table, relative index (index 0 is the
-                        // most recently inserted entry).
-                        let (name, _) = self
-                            .dynamic
-                            .get_relative_bytes(index)
-                            .ok_or(QpackError::EncoderStream)?;
-                        name
-                    };
-                    self.insert_entry(name, value)?;
-                }
-                0x40 => {
-                    // Insert with Literal Name (4.3.3): the name length uses
-                    // a 5-bit prefix, so `read_string` receives 6 (it reserves
-                    // one bit for the Huffman flag).
-                    let name = self
-                        .read_string(buf, &mut off, 6, header)
-                        .map_err(enc_stream_err)?;
-                    let value = self
-                        .read_value_string(buf, &mut off)
-                        .map_err(enc_stream_err)?;
-                    self.insert_entry(name, value)?;
-                }
-                _ => {
-                    if header & 0x20 != 0 {
-                        // Set Dynamic Table Capacity (4.3.1).
-                        let capacity =
-                            integer::decode(buf, &mut off, 5, header).map_err(enc_stream_err)?;
-                        if capacity > self.max_capacity {
-                            return Err(QpackError::EncoderStream);
-                        }
-                        let evicted = self.dynamic.evict_for_capacity(capacity);
-                        if evicted > self.known_received {
-                            return Err(QpackError::EncoderStream);
-                        }
-                        self.dynamic.set_capacity(capacity);
-                    } else {
-                        // Duplicate (4.3.4): relative index, 0 being the most
-                        // recently inserted entry.
-                        let index =
-                            integer::decode(buf, &mut off, 5, header).map_err(enc_stream_err)?;
-                        let (name, value) = self
-                            .dynamic
-                            .get_relative_bytes(index)
-                            .ok_or(QpackError::EncoderStream)?;
-                        self.insert_entry(name, value)?;
-                    }
-                }
-            }
+        self.encoder_stream_pending.extend_from_slice(buf);
+        // Buffer partial instructions: an encoder-stream instruction can carry
+        // variable-length strings and may arrive split across the arbitrary
+        // chunk boundaries of the underlying QUIC stream, so only complete
+        // instructions are processed (RFC 9204 Section 4.3). A complete
+        // instruction is bounded by the dynamic table capacity, so a much
+        // larger buffered prefix can never become one and is rejected to bound
+        // memory against a peer that streams continuation bytes.
+        let cap = (self.max_capacity as usize).saturating_add(1024);
+        if self.encoder_stream_pending.len() > cap {
+            return Err(QpackError::EncoderStream);
         }
+        let mut consumed = 0;
+        while consumed < self.encoder_stream_pending.len() {
+            let Some(len) = encoder_instruction_len(&self.encoder_stream_pending[consumed..])
+            else {
+                break;
+            };
+            if consumed + len > self.encoder_stream_pending.len() {
+                break;
+            }
+            // Copy the complete instruction so it can be parsed while `self`
+            // is mutably borrowed by the insert below (no borrow aliasing).
+            let instr = self.encoder_stream_pending[consumed..consumed + len].to_vec();
+            self.parse_encoder_instruction(&instr)?;
+            consumed += len;
+        }
+        self.encoder_stream_pending.drain(..consumed);
 
         // Unblock every field section whose Required Insert Count has been
         // reached, in arrival order.
@@ -349,6 +395,80 @@ impl Decoder {
             self.known_received = self.dynamic.inserted();
         }
         Ok(sections)
+    }
+
+    /// Parses a single *complete* encoder-stream instruction (RFC 9204
+    /// Section 4.3) from `instr` and materializes its dynamic-table update.
+    /// `feed_encoder_stream` guarantees `instr` holds a full instruction, so
+    /// the parses below cannot run out of bytes.
+    #[inline]
+    fn parse_encoder_instruction(&mut self, instr: &[u8]) -> Result<(), QpackError> {
+        let mut off = 0;
+        let header = instr[0];
+        off += 1;
+        match header & 0xC0 {
+            // `1 T` + 6-bit name index: Insert with Name Reference (4.3.2).
+            // The T bit being set masks to 0xC0, hence the two-arm pattern.
+            0x80 | 0xC0 => {
+                let index = integer::decode(instr, &mut off, 6, header).map_err(enc_stream_err)?;
+                let value = self
+                    .read_value_string(instr, &mut off)
+                    .map_err(enc_stream_err)?;
+                let name = if header & 0x40 != 0 {
+                    // T=1: static table.
+                    let idx = usize::try_from(index).map_err(|_| QpackError::EncoderStream)?;
+                    let (name, _) = static_table::get(idx).ok_or(QpackError::EncoderStream)?;
+                    Bytes::from_static(name)
+                } else {
+                    // T=0: dynamic table, relative index (index 0 is the most
+                    // recently inserted entry).
+                    let (name, _) = self
+                        .dynamic
+                        .get_relative_bytes(index)
+                        .ok_or(QpackError::EncoderStream)?;
+                    name
+                };
+                self.insert_entry(name, value)?;
+            }
+            0x40 => {
+                // Insert with Literal Name (4.3.3): the name length uses a
+                // 5-bit prefix, so `read_string` receives 6 (it reserves one
+                // bit for the Huffman flag).
+                let name = self
+                    .read_string(instr, &mut off, 6, header)
+                    .map_err(enc_stream_err)?;
+                let value = self
+                    .read_value_string(instr, &mut off)
+                    .map_err(enc_stream_err)?;
+                self.insert_entry(name, value)?;
+            }
+            _ => {
+                if header & 0x20 != 0 {
+                    // Set Dynamic Table Capacity (4.3.1).
+                    let capacity =
+                        integer::decode(instr, &mut off, 5, header).map_err(enc_stream_err)?;
+                    if capacity > self.max_capacity {
+                        return Err(QpackError::EncoderStream);
+                    }
+                    let evicted = self.dynamic.evict_for_capacity(capacity);
+                    if evicted > self.known_received {
+                        return Err(QpackError::EncoderStream);
+                    }
+                    self.dynamic.set_capacity(capacity);
+                } else {
+                    // Duplicate (4.3.4): relative index, 0 being the most
+                    // recently inserted entry.
+                    let index =
+                        integer::decode(instr, &mut off, 5, header).map_err(enc_stream_err)?;
+                    let (name, value) = self
+                        .dynamic
+                        .get_relative_bytes(index)
+                        .ok_or(QpackError::EncoderStream)?;
+                    self.insert_entry(name, value)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Decodes an encoded field section received on `stream_id`.
@@ -1483,29 +1603,41 @@ mod tests {
 
     #[test]
     fn truncated_inputs_do_not_panic() {
-        // A string literal that promises more bytes than remain.
+        // A string literal that promises more bytes than the chunk holds:
+        // with streaming parsing the truncated chunk is buffered (a chunk
+        // boundary is not a stream error), not an immediate error. It must
+        // not panic.
         let mut dec = Decoder::new(220, 8);
+        assert!(dec.feed_encoder_stream(b"\x4aab").is_ok());
+
+        // A complete instruction that references a missing dynamic entry still
+        // errors once fully received (Insert with Name Reference, dynamic
+        // relative index 0, against an empty table — RFC 9204 4.3.2).
+        let mut dec2 = Decoder::new(220, 8);
         assert_eq!(
-            dec.feed_encoder_stream(b"\x4aab"),
+            dec2.feed_encoder_stream(b"\x80\x01a"),
             Err(QpackError::EncoderStream)
         );
+
+        // decode_block truncated inputs still error as before.
+        let mut dec3 = Decoder::new(220, 8);
         assert_eq!(
-            dec.decode_block(b"\x00\x00\x51\x0aabc", 0, 0),
+            dec3.decode_block(b"\x00\x00\x51\x0aabc", 0, 0),
             Err(QpackError::DecompressionFailed)
         );
         // A section that ends mid-field-line.
         assert_eq!(
-            dec.decode_block(b"\x00\x00\x80", 0, 0),
+            dec3.decode_block(b"\x00\x00\x80", 0, 0),
             Err(QpackError::DecompressionFailed)
         );
         // A half a prefix.
         assert_eq!(
-            dec.decode_block(b"\x00", 0, 0),
+            dec3.decode_block(b"\x00", 0, 0),
             Err(QpackError::DecompressionFailed)
         );
         // Base underflow: Sign 1 with a delta larger than the insert count.
         assert_eq!(
-            dec.decode_block(b"\x02\xff\x00", 0, 0),
+            dec3.decode_block(b"\x02\xff\x00", 0, 0),
             Err(QpackError::DecompressionFailed)
         );
     }
@@ -1555,5 +1687,36 @@ mod tests {
         // First section acked: stream 1; second too. The increment merged
         // into the first acknowledgment... plus the second.
         assert_eq!(dec.known_received(), 2);
+    }
+
+    #[test]
+    fn split_encoder_stream_chunk_repro() {
+        use crate::h3::qpack::encoder::Encoder;
+        // An Insert With Literal Name whose name length needs a continuation
+        // byte (name >= 32 octets) produces a multi-byte instruction. With
+        // Huffman on (the production setting) the name-length prefix also
+        // carries the Huffman flag at bit 5, so the length must be measured
+        // with the flag bit excluded. QUIC `poll_recv` can deliver the
+        // instruction split across chunks; the first chunk must be buffered,
+        // not treated as a stream error, and the completed insert must land.
+        let mut enc = Encoder::new(4096, true);
+        // The encoder broadcasts its table capacity on the encoder stream
+        // before any insert (RFC 9204 4.3.1). Capture that instruction.
+        let cap = enc.set_capacity(4096).unwrap();
+        let name = vec![b'x'; 40];
+        let instruction = enc.insert_literal(&name, b"v").unwrap();
+        assert!(instruction.len() >= 2, "instruction must be multi-byte");
+
+        let mut dec = Decoder::new(4096, 8);
+        assert!(dec.feed_encoder_stream(&cap).is_ok());
+        // First byte only — must be tolerated (buffered), not a connection
+        // error.
+        assert!(
+            dec.feed_encoder_stream(&instruction[..1]).is_ok(),
+            "partial instruction must not raise QPACK_ENCODER_STREAM_ERROR"
+        );
+        // Remaining bytes complete the instruction and the entry is materialized.
+        assert!(dec.feed_encoder_stream(&instruction[1..]).is_ok());
+        assert_eq!(dec.inserted(), 1, "split insert must be materialized");
     }
 }
