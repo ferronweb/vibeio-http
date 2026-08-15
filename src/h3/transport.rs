@@ -120,14 +120,6 @@ pub trait Accept {
 
 /// A QUIC connection as seen by the HTTP/3 layer.
 pub trait Connection: OpenStreams + Accept {
-    /// The stream ID of this endpoint's control stream.
-    ///
-    /// For a server this is the first server-initiated unidirectional
-    /// stream (ID 3); for a client the first client-initiated one (ID 2).
-    /// The driver uses it to detect when the control stream must be
-    /// reopened and to reason about stream ID parity.
-    fn stream_id_stream(&self) -> u64;
-
     /// Whether the handshake has completed.
     ///
     /// The accept and handshake timeouts of the HTTP/3 layer are measured

@@ -210,9 +210,6 @@ async fn uni_streams_flow_both_ways_and_parity_holds() {
 
         let server_task = tokio::spawn(async move {
             let mut server = pair.server;
-            // The HTTP/3 server opens its control stream, the first
-            // server-initiated unidirectional stream: id 3, type 0b11.
-            assert_eq!(server.stream_id_stream(), 3);
             let mut control = poll_open_uni(&mut server).await;
             assert_type(&*control, 0b11);
             send_all(&mut *control, b"server-control").await;
@@ -233,8 +230,6 @@ async fn uni_streams_flow_both_ways_and_parity_holds() {
             let body = recv_all(&mut *server_uni).await;
             assert_eq!(body, b"server-control");
 
-            // The client opens its first unidirectional stream: id 2.
-            assert_eq!(client.stream_id_stream(), 2);
             let mut own = poll_open_uni(&mut client).await;
             assert_type(&*own, 0b10);
             send_all(&mut *own, b"client-control").await;

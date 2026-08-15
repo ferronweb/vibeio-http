@@ -174,11 +174,6 @@ impl Accept for MockConn {
 
 impl Connection for MockConn {
     #[inline]
-    fn stream_id_stream(&self) -> u64 {
-        3
-    }
-
-    #[inline]
     fn is_handshake_complete(&self) -> bool {
         true
     }

@@ -153,17 +153,6 @@ impl Accept for Connection {
 
 impl transport::Connection for Connection {
     #[inline]
-    fn stream_id_stream(&self) -> u64 {
-        // RFC 9000 Section 2.1: the least significant bits encode the
-        // initiator and directionality; the first client-initiated
-        // unidirectional stream is 2, the first server-initiated one is 3.
-        match self.conn.side() {
-            quinn::Side::Client => 2,
-            quinn::Side::Server => 3,
-        }
-    }
-
-    #[inline]
     fn is_handshake_complete(&self) -> bool {
         self.conn.handshake_data().is_some()
     }
