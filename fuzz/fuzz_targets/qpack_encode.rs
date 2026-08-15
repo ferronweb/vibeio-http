@@ -40,10 +40,12 @@ fuzz_target!(|data: &[u8]| {
     let mut encoder = Encoder::new(capacity, huffman);
     let mut decoder = Decoder::new(capacity, 100);
     if let Some(bytes) = encoder.set_capacity(capacity) {
-        decoder.feed_encoder_stream(&bytes).expect("set-capacity accepted");
+        decoder
+            .feed_encoder_stream(&bytes)
+            .expect("set-capacity accepted");
     }
 
-    let encoded = encoder.encode_section(&headers);
+    let encoded = encoder.encode_section(0, &headers);
     decoder
         .feed_encoder_stream(&encoded.encoder_stream)
         .expect("our own encoder stream must be accepted");
