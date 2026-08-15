@@ -10,7 +10,7 @@
 //!
 //! This module is also the public `vibeio_http::hpack` path: the HPACK
 //! codec surface (`Decoder`, `Encoder`, `Header`) is re-exported from
-//! `h2::hpack` so the crate API is unchanged by the refactor.
+//! `h2::hpack`.
 
 pub(crate) mod huffman;
 pub(crate) mod huffman_table;
