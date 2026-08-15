@@ -216,6 +216,13 @@ enum PendingSend {
     Trailers,
 }
 
+/// The largest combined size for which a frame's header and payload are
+/// coalesced into a single contiguous buffer. Coalescing turns two
+/// `poll_send` calls (and their per-call transport overhead) into one at the
+/// cost of copying the payload; beyond this size the copy is not worth it and
+/// the payload is written on its own.
+const WRITE_INLINE_LIMIT: usize = 1024;
+
 /// A bidirectional HTTP/3 request stream.
 ///
 /// Wraps a QUIC bidirectional stream ([`transport::BidiStream`]) and
@@ -618,16 +625,13 @@ impl RequestStream {
     /// lets the transport write the QPACK output without copying it again.
     #[inline]
     fn encode_headers(&mut self, lines: &[(Bytes, Bytes)]) -> Result<(Bytes, Bytes), StreamError> {
-        {
-            let shared = self.shared.lock();
-            if shared.encoder.is_none() {
-                // The peer's SETTINGS (which bound its dynamic table) has
-                // not arrived; its encoder is unusable (RFC 9204
-                // Section 5).
-                return Err(StreamError::Message);
-            }
-        }
         let mut shared = self.shared.lock();
+        if shared.encoder.is_none() {
+            // The peer's SETTINGS (which bound its dynamic table) has
+            // not arrived; its encoder is unusable (RFC 9204
+            // Section 5).
+            return Err(StreamError::Message);
+        }
         let encoder = shared.encoder.as_mut().expect("encoder ensured");
         let section = encoder.encode_section_with_ack_base(self.stream_id, lines);
         let size = section.block.len() as u64;
@@ -753,8 +757,9 @@ impl RequestStream {
     }
 
     /// Queues two adjacent byte ranges before draining. HTTP/3 frame headers
-    /// are tiny while DATA and QPACK field sections can be large, so keeping
-    /// them separate avoids copying their bodies into a framing buffer.
+    /// are tiny while DATA and QPACK field sections can be large. A small
+    /// pair is coalesced into one contiguous buffer so the transport sees a
+    /// single write; a large payload stays separate to avoid copying it.
     #[inline]
     fn poll_write_parts(
         &mut self,
@@ -762,10 +767,24 @@ impl RequestStream {
         first: Bytes,
         second: Bytes,
     ) -> Poll<Result<(), StreamError>> {
-        if !first.is_empty() {
-            self.send_buf.push_back(first);
+        if first.is_empty() {
+            if second.is_empty() {
+                return self.poll_write(cx, Bytes::new());
+            }
+            self.send_buf.push_back(second);
+            return self.poll_write(cx, Bytes::new());
         }
-        if !second.is_empty() {
+        if second.is_empty() {
+            self.send_buf.push_back(first);
+            return self.poll_write(cx, Bytes::new());
+        }
+        if first.len() + second.len() <= WRITE_INLINE_LIMIT {
+            let mut combined = BytesMut::with_capacity(first.len() + second.len());
+            combined.extend_from_slice(&first);
+            combined.extend_from_slice(&second);
+            self.send_buf.push_back(combined.freeze());
+        } else {
+            self.send_buf.push_back(first);
             self.send_buf.push_back(second);
         }
         self.poll_write(cx, Bytes::new())
@@ -847,9 +866,8 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
         }
     }
 
-    let method_str = String::from_utf8(method.ok_or(StreamError::Message)?.to_vec())
+    let method = Method::from_bytes(&method.ok_or(StreamError::Message)?)
         .map_err(|_| StreamError::Message)?;
-    let method = Method::from_bytes(method_str.as_bytes()).map_err(|_| StreamError::Message)?;
     let connect = method == Method::CONNECT;
     let extended = protocol.is_some();
     if extended && !connect {
@@ -913,26 +931,31 @@ fn build_uri(
         let scheme = scheme
             .as_ref()
             .map(|s| String::from_utf8_lossy(s))
-            .unwrap_or_else(|| "http".into());
+            .unwrap_or_else(|| std::borrow::Cow::from("http"));
         return Uri::builder()
             .scheme(scheme.as_ref())
-            .authority(String::from_utf8_lossy(authority).into_owned())
+            .authority(String::from_utf8_lossy(authority).as_ref())
             .path_and_query("")
             .build()
             .map_err(|_| StreamError::Message);
     }
     let scheme = scheme.as_ref().expect("scheme validated");
     let path = path.as_ref().expect("path validated");
-    let text = match authority {
-        Some(authority) => format!(
-            "{}://{}{}",
-            String::from_utf8_lossy(scheme),
-            String::from_utf8_lossy(authority),
-            String::from_utf8_lossy(path)
-        ),
-        None => String::from_utf8_lossy(path).into_owned(),
-    };
-    Uri::try_from(text).map_err(|_| StreamError::Message)
+    // Assemble the URI from validated parts rather than `format!` + a full
+    // URI string parse: the builder converts each part once and skips the
+    // combined-string allocation.
+    match authority {
+        Some(authority) => Uri::builder()
+            .scheme(String::from_utf8_lossy(scheme).as_ref())
+            .authority(String::from_utf8_lossy(authority).as_ref())
+            .path_and_query(String::from_utf8_lossy(path).as_ref())
+            .build()
+            .map_err(|_| StreamError::Message),
+        None => Uri::builder()
+            .path_and_query(String::from_utf8_lossy(path).as_ref())
+            .build()
+            .map_err(|_| StreamError::Message),
+    }
 }
 
 /// Converts a decoded header list into a `HeaderMap`; pseudo-headers are

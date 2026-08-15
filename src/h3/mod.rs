@@ -174,9 +174,7 @@ fn h3_stream_error_to_io(error: stream::StreamError) -> std::io::Error {
 #[inline]
 fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
     for header in &HTTP3_INVALID_HEADERS {
-        if let http::header::Entry::Occupied(entry) = headers.entry(header) {
-            entry.remove();
-        }
+        headers.remove(header);
     }
     if headers
         .get(http::header::TE)

@@ -279,6 +279,9 @@ impl FrameDecoder {
     /// Appends received bytes to the input buffer.
     #[inline]
     pub fn extend(&mut self, data: Bytes) {
+        if data.is_empty() {
+            return;
+        }
         if self.buf.is_empty() {
             self.buf = data;
             return;
@@ -431,6 +434,11 @@ fn take_varint(buf: &[u8]) -> Result<u64, FrameError> {
     Ok(value)
 }
 
+/// The minimum value each variable-length integer encoding width can carry
+/// (indexed by the prefix bits `first >> 6`). A value below it in that width
+/// is a non-minimal encoding (RFC 9000 Section 16).
+const MIN_VARINT: [u64; 4] = [0, 1 << 6, 1 << 14, 1 << 30];
+
 /// Parses a QUIC variable-length integer (RFC 9000 Section 16) from the
 /// front of `buf`.
 ///
@@ -456,11 +464,8 @@ pub(crate) fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameErro
     // Minimal encoding: the value must not fit in the next-smaller
     // encoding. 2-byte values must be >= 2^6, 4-byte >= 2^14, 8-byte >=
     // 2^30 (RFC 9000 Section 16).
-    if len > 1 {
-        let prev_width = 8 * (len / 2) - 2;
-        if value < (1u64 << prev_width) {
-            return Err(FrameError::Frame);
-        }
+    if len > 1 && value < MIN_VARINT[usize::from(first >> 6)] {
+        return Err(FrameError::Frame);
     }
     Ok(Some((value, len)))
 }
