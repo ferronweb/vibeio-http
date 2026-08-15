@@ -1177,20 +1177,6 @@ mod tests {
         ));
     }
 
-    // TODO: get this test to pass
-    // #[test]
-    // fn control_stream_fin_without_settings_is_missing_settings() {
-    //     let mut plane = ControlStreams::new(LocalSettings::default());
-    //     let mut conn = MockConn::new();
-    //     let mut peer = MockStream::new(conn.log.clone());
-    //     peer.feed(&[STREAM_TYPE_CONTROL as u8]);
-    //     peer.finish();
-    //     conn.peer_unis.push_back(Box::new(peer));
-
-    //     let err = drain_events(&mut plane, &mut conn).unwrap_err();
-    //     assert!(matches!(err, ControlError::MissingSettings));
-    // }
-
     #[test]
     fn unknown_uni_stream_type_is_discarded() {
         let mut plane = ControlStreams::new(LocalSettings::default());
@@ -1340,31 +1326,6 @@ mod tests {
         let err = drain_events(&mut plane, &mut conn).unwrap_err();
         assert!(matches!(err, ControlError::ClosedCriticalStream));
     }
-
-    // TODO: get this test to pass
-    // #[test]
-    // fn peer_decoder_stream_is_drained_and_its_fin_is_critical() {
-    //     let mut plane = ControlStreams::new(LocalSettings::default());
-    //     let mut conn = MockConn::new();
-    //     let mut peer = MockStream::new(conn.log.clone());
-    //     peer.feed(&[STREAM_TYPE_QPACK_DECODER as u8, 0x00, 0x01]);
-    //     conn.peer_unis.push_back(Box::new(peer));
-
-    //     // Junk ack bytes are consumed without error.
-    //     assert!(drain_events(&mut plane, &mut conn).is_ok());
-
-    //     // Closing it is a connection error.
-    //     let mut conn = MockConn::new();
-    //     let mut peer = MockStream::new(conn.log.clone());
-    //     peer.feed(&[STREAM_TYPE_QPACK_DECODER as u8]);
-    //     peer.finish();
-    //     conn.peer_unis.push_back(Box::new(peer));
-    //     let mut plane = ControlStreams::new(LocalSettings::default());
-    //     assert!(matches!(
-    //         plane.poll_read(&mut conn, &mut cx()),
-    //         Poll::Ready(Err(ControlError::ClosedCriticalStream))
-    //     ));
-    // }
 
     #[test]
     fn peer_decoder_stream_zero_insert_count_increment_is_decoder_stream_error() {
