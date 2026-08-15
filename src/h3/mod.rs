@@ -746,6 +746,13 @@ where
                     controls.queue_encoder_streams(&mut shared.encoder_stream);
                 }
 
+                // True when any inbound or outbound step made progress this
+                // iteration. We only park (return `Pending`) when nothing did:
+                // a blocked outbound flush must NOT starve the inbound reads
+                // that unblock request-header tasks waiting on the peer's
+                // QPACK encoder stream and acknowledge our own encoder.
+                let mut progressed = false;
+
                 // Write the control plane's outbound streams. If the peer tore
                 // it down while we were shutting down (e.g. an h3 0.0.8 client
                 // resets its receive side once it sees GOAWAY), we stop trying
@@ -766,24 +773,28 @@ where
                                 control_dead = true;
                             }
                         }
-                        Poll::Pending => return Poll::Pending,
+                        Poll::Pending => {}
                     }
                 }
 
-                // Read the peer's control plane and react to its events.
+                // Read the peer's control plane and react to its events. This
+                // runs even when the flush above is still `Pending`: it feeds
+                // the peer's QPACK encoder stream to our decoder (unblocking
+                // request-header tasks) and the peer's decoder stream to our
+                // encoder, so neither can deadlock behind an outbound write.
                 if !control_dead {
                     loop {
                         match controls.poll_read(&mut conn, cx) {
-                            Poll::Ready(Ok(Some(ControlEvent::Goaway { .. }))) => {
+                            Poll::Ready(Ok(Some(event))) => {
                                 // The client is going away: stop accepting new
                                 // request streams and close once the in-flight
                                 // ones drain.
-                                if !shutdown {
+                                if matches!(event, ControlEvent::Goaway { .. }) && !shutdown {
                                     shutdown = true;
                                     outcome = Some(Ok(()));
                                 }
+                                progressed = true;
                             }
-                            Poll::Ready(Ok(Some(_))) => {}
                             Poll::Ready(Ok(None)) => {}
                             Poll::Ready(Err(err)) => {
                                 if shutdown {
@@ -839,6 +850,7 @@ where
                 // Accept request streams.
                 match conn.poll_accept(cx) {
                     Poll::Ready(Ok(Some(stream))) => {
+                        progressed = true;
                         let id = stream.id();
                         last_request_id = last_request_id.max(id);
                         accept_sleep = None;
@@ -893,15 +905,14 @@ where
                 // empty set yields `None` from `poll_next` (there are no
                 // completions to observe).
                 match ongoing.poll_next_unpin(cx) {
-                    Poll::Ready(Some(Ok(()))) => continue,
-                    Poll::Ready(Some(Err(_))) => continue,
+                    Poll::Ready(Some(_)) => continue,
                     Poll::Ready(None) => {}
                     Poll::Pending => {}
                 }
-                if ongoing.is_empty() && shutdown {
+
+                if progressed {
                     continue;
                 }
-
                 return Poll::Pending;
             })
             .await
