@@ -79,6 +79,7 @@ pub(crate) fn decode(
 /// This lets a streaming parser tell a *truncated* integer (wait for more
 /// bytes) apart from a *malformed* one (the integer's own continuation bytes
 /// are present but invalid) without attempting the decode.
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn encoded_len(buf: &[u8], prefix_bits: u8) -> Option<usize> {
     let mask = (1u64 << prefix_bits) - 1;
