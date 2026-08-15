@@ -194,6 +194,15 @@ pub(crate) struct Send {
     /// stream's flow-control window is exhausted, so the remainder is kept
     /// here between polls.
     buf: bytes::BytesMut,
+    /// Identity (data pointer + length) of the most recent caller slice that
+    /// is still (partially) buffered in `buf`.
+    ///
+    /// Callers re-pass the same `&[u8]` on every re-poll after a
+    /// flow-control `Pending` (their own queues keep the unsent bytes and
+    /// are only popped once `Ready`). Without this marker, each re-poll would
+    /// `extend_from_slice` the same bytes again, duplicating and growing
+    /// `buf` without bound — fatal for large responses under backpressure.
+    in_flight: Option<(usize, usize)>,
 }
 
 impl Send {
@@ -202,6 +211,7 @@ impl Send {
         Self {
             stream,
             buf: bytes::BytesMut::new(),
+            in_flight: None,
         }
     }
 
@@ -212,11 +222,17 @@ impl Send {
 
     #[inline]
     fn poll_send(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<Result<(), TransportError>> {
-        if !data.is_empty() {
+        // Only buffer `data` when it is a fresh slice. Callers re-pass the
+        // same `&[u8]` on each re-poll (their queue is popped only on
+        // `Ready`); re-appending it would duplicate and grow `buf` forever.
+        let id = (data.as_ptr() as usize, data.len());
+        if !data.is_empty() && self.in_flight != Some(id) {
             self.buf.extend_from_slice(data);
+            self.in_flight = Some(id);
         }
         loop {
             if self.buf.is_empty() {
+                self.in_flight = None;
                 return Poll::Ready(Ok(()));
             }
             // quinn's `poll_write` either writes a non-empty prefix (and

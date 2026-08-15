@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use quinn::Endpoint;
+use quinn::{Endpoint, TransportConfig, VarInt};
 use vibeio_http::quinn::Connection as QuinnConnection;
 use vibeio_http::transport::{
     Accept, BidiStream, Connection as TransportConnection, OpenStreams, RecvStream, SendStream,
@@ -78,6 +78,53 @@ async fn loopback_pair() -> Loopback {
     // needs the server's connection to be polled to answer each handshake
     // flight, so awaiting them sequentially would deadlock on the handshake
     // timeout.
+    let (client_conn, server_conn) = tokio::join!(
+        async { connecting.await.expect("client handshake") },
+        async { incoming.await.expect("server handshake") },
+    );
+
+    Loopback {
+        _server_endpoint: server_endpoint,
+        _client_endpoint: client_endpoint,
+        server: QuinnConnection::new(server_conn),
+        client: QuinnConnection::new(client_conn.clone()),
+        client_raw: client_conn,
+    }
+}
+
+/// Like [`loopback_pair`] but with a tiny receive window on the client, so a
+/// modest payload forces the server's `Send` into repeated flow-control
+/// `Pending` re-polls — the exact path that used to duplicate buffered bytes
+/// and grow the internal buffer without bound for large responses.
+async fn loopback_pair_tiny_window() -> Loopback {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert_der: quinn::rustls::pki_types::CertificateDer<'static> = cert.cert.into();
+
+    let server_config = quinn::ServerConfig::with_single_cert(
+        vec![cert_der.clone()],
+        quinn::rustls::pki_types::PrivateKeyDer::from(cert.signing_key),
+    )
+    .unwrap();
+    let server_endpoint = Endpoint::server(server_config, loopback()).unwrap();
+    let server_addr = server_endpoint.local_addr().unwrap();
+
+    let mut client_tc = TransportConfig::default();
+    client_tc.stream_receive_window(VarInt::from_u32(16384));
+    client_tc.receive_window(VarInt::from_u32(16384));
+    let mut roots = quinn::rustls::RootCertStore::empty();
+    roots.add(cert_der).unwrap();
+    let mut client_config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+    client_config.transport_config(Arc::new(client_tc));
+    let mut client_endpoint = Endpoint::client(loopback()).unwrap();
+    client_endpoint.set_default_client_config(client_config);
+
+    let connecting = client_endpoint
+        .connect(server_addr, "localhost")
+        .expect("connect");
+    let incoming = server_endpoint
+        .accept()
+        .await
+        .expect("accept must eventually yield");
     let (client_conn, server_conn) = tokio::join!(
         async { connecting.await.expect("client handshake") },
         async { incoming.await.expect("server handshake") },
@@ -380,6 +427,57 @@ async fn shutdown_closes_both_sides_gracefully() {
 
         let (_server_ep, _client_ep) = (pair._server_endpoint, pair._client_endpoint);
         let (_server, _client) = tokio::join!(server_task, client_task);
+    })
+    .await
+    .expect("scenario must finish in time");
+}
+
+/// A large response under flow-control backpressure must not duplicate or
+/// corrupt bytes. The pre-fix `Send::poll_send` re-appended the whole buffer
+/// on every re-poll after a `Pending`, so a stalled large body (e.g. a big
+/// `.mp4` the client buffers without consuming) grew the internal buffer
+/// without bound and starved the connection. With the fix, the receiver gets
+/// exactly the bytes that were sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn large_send_under_backpressure_is_not_duplicated() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let pair = loopback_pair_tiny_window().await;
+        // 64 KiB, far larger than the 4 KiB receive window, so the server
+        // must re-poll after every 4 KiB it is allowed to send.
+        let payload = vec![0xABu8; 64 * 1024];
+        let expected_len = payload.len();
+
+        let server_done = std::sync::Arc::new(tokio::sync::Notify::new());
+        let client_done = std::sync::Arc::new(tokio::sync::Notify::new());
+        let server_done_tx = server_done.clone();
+        let client_done_rx = client_done.clone();
+
+        let server_task = tokio::spawn(async move {
+            let mut server = pair.server;
+            let mut uni = poll_open_uni(&mut server).await;
+            send_all(&mut *uni, &payload).await;
+            finish(&mut *uni).await;
+            // Hold the connection open until the client has drained quinn's
+            // receive buffer; otherwise dropping `server` mid-flight truncates
+            // the stream with a reset.
+            client_done_rx.notified().await;
+            drop(server);
+            server_done_tx.notify_one();
+        });
+
+        let mut client = pair.client;
+        let mut client_uni = poll_accept_uni(&mut client).await;
+        let received = recv_all(&mut *client_uni).await;
+        client_done.notify_one();
+        server_done.notified().await;
+        server_task.await.unwrap();
+
+        assert_eq!(
+            received.len(),
+            expected_len,
+            "received byte count must equal sent (no duplication under backpressure)"
+        );
+        assert!(received.iter().all(|&b| b == 0xAB), "received bytes must match");
     })
     .await
     .expect("scenario must finish in time");
