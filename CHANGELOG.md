@@ -1,8 +1,8 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.4.0
 
-**Not yet released**
+**Released in August 15, 2026**
 
 - Replaced the HTTP/2 protocol implementation (that used `h2` crate) with an in-house one.
 - Replaced the experimental HTTP/3 protcol implementation (that used `h3` crate) with an in-house one.

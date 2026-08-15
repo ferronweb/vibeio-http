@@ -1,12 +1,12 @@
 [package]
 name = "vibeio-http"
-version = "0.3.5"
+version = "0.4.0"
 edition = "2021"
 authors = ["Dorian Niemiec <dorian@ferron.sh>"]
 description = "High-performance HTTP server primitives for the `vibeio` runtime"
 license = "MIT"
 readme = "README.md"
-keywords = ["async", "http", "server", "http2", "http3", "quic"]
+keywords = ["async", "http", "server", "quic"]
 categories = ["network-programming", "web-programming"]
 documentation = "https://docs.rs/vibeio-http"
 repository = "https://github.com/ferronweb/vibeio-http"
