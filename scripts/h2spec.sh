@@ -60,7 +60,7 @@ else
 fi
 status=$?
 if (grep -q "[×❌]" "$(dirname "$JUNIT")/h2spec.out" | grep -qF 'Sends a GOAWAY frame') \
-&& ! ((grep -q "[×❌]" "$(dirname "$JUNIT")/h2spec.out" || echo 'Sends a GOAWAY frame') | grep -vqF 'Sends a GOAWAY frame'); then
+&& ! (grep -q "[×❌]" "$(dirname "$JUNIT")/h2spec.out" | grep -vqF 'Sends a GOAWAY frame'); then
   # The flakiness happens on GitHub Actions workflows, ignore the test result
   echo "⚠️ Known flaky test failed: Sends a GOAWAY frame"
   status=0
