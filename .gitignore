@@ -1,1 +1,6 @@
-/target
+# Rust compilation artifacts
+target/
+
+# HTTP/2 and /3 compliance
+/h2spec
+/h3spec

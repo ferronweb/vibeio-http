@@ -1,8 +1,10 @@
-//! HPACK fixture corpus: parsing and sanity checks.
+//! HPACK fixture corpus: parsing and checks.
 //!
 //! Story files live in `tests/fixtures/hpack/stories/` — see the
 //! `README.md` there for provenance and format. Decoder/encoder tests
 //! that consume the corpus are added by the HPACK implementation commits.
+
+#![cfg(feature = "h2")]
 
 use std::{
     fs,

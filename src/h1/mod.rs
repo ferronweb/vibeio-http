@@ -1,6 +1,5 @@
 mod body;
 mod options;
-mod tests;
 mod write;
 mod writebuf;
 mod zerocopy;

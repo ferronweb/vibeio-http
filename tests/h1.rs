@@ -1,4 +1,4 @@
-#![cfg(test)]
+#![cfg(feature = "h1")]
 
 use std::time::Duration;
 
@@ -7,11 +7,7 @@ use futures_util::StreamExt;
 use http_body_util::{BodyExt, Empty, Full};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{
-    early_hints,
-    h1::{Http1, Http1Options},
-    prepare_upgrade, HttpProtocol,
-};
+use vibeio_http::{prepare_upgrade, send_early_hints, Http1, Http1Options, HttpProtocol};
 
 #[tokio::test]
 async fn test_get_request() {
@@ -653,7 +649,7 @@ async fn test_early_hints_before_final_response() {
                         <https://api.example.com/next>; rel=next",
                     ),
                 );
-                let _ = early_hints::send_early_hints(&mut req, early_hint_headers).await;
+                let _ = send_early_hints(&mut req, early_hint_headers).await;
                 let _ = req.into_body().collect().await;
                 Ok::<_, http::Error>(
                     http::Response::builder()

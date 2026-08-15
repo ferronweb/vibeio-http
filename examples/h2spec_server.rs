@@ -12,6 +12,7 @@ mod server {
     // `scripts/h2spec.sh`, which starts this binary, waits for readiness, runs
     // h2spec with `--strict`, and propagates its exit code.
     pub fn main() -> std::io::Result<()> {
+        // In production, multiple vibeio threads would be used...
         let runtime = RuntimeBuilder::new().enable_timer(true).build()?;
         runtime.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:8080")?;
