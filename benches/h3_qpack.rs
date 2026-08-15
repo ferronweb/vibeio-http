@@ -76,7 +76,7 @@ fn encode(headers: &[(Bytes, Bytes)], capacity: u64, huffman: bool) -> (Bytes, B
     if let Some(bytes) = encoder.set_capacity(capacity) {
         encoder_stream.extend_from_slice(&bytes);
     }
-    let encoded = encoder.encode_section(headers);
+    let encoded = encoder.encode_section(0, headers);
     encoder_stream.extend_from_slice(&encoded.encoder_stream);
     (encoded.block, Bytes::from(encoder_stream))
 }
@@ -102,7 +102,7 @@ fn bench_roundtrip(c: &mut Criterion) {
                         if let Some(bytes) = encoder.set_capacity(capacity) {
                             criterion::black_box(&bytes);
                         }
-                        encoder.encode_section(&headers)
+                        encoder.encode_section(0, &headers)
                     });
                 });
 
