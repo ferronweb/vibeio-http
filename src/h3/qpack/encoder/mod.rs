@@ -668,6 +668,4 @@ impl Encoder {
 }
 
 #[cfg(test)]
-
 mod tests;
-

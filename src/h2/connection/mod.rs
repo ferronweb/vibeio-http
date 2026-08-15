@@ -520,7 +520,6 @@ where
             }
         }
     }
-
 }
 /// A boxed response body: the handler's body type is erased at the
 /// stream boundary so `Connection` stays monomorphic.
@@ -627,9 +626,7 @@ enum StreamDataState {
     Ok,
 }
 
-
 mod handlers;
 
 #[cfg(test)]
 mod tests;
-

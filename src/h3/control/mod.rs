@@ -718,6 +718,4 @@ impl ControlStreams {
 }
 
 #[cfg(test)]
-
 mod tests;
-

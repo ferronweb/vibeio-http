@@ -976,6 +976,4 @@ fn header_map(headers: Vec<(Bytes, Bytes)>) -> Result<HeaderMap, StreamError> {
 }
 
 #[cfg(test)]
-
 mod tests;
-

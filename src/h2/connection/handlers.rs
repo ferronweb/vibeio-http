@@ -284,7 +284,12 @@ where
     /// A DATA frame: forward to the task and restore flow-control
     /// windows (RFC 9113 Sections 6.1 and 6.9.2).
     #[inline]
-    pub(crate) async fn handle_data_frame(&mut self, stream_id: u32, end_stream: bool, data: Bytes) {
+    pub(crate) async fn handle_data_frame(
+        &mut self,
+        stream_id: u32,
+        end_stream: bool,
+        data: Bytes,
+    ) {
         // Sending a WINDOW_UPDATE frame with a zero delta (increment) is explicitly prohibited
         // by the HTTP/2 specification and results in a STREAM_ERROR of type PROTOCOL_ERROR
         // (Error Code 23)
@@ -798,4 +803,3 @@ where
         Ok(())
     }
 }
-

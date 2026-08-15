@@ -862,6 +862,4 @@ fn dec_stream_err(_: HpackError) -> QpackError {
     QpackError::DecoderStream
 }
 #[cfg(test)]
-
 mod tests;
-
