@@ -156,6 +156,31 @@ impl Encoder {
         self.encode_section_with_base(stream_id, headers, self.dynamic.inserted())
     }
 
+    /// Encodes `headers` using the decoder's **acknowledged** insert count
+    /// (`known_received`) as the QPACK Base.
+    ///
+    /// RFC 9204 Section 2.1.2 forbids a relative reference to a dynamic entry
+    /// whose absolute index exceeds the Largest Reference the decoder has
+    /// acknowledged: such an entry must instead be referenced with a Post-Base
+    /// index. The shared encoder's own insert count (`dynamic.inserted()`) can
+    /// run far ahead of what the peer has acknowledged — for instance when the
+    /// client is busy consuming a large response body and lags on its
+    /// decoder-stream acknowledgments. Encoding against the insert count there
+    /// would emit relative references above the peer's Largest Reference, which
+    /// a strict decoder (e.g. Neqo/Firefox) treats as a QPACK decompression
+    /// failure, tearing down the whole connection and dropping every other in-
+    /// flight request. Encoding against `known_received` keeps every relative
+    /// reference within the acknowledged range and uses Post-Base for anything
+    /// newer, so the section decodes correctly even if the peer ACKs late.
+    #[inline]
+    pub(crate) fn encode_section_with_ack_base(
+        &mut self,
+        stream_id: u64,
+        headers: &[(Bytes, Bytes)],
+    ) -> EncodedSection {
+        self.encode_section_with_base(stream_id, headers, self.known_received)
+    }
+
     /// The insert count a decoder must have reached to process the most
     /// recently encoded section.
     #[inline]
@@ -781,6 +806,68 @@ mod tests {
         // absolute 1 from Base 2 is 0.
         assert_eq!(hex(&out.block), "030080");
         assert!(out.encoder_stream.is_empty());
+    }
+
+    /// The production encoder must reference dynamic entries against the
+    /// decoder's *acknowledged* insert count, not its own (which runs ahead
+    /// while a client is busy consuming a large response). An unacknowledged
+    /// entry must be referenced with a Post-Base index (RFC 9204 2.1.2); a
+    /// relative index above the peer's Largest Reference is a decompression
+    /// failure that a strict client (Neqo/Firefox) turns into a connection
+    /// close — which is the reported "concurrent requests ignored while a big
+    /// download streams" hang.
+    #[test]
+    fn ack_base_uses_post_base_for_unacknowledged_entry() {
+        let mut enc = Encoder::new(220, false);
+        enc.set_capacity(220);
+        // Insert two entries but never feed the client's decoder stream, so the
+        // encoder's known_received stays 0 (nothing acknowledged yet).
+        enc.insert_with_name_ref(b":authority", b"www.example.com");
+        enc.insert_with_name_ref(b":path", b"/sample/path");
+
+        // A novel header forces a fresh insert (abs 3) that, with base =
+        // known_received = 0, can only be referenced post-Base.
+        let section = enc.encode_section_with_ack_base(0, &[hdr("x-novel", "value")]);
+        // The single dynamic field line is the only instruction after the
+        // 2-byte prefix; a Post-Base Indexed Field Line occupies 0x10..=0x1F.
+        let body = &section.block[2..];
+        assert_eq!(body.len(), 1, "exactly one field line");
+        assert_eq!(
+            body[0] & 0xF0,
+            0x10,
+            "unacknowledged entry must be referenced post-Base, not with a relative index"
+        );
+        assert!(
+            !section.encoder_stream.is_empty(),
+            "the newly inserted entry must travel on the encoder stream"
+        );
+    }
+
+    #[test]
+    fn ack_base_uses_relative_for_acknowledged_entry() {
+        let mut enc = Encoder::new(220, false);
+        enc.set_capacity(220);
+        enc.insert_with_name_ref(b":authority", b"www.example.com");
+        enc.insert_with_name_ref(b":path", b"/sample/path");
+        enc.insert_with_name_ref(b"x-foo", b"bar");
+        // Client acknowledges the first two inserts (Insert Count Increment 2),
+        // raising known_received to 2. Entry `:authority` (abs 1) is now below
+        // the Base, so it may be referenced with a relative index.
+        enc.feed_decoder_stream(&[0x02]).unwrap();
+
+        let section = enc.encode_section_with_ack_base(0, &[hdr(":authority", "www.example.com")]);
+        let body = &section.block[2..];
+        assert_eq!(body.len(), 1, "exactly one field line");
+        // A relative Indexed Field Line for the dynamic table occupies 0x80..=0xBF.
+        assert_eq!(
+            body[0] & 0xC0,
+            0x80,
+            "acknowledged entry must be referenced with a relative index"
+        );
+        assert!(
+            section.encoder_stream.is_empty(),
+            "no new insert needed for an already-present entry"
+        );
     }
 
     #[test]

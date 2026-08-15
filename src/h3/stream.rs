@@ -631,7 +631,7 @@ impl RequestStream {
         }
         let mut shared = self.shared.lock();
         let encoder = shared.encoder.as_mut().expect("encoder ensured");
-        let section = encoder.encode_section(self.stream_id, lines);
+        let section = encoder.encode_section_with_ack_base(self.stream_id, lines);
         let size = section.block.len() as u64;
         if let Some(limit) = shared.peer_max_field_section_size {
             if size > limit {
