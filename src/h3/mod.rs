@@ -766,7 +766,7 @@ where
                                 control_dead = true;
                             }
                         }
-                        Poll::Pending => {}
+                        Poll::Pending => return Poll::Pending,
                     }
                 }
 
