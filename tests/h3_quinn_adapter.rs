@@ -477,7 +477,10 @@ async fn large_send_under_backpressure_is_not_duplicated() {
             expected_len,
             "received byte count must equal sent (no duplication under backpressure)"
         );
-        assert!(received.iter().all(|&b| b == 0xAB), "received bytes must match");
+        assert!(
+            received.iter().all(|&b| b == 0xAB),
+            "received bytes must match"
+        );
     })
     .await
     .expect("scenario must finish in time");
