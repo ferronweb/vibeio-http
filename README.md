@@ -16,54 +16,33 @@ handlers behind a shared `HttpProtocol` trait. Each handler receives an
 - HTTP/1 upgrade support (`prepare_upgrade` / `OnUpgrade`)
 - Linux and FreeBSD zero-copy response sending for HTTP/1.x (`h1-zerocopy` feature)
 - Graceful shutdown support for all protocol handlers via `CancellationToken`
-- **Native HTTP/3**: an in-house RFC 9114 implementation (no `h3`-crate runtime
-  dependency) with QPACK and configurable header/stream limits
+- **Custom HTTP/2 and HTTP/3 implementations**, without dependencies on Hyperium's `h2` and `h3` crates
 
 ## Installation
 
 ```toml
 [dependencies]
-vibeio-http = "0.1"
+vibeio-http = "0.4"
 ```
 
 By default, this crate enables: `h1`, `h1-zerocopy`, and `h2`.
 
 ### Feature flags
 
-| Feature         | Enables                                                                 |
-| --------------- | ----------------------------------------------------------------------- |
-| `h1`            | HTTP/1.0 / HTTP/1.1 connection handler                                  |
-| `h2`            | HTTP/2 connection handler (in-house)                                    |
-| `h3`            | HTTP/3 connection handler (native RFC 9114 implementation)               |
-| `h1-zerocopy`   | Linux / FreeBSD zero-copy HTTP/1.x response sending (`splice`-based)    |
-| `h3-quinn`      | QUIC transport adapter for `h3` (`vibeio_http::quinn`, built on `quinn`)|
+| Feature       | Enables                                                                  |
+| ------------- | ------------------------------------------------------------------------ |
+| `h1`          | HTTP/1.0 / HTTP/1.1 connection handler                                   |
+| `h1-zerocopy` | Linux / FreeBSD zero-copy HTTP/1.x response sending (`splice`-based)     |
+| `h2`          | HTTP/2 connection handler (in-house)                                     |
+| `h3`          | HTTP/3 connection handler (native RFC 9114 implementation)               |
+| `h3-quinn`    | QUIC transport adapter for `h3` (`vibeio_http::quinn`, built on `quinn`) |
 
 For a smaller build, disable default features and opt in explicitly:
 
 ```toml
 [dependencies]
-vibeio-http = { version = "0.1", default-features = false, features = ["h1"] }
+vibeio-http = { version = "0.4", default-features = false, features = ["h1"] }
 ```
-
-## Architecture
-
-All three protocols are driven by the same `HttpProtocol` trait
-(`handle` / `handle_with_error_fn`): each handler receives an
-`http::Request<Incoming>` and returns an `http::Response<B>`.
-
-- **HTTP/1.x** and **HTTP/2** speak their wire protocols directly over the
-  underlying stream.
-- **HTTP/3** is a *native* implementation of RFC 9114. The `Http3` connection
-  driver owns the control-stream state machine and the QPACK encoder/decoder,
-  and is written against a small `transport::Connection` abstraction
-  (`OpenStreams` + `Accept` + `Connection`) rather than a concrete QUIC
-  stack. Any QUIC implementation can be adapted; the `h3-quinn` feature
-  provides the `quinn` adapter as `vibeio_http::quinn::Connection`.
-
-The HTTP/3 driver is a future that must be polled by a `vibeio` runtime. In
-production each accepted connection is handed to its own runtime/task, and
-individual request streams are served by spawned tasks (see
-`examples/h3spec_server.rs`).
 
 ## Quickstart (HTTP/1.1)
 
@@ -101,36 +80,6 @@ fn main() -> std::io::Result<()> {
     })
 }
 ```
-
-## Quickstart (HTTP/3)
-
-HTTP/3 runs over QUIC. The connection is accepted by a `quinn` endpoint and
-wrapped with the `vibeio_http::quinn::Connection` adapter before being handed
-to the native `Http3` driver. The driver is the same `handle` interface as
-HTTP/1.x / HTTP/2:
-
-```rust,ignore
-// (cert + quinn::Endpoint setup omitted — see examples/h3spec_server.rs)
-let connection = endpoint.accept().await.unwrap().await.unwrap();
-let runtime = RuntimeBuilder::new().enable_timer(true).build()?;
-runtime.block_on(async move {
-    let h3 = Http3::new(
-        vibeio_http::quinn::Connection::new(connection),
-        Http3Options::default(),
-    );
-    let _ = h3.handle(|_request| async move {
-        Ok::<_, std::convert::Infallible>(
-            Response::builder()
-                .status(200)
-                .body(Full::new(Bytes::from_static(b"Hello World")))
-                .unwrap(),
-        )
-    }).await;
-});
-```
-
-See `examples/h3spec_server.rs` for a complete, runnable server (self-signed
-certificate, ALPN `h3`, one vibeio runtime per connection).
 
 ## Early hints (`103`)
 
