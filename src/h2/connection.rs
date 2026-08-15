@@ -802,10 +802,15 @@ where
     /// windows (RFC 9113 Sections 6.1 and 6.9.2).
     #[inline]
     async fn handle_data_frame(&mut self, stream_id: u32, end_stream: bool, data: Bytes) {
-        self.writer
-            .write_window_update(&mut self.out, stream_id, data.len() as u32);
-        self.writer
-            .write_window_update(&mut self.out, 0, data.len() as u32);
+        // Sending a WINDOW_UPDATE frame with a zero delta (increment) is explicitly prohibited
+        // by the HTTP/2 specification and results in a STREAM_ERROR of type PROTOCOL_ERROR
+        // (Error Code 23)
+        if !data.is_empty() {
+            self.writer
+                .write_window_update(&mut self.out, stream_id, data.len() as u32);
+            self.writer
+                .write_window_update(&mut self.out, 0, data.len() as u32);
+        }
         let state = match self.streams.get_mut(&stream_id) {
             None => {
                 if self.closed_streams.contains(&stream_id) {
