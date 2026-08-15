@@ -30,8 +30,7 @@ use vibeio_http::{
 };
 
 const LARGE_TOTAL: usize = 256 * 1024 * 1024;
-const LARGE_CHUNK: usize = 8 * 1024;
-const LARGE_DELAY_MS: u64 = 10; // ~5s total for the large response
+const LARGE_CHUNK: usize = 64 * 1024;
 
 async fn loopback_pair(tiny: bool) -> (Endpoint, Endpoint, quinn::Connection, quinn::Connection) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -130,7 +129,7 @@ fn large_body() -> BoxBody<Bytes, Infallible> {
     // A *streaming* large body, chunked like a file being read off disk. This
     // exercises the real `poll_send_data` path (repeated yields) rather than a
     // single buffered `Full`, which is what a `.mp4` served from disk does.
-    let chunk = 64 * 1024;
+    let chunk = LARGE_CHUNK;
     let chunks = (0..(LARGE_TOTAL / chunk))
         .map(move |_| Ok::<_, Infallible>(Frame::data(Bytes::from(vec![0u8; chunk]))));
     StreamBody::new(futures_util::stream::iter(chunks)).boxed()
