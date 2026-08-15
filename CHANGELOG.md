@@ -4,8 +4,8 @@
 
 **Not yet released**
 
-- Replaced the HTTP/2 protocol implementation with an in-house one.
-- Replaced the experimental HTTP/3 wrapper around the `h3` crate with an in-house one.
+- Replaced the HTTP/2 protocol implementation (that used `h2` crate) with an in-house one.
+- Replaced the experimental HTTP/3 protcol implementation (that used `h3` crate) with an in-house one.
 
 ## `vibeio-http` 0.3.5
 
