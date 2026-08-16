@@ -43,7 +43,7 @@ h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 serde_json = "1"
-criterion = "0.5"
+criterion = "0.8"
 rcgen = "0.14"
 
 [[bench]]
