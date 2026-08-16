@@ -1,8 +1,8 @@
 # `vibeio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `vibeio-http` 0.4.1
 
-**Not yet released**
+**Released in August 16, 2026**
 
 - Improved handling of empty body frame edge cases.
 - Mitigated CONTINUATION flood vulnerability in HTTP/2.
