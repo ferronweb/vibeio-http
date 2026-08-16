@@ -451,3 +451,95 @@ fn count_resets(decoded: &[Frame]) -> usize {
         .filter(|f| matches!(f, Frame::Reset { .. }))
         .count()
 }
+
+#[test]
+fn continuation_flood_is_reset_without_closing_connection() {
+    // A peer that opens a header field block (HEADERS without END_HEADERS)
+    // and never closes it, streaming CONTINUATION frames forever, is a
+    // CONTINUATION flood (CVE-2024-27919). Past `max_continuation_frames`
+    // the offending stream is reset with PROTOCOL_ERROR and the connection
+    // keeps serving other streams (no GOAWAY).
+    let limit = 3usize;
+    let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);
+    let mut script = Vec::new();
+    writer.write_settings(&mut script, &[]);
+    // HEADERS opens the block (frame #1 of the flood budget).
+    writer.write_headers(&mut script, 1, false, false, None, &[0x82]);
+    // Two CONTINUATION frames stay within the budget (frames #2, #3).
+    for _ in 0..2 {
+        writer.write_continuation(&mut script, 1, false, &[0x82]);
+    }
+    // The third CONTINUATION exceeds the limit and triggers the reset.
+    writer.write_continuation(&mut script, 1, false, &[0x82]);
+    let reply = run_connection_with(
+        CLIENT_PREFACE,
+        &script,
+        Some(Duration::from_secs(5)),
+        ConnectionOptions {
+            max_continuation_frames: limit,
+            ..Default::default()
+        },
+    );
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded.iter().any(|f| matches!(
+            f,
+            Frame::Reset {
+                stream_id: 1,
+                error_code,
+            } if *error_code == Reason::ProtocolError.code()
+        )),
+        "expected RST_STREAM PROTOCOL_ERROR on the flooded stream, got {decoded:?}"
+    );
+    assert!(
+        decoded.iter().all(|f| !matches!(f, Frame::GoAway { .. })),
+        "connection must survive a single-stream flood, got {decoded:?}"
+    );
+}
+
+#[test]
+fn complete_field_block_within_limit_is_not_reset() {
+    // A normally-packed, bounded header block that spans several
+    // CONTINUATION frames but stays under the limit must not be reset.
+    let limit = 32usize;
+    let mut encoder = Encoder::new(4096);
+    let mut block = Vec::new();
+    let fields = [
+        HpackHeader::new(b":method".to_vec(), b"GET".to_vec()),
+        HpackHeader::new(b":scheme".to_vec(), b"https".to_vec()),
+        HpackHeader::new(b":authority".to_vec(), b"example.com".to_vec()),
+        HpackHeader::new(b":path".to_vec(), b"/".to_vec()),
+    ];
+    encoder.encode(&fields, &mut block);
+
+    let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);
+    let mut script = Vec::new();
+    writer.write_settings(&mut script, &[]);
+    let capacity = 3;
+    let first = &block[..capacity.min(block.len())];
+    writer.write_headers(&mut script, 1, false, false, None, first);
+    let mut rest = &block[capacity.min(block.len())..];
+    while rest.len() > capacity {
+        writer.write_continuation(&mut script, 1, false, &rest[..capacity]);
+        rest = &rest[capacity..];
+    }
+    writer.write_continuation(&mut script, 1, true, rest);
+    let reply = run_connection_with(
+        CLIENT_PREFACE,
+        &script,
+        Some(Duration::from_secs(5)),
+        ConnectionOptions {
+            max_continuation_frames: limit,
+            ..Default::default()
+        },
+    );
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded.iter().all(|f| !matches!(
+            f,
+            Frame::Reset { stream_id: 1, .. }
+        )),
+        "a bounded field block must not be reset, got {decoded:?}"
+    );
+}
+

@@ -127,6 +127,10 @@ pub(crate) struct StreamEntry {
     pub(crate) pending_data: VecDeque<(Bytes, bool)>,
     /// Header field size
     pub(crate) header_list_size: usize,
+    /// Frames seen so far in the open field block (HEADERS without
+    /// END_HEADERS plus each CONTINUATION). Resets to 0 when the block
+    /// completes; bounded by the connection's continuation-flood limit.
+    pub(crate) continuation_frames: usize,
 }
 
 impl StreamEntry {
@@ -156,6 +160,7 @@ impl StreamEntry {
             send_window: 65535,
             pending_data: VecDeque::new(),
             header_list_size: 0,
+            continuation_frames: 0,
         }
     }
 

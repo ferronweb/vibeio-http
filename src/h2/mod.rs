@@ -149,6 +149,15 @@ where
             idle_timeout: self.options.idle_timeout,
             max_local_error_reset_streams: self.options.max_local_error_reset_streams,
             max_pending_accept_reset_streams: self.options.max_pending_accept_reset_streams,
+            max_continuation_frames: self
+                .options
+                .max_continuation_frames
+                .unwrap_or_else(|| {
+                    let header = self.options.max_header_list_size as u64;
+                    let frame = self.options.max_frame_size as u64;
+                    let base = header / frame + u64::from(!header.is_multiple_of(frame));
+                    (base + base / 5 + 10) as usize
+                }),
         };
         // The trait hands us a plain `Fn`; the native connection needs
         // a `Clone` closure (it is reused across streams). Wrap it in an

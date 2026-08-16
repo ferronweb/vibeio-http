@@ -177,6 +177,14 @@ impl FrameDecoder {
         self.block_stream
     }
 
+    /// Forgets any open field block. Used when a stream is reset mid-block
+    /// (e.g. a CONTINUATION flood) so subsequent frames are not all treated
+    /// as protocol violations for the now-gone stream.
+    #[inline]
+    pub fn clear_block(&mut self) {
+        self.block_stream = None;
+    }
+
     /// Parses the next complete frame. Returns `Ok(None)` when more
     /// bytes are needed.
     #[inline]

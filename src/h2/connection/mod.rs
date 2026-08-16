@@ -76,6 +76,10 @@ pub struct ConnectionOptions {
     /// `None` disables the limit; when it is exceeded the connection
     /// closes with GOAWAY `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
     pub max_pending_accept_reset_streams: Option<usize>,
+    /// Maximum number of frames that may compose a single, not-yet-finalized
+    /// header field block (HEADERS/CONTINUATION). Beyond this a stream is
+    /// reset as a CONTINUATION flood (CVE-2024-27919).
+    pub max_continuation_frames: usize,
 }
 
 impl Default for ConnectionOptions {
@@ -93,6 +97,7 @@ impl Default for ConnectionOptions {
             idle_timeout: None,
             max_local_error_reset_streams: Some(1024),
             max_pending_accept_reset_streams: Some(20),
+            max_continuation_frames: 16,
         }
     }
 }
@@ -173,6 +178,9 @@ pub struct Connection<Io> {
     /// awaits finalization; drained one per frame by
     /// [`Connection::process_frames`].
     complete_blocks: Vec<u32>,
+    /// Maximum number of frames a single header field block may span before
+    /// it is treated as a CONTINUATION flood and reset (CVE-2024-27919).
+    max_continuation_frames: usize,
     /// Scratch buffer reused by [`Connection::drain_pending_data`] to
     /// snapshot stream ids before pumping (avoids a per-call
     /// allocation).
@@ -220,6 +228,7 @@ where
             pending_accept_resets: 0,
             wake_tx: None,
             complete_blocks: Vec::new(),
+            max_continuation_frames: 16,
             drain_ids: Vec::new(),
             highest_stream_id: 0,
             closing: false,
@@ -285,6 +294,9 @@ where
         self.writer.max_frame_size = self.opts.max_frame_size as usize;
         self.peer.max_frame_size = self.opts.max_frame_size as usize;
         self.conn_window = self.opts.initial_connection_window_size as i64;
+        // Resolved CONTINUATION-flood limit (CVE-2024-27919); `Http2Options`
+        // already applies the safe default when none was configured.
+        self.max_continuation_frames = options.max_continuation_frames;
         match self.read_preface().await? {
             None => return Ok(()), // preface timeout: close quietly
             Some(false) => {

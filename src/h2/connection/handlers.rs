@@ -28,6 +28,7 @@ where
                     entry.pending_end_stream = end_stream;
                     entry.extend_block(block);
                     if end_headers {
+                        entry.continuation_frames = 0;
                         self.complete_blocks.push(stream_id);
                     }
                     (false, false)
@@ -38,6 +39,10 @@ where
             self.stream_error(stream_id, Reason::StreamClosed);
         } else if start_new {
             self.open_request_stream(stream_id, end_stream, end_headers, block);
+        } else if !end_headers {
+            // The request field block stays open: count this frame towards
+            // the CONTINUATION-flood budget.
+            self.check_continuation_flood(stream_id);
         }
     }
 
@@ -52,7 +57,33 @@ where
         };
         entry.extend_block(block);
         if end_headers {
+            entry.continuation_frames = 0;
             self.complete_blocks.push(stream_id);
+        } else {
+            self.check_continuation_flood(stream_id);
+        }
+    }
+
+    /// Enforces the CONTINUATION-flood limit (CVE-2024-27919) for a stream
+    /// whose field block is still open. Each frame (the opening HEADERS and
+    /// every CONTINUATION) adds one; once the count passes the connection's
+    /// allowed maximum the offending stream is reset with `RST_STREAM`
+    /// `PROTOCOL_ERROR` and the open block is abandoned so the connection
+    /// keeps serving other streams.
+    #[inline]
+    pub(crate) fn check_continuation_flood(&mut self, stream_id: u32) {
+        let over_limit = match self.streams.get_mut(&stream_id) {
+            Some(entry) => {
+                entry.continuation_frames += 1;
+                entry.continuation_frames > self.max_continuation_frames
+            }
+            None => return,
+        };
+        if over_limit {
+            if self.decoder.block_stream() == Some(stream_id) {
+                self.decoder.clear_block();
+            }
+            self.stream_error(stream_id, Reason::ProtocolError);
         }
     }
 
@@ -95,6 +126,9 @@ where
         entry.extend_block(block);
         if end_headers {
             self.complete_blocks.push(stream_id);
+        } else {
+            // The opening HEADERS is the first frame of the block.
+            entry.continuation_frames = 1;
         }
         self.streams.insert(stream_id, entry);
     }

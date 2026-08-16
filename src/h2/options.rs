@@ -44,6 +44,14 @@ pub struct Http2Options {
     /// accepted them (their request was never dispatched). `None`
     /// disables the limit.
     pub(crate) max_pending_accept_reset_streams: Option<usize>,
+    /// Maximum number of frames that may make up a single, not-yet-finalized
+    /// header field block (HEADERS or PUSH_PROMISE without END_HEADERS
+    /// followed by CONTINUATION frames). A peer that keeps a field block
+    /// open across more frames than this is running a CONTINUATION flood
+    /// (CVE-2024-27919 et al.) and the offending stream is reset with
+    /// `RST_STREAM` `PROTOCOL_ERROR`. `None` selects a safe default derived
+    /// from `max_header_list_size` / `max_frame_size` plus a packing buffer.
+    pub(crate) max_continuation_frames: Option<usize>,
 }
 
 impl Default for Http2Options {
@@ -62,6 +70,7 @@ impl Default for Http2Options {
             idle_timeout: None,
             max_local_error_reset_streams: Some(1024),
             max_pending_accept_reset_streams: Some(20),
+            max_continuation_frames: None,
         }
     }
 }
@@ -173,6 +182,26 @@ impl Http2Options {
     #[inline]
     pub fn max_pending_accept_reset_streams(mut self, max: Option<usize>) -> Self {
         self.max_pending_accept_reset_streams = max;
+        self
+    }
+
+    /// Sets the maximum number of frames that may compose a single header
+    /// field block that has not yet been terminated by END_HEADERS. A field
+    /// block is opened by a HEADERS (or PUSH_PROMISE) frame without
+    /// END_HEADERS and continued by CONTINUATION frames. When a peer keeps
+    /// one open past this many frames, it is a CONTINUATION flood and the
+    /// stream is reset with `RST_STREAM` `PROTOCOL_ERROR`.
+    ///
+    /// `None` (the default) computes a safe bound automatically: the
+    /// configured `max_header_list_size` divided by `max_frame_size`,
+    /// plus a ~20% packing buffer and a fixed slack of 10 frames. This is
+    /// enough for any honestly-packed header block while catching floods
+    /// that never close the block.
+    ///
+    /// Defaults to `None`.
+    #[inline]
+    pub fn max_continuation_frames(mut self, max: Option<usize>) -> Self {
+        self.max_continuation_frames = max;
         self
     }
 }
