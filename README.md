@@ -113,20 +113,7 @@ let handler = |mut req| async move {
 
 - handshake / accept timeouts
 - automatic `100 Continue`
-- direct access to the underlying protocol builders (`h2_builder`, ...)
-
-The native `Http3Options` additionally exposes QPACK and header/stream limits:
-
-- `qpack_max_table_capacity(u64)` — max dynamic table capacity advertised
-- `qpack_blocked_streams(u64)` — max number of blocked QPACK streams
-- `max_field_section_size(Option<u64>)` — header size limit
-- `enable_connect_protocol(bool)` — extended `CONNECT` support
-- `accept_timeout(Option<Duration>)` / `handshake_timeout(Option<Duration>)`
-- `send_continue_response(bool)` / `send_date_header(bool)`
-
-`Http1Options` additionally supports request head size / header count limits,
-request head read timeout, automatic `Date` header injection, optional `103
-Early Hints`, and a vectored write toggle.
+- HTTP protocol-specific configuration
 
 ## HTTP/1 upgrades
 
