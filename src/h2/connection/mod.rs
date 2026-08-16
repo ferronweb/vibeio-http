@@ -442,9 +442,6 @@ where
     /// Decodes and handles every frame currently buffered. Returns
     /// `Ok(true)` when the connection should end (peer GOAWAY or an
     /// error we answered with GOAWAY).
-    /// Decodes and handles every frame currently buffered. Returns
-    /// `Ok(true)` when the connection should end (peer GOAWAY or an
-    /// error we answered with GOAWAY).
     #[inline]
     async fn process_frames<F, Fut, ResB, ResBE, ResE>(
         &mut self,

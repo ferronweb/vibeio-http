@@ -4,7 +4,8 @@
 
 **Not yet released**
 
-- Mitigated Rapid Reset and MadeYouReset vulnerabilites in HTTP/2 and HTTP/3
+- Improved handling of empty body frame edge cases.
+- Mitigated Rapid Reset and MadeYouReset vulnerabilites in HTTP/2 and HTTP/3.
 
 ## `vibeio-http` 0.4.0
 

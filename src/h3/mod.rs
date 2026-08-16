@@ -161,16 +161,23 @@ impl Body for H3Body {
         };
 
         if !inner.data_done {
-            let done = {
+            loop {
                 let mut stream = match std::pin::pin!(inner.stream.lock()).poll_unpin(cx) {
                     Poll::Ready(stream) => stream,
                     Poll::Pending => return Poll::Pending,
                 };
                 match stream.poll_recv_data(cx) {
                     Poll::Ready(Ok(Some(data))) => {
+                        if data.is_empty() {
+                            continue;
+                        }
                         return Poll::Ready(Some(Ok(BodyFrame::data(data))));
                     }
-                    Poll::Ready(Ok(None)) => true,
+                    Poll::Ready(Ok(None)) => {
+                        drop(stream);
+                        inner.data_done = true;
+                        break;
+                    }
                     Poll::Ready(Err(err)) => {
                         return Poll::Ready(Some(Err(h3_stream_error_to_io(err))));
                     }
@@ -180,10 +187,7 @@ impl Body for H3Body {
                         }
                         return Poll::Pending;
                     }
-                }
-            };
-            if done {
-                inner.data_done = true;
+                };
             }
         }
 
@@ -567,6 +571,10 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                     if frame.is_data() {
                         match frame.into_data() {
                             Ok(data) => {
+                                if data.is_empty() {
+                                    // Don't waste bandwidth using empty frames...
+                                    continue;
+                                }
                                 if send_data(&stream, data).await.is_err() {
                                     return;
                                 }

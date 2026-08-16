@@ -290,6 +290,10 @@ where
         end_stream: bool,
         data: Bytes,
     ) {
+        if data.is_empty() && !end_stream {
+            // Empty chunks won't be very useful...
+            return;
+        }
         // Sending a WINDOW_UPDATE frame with a zero delta (increment) is explicitly prohibited
         // by the HTTP/2 specification and results in a STREAM_ERROR of type PROTOCOL_ERROR
         // (Error Code 23)

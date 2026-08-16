@@ -139,6 +139,9 @@ where
             let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
             match chunk.into_data() {
                 Ok(data) => {
+                    if data.is_empty() {
+                        continue;
+                    }
                     if chunked {
                         let mut chunk_size_buf = [0u8; 18];
                         let chunk_size = write_chunk_size(&mut chunk_size_buf, data.len());

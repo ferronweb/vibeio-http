@@ -444,10 +444,14 @@ where
             match body.as_mut().poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
                     Ok(data) => {
-                        let msg = StreamMsg::Data {
-                            data,
-                            end_stream: body.is_end_stream(),
-                        };
+                        let end_stream = body.is_end_stream();
+
+                        if data.is_empty() && !end_stream {
+                            // Reduce unnecessary data transfers
+                            continue;
+                        }
+
+                        let msg = StreamMsg::Data { data, end_stream };
 
                         let msg_tx_fut2 = msg_tx.send(msg);
                         // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
