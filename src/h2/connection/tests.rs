@@ -535,11 +535,9 @@ fn complete_field_block_within_limit_is_not_reset() {
     );
     let decoded = decode_frames(&reply);
     assert!(
-        decoded.iter().all(|f| !matches!(
-            f,
-            Frame::Reset { stream_id: 1, .. }
-        )),
+        decoded
+            .iter()
+            .all(|f| !matches!(f, Frame::Reset { stream_id: 1, .. })),
         "a bounded field block must not be reset, got {decoded:?}"
     );
 }
-
