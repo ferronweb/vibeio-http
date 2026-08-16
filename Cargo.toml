@@ -63,3 +63,7 @@ h1-zerocopy = ["h1", "vibeio/splice"]
 h2 = ["rustc-hash", "httpdate", "tokio-util", "pin-project-lite"]
 h3 = ["rustc-hash", "httpdate", "tokio-util"]
 h3-quinn = ["h3", "dep:quinn"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
