@@ -384,6 +384,18 @@ where
             }
             return;
         };
+        if !entry.request_started {
+            // The peer reset a stream whose request we never accepted:
+            // bound how many such streams a peer may churn through
+            // (RFC 9113 Section 10.5.2).
+            if let Some(max) = self.opts.max_pending_accept_reset_streams {
+                if self.pending_accept_resets >= max {
+                    self.goaway(Reason::EnhanceYourCalm, b"too many resets before accept");
+                    return;
+                }
+            }
+            self.pending_accept_resets += 1;
+        }
         self.mark_closed(stream_id);
         // Unblock the task: the body reader reports the reset and the
         // task ends. Dropping the entry also severs the message
@@ -484,6 +496,23 @@ where
     /// ends on its next poll.
     #[inline]
     pub(crate) fn stream_error(&mut self, stream_id: u32, reason: Reason) {
+        // Bound the RST_STREAM frames we send for the peer's protocol
+        // errors (RFC 9113 Section 10.5.2): a peer that keeps making
+        // errors past the limit costs the connection, not the stream.
+        // InternalError is our own give-up (a stalled stream), not a
+        // peer error, so it does not count.
+        if reason != Reason::InternalError {
+            if let Some(max) = self.opts.max_local_error_reset_streams {
+                if self.local_error_resets >= max {
+                    self.goaway(
+                        Reason::EnhanceYourCalm,
+                        b"too many resets for peer protocol errors",
+                    );
+                    return;
+                }
+            }
+            self.local_error_resets += 1;
+        }
         self.writer
             .write_reset(&mut self.out, stream_id, reason.code());
         self.mark_closed(stream_id);

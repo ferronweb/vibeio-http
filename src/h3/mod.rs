@@ -47,7 +47,7 @@ use crate::{
     h3::{
         control::{ControlEvent, ControlStreams},
         date::DateCache,
-        stream::{RequestStream, SharedCodecs},
+        stream::{RequestStream, SharedCodecs, StreamError},
     },
     EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
 };
@@ -55,6 +55,60 @@ use crate::{
 /// Application error codes from RFC 9114 Section 8.1 used by the driver.
 const H3_NO_ERROR: u64 = 0x0100;
 const H3_REQUEST_REJECTED: u64 = 0x010b;
+
+/// Per-connection budgets for the resets a hostile peer can force the
+/// server to send or observe (RFC 9114 Section 10.5); `None` disables a
+/// budget.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResetLimits {
+    pub(super) max_local_error_resets: Option<usize>,
+    pub(super) max_pending_accept_resets: Option<usize>,
+}
+
+/// Connection-level reset accounting, shared between the driver and the
+/// per-request tasks (which cannot themselves close the QUIC connection).
+#[derive(Debug)]
+struct ConnResetState {
+    limits: ResetLimits,
+    /// RESET_STREAM frames this endpoint has sent for the peer's protocol
+    /// errors (bounded by `limits.max_local_error_resets`).
+    local_error_resets: usize,
+    /// Streams the peer terminated (RESET_STREAM or STOP_SENDING) before
+    /// this endpoint accepted them (bounded by
+    /// `limits.max_pending_accept_resets`).
+    pending_accept_resets: usize,
+    /// Application error code the connection must close with; the driver
+    /// drains it on its next turn.
+    close_code: Option<u64>,
+}
+
+impl ConnResetState {
+    /// Records a locally sent protocol-error reset; returns the code the
+    /// connection must close with when the budget is exceeded.
+    #[inline]
+    fn note_local_error_reset(&mut self) -> Option<u64> {
+        match self.limits.max_local_error_resets {
+            Some(max) if self.local_error_resets >= max => Some(H3Error::ExcessiveLoad.code()),
+            _ => {
+                self.local_error_resets += 1;
+                None
+            }
+        }
+    }
+
+    /// Records a peer-terminated, never-accepted stream; returns the code
+    /// the connection must close with when the budget is exceeded.
+    #[inline]
+    fn note_pending_accept_reset(&mut self) -> Option<u64> {
+        match self.limits.max_pending_accept_resets {
+            Some(max) if self.pending_accept_resets >= max => Some(H3Error::ExcessiveLoad.code()),
+            _ => {
+                self.pending_accept_resets += 1;
+                None
+            }
+        }
+    }
+}
 
 /// The shared handle on a request stream: the connection task, the request
 /// task, the response body, and a possible upgrade all work through it.
@@ -278,7 +332,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     date_cache: DateCache,
     send_continue_response: bool,
     send_date_header: bool,
-    conn_close: Arc<parking_lot::Mutex<Option<u64>>>,
+    conn_state: Arc<parking_lot::Mutex<ConnResetState>>,
 ) where
     F: Fn(Request<Incoming>) -> Fut,
     Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
@@ -295,13 +349,37 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         Ok(Some(request)) => request,
         // The stream ended without a request: nothing to respond to.
         Ok(None) => return,
-        // A connection-scoped protocol violation (a malformed request,
-        // message, or QPACK error): force the connection to close with the
-        // matching H3 code. Stream-scoped errors are left to the transport.
         Err(err) => {
-            if !err.is_stream_scoped() {
-                *conn_close.lock() = Some(err.h3_code());
+            // The peer terminated the stream (RESET_STREAM or
+            // STOP_SENDING) before its request was read: a reset for a
+            // stream that never reached the handler. Bound how many of
+            // these a peer may churn through (RFC 9114 Section 10.5).
+            if err.is_stream_scoped() {
+                let mut state = conn_state.lock();
+                if let Some(code) = state.note_pending_accept_reset() {
+                    state.close_code = Some(code);
+                }
+                return;
             }
+            // A malformed request message: abort the stream with
+            // `H3_MESSAGE_ERROR` rather than the whole connection (RFC
+            // 9114 Section 4.1.2), bounded by the local-reset budget.
+            if matches!(err, StreamError::Message) {
+                let mut guard = stream.lock().await;
+                let code = err.h3_code();
+                let _ = std::future::poll_fn(|cx| guard.poll_reset(cx, code)).await;
+                let _ = std::future::poll_fn(|cx| guard.poll_stop_sending(cx, code)).await;
+                drop(guard);
+                let mut state = conn_state.lock();
+                if let Some(code) = state.note_local_error_reset() {
+                    state.close_code = Some(code);
+                }
+                return;
+            }
+            // A connection-scoped protocol violation (a malformed frame,
+            // an invalid frame sequence, or a QPACK error): force the
+            // connection to close with the matching H3 code.
+            conn_state.lock().close_code = Some(err.h3_code());
             return;
         }
     };
@@ -642,12 +720,20 @@ where
 
             let mut controls = ControlStreams::new(options.local_settings.clone());
             let shared = controls.shared().clone();
-            // A request-stream task raises this to a non-`None` value holding
-            // the H3 code when it hits a connection-scoped error; the driver
-            // closes the connection with that code (the request task cannot
-            // itself close the QUIC connection).
-            let conn_close: Arc<parking_lot::Mutex<Option<u64>>> =
-                Arc::new(parking_lot::Mutex::new(None));
+            // Request-stream tasks record connection-scoped errors and reset
+            // accounting here; the driver closes the connection with the
+            // recorded H3 code (a request task cannot itself close the QUIC
+            // connection).
+            let conn_state: Arc<parking_lot::Mutex<ConnResetState>> =
+                Arc::new(parking_lot::Mutex::new(ConnResetState {
+                    limits: ResetLimits {
+                        max_local_error_resets: options.max_local_error_reset_streams,
+                        max_pending_accept_resets: options.max_pending_accept_reset_streams,
+                    },
+                    local_error_resets: 0,
+                    pending_accept_resets: 0,
+                    close_code: None,
+                }));
             let mut ongoing: FuturesUnordered<oneshot::AsyncReceiver<()>> = FuturesUnordered::new();
             let mut cancel_fut: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
                 None;
@@ -687,7 +773,7 @@ where
             std::future::poll_fn(|cx| loop {
                 // A request-stream task hit a connection-scoped error: close
                 // the connection with the H3 code it recorded.
-                if let Some(code) = conn_close.lock().take() {
+                if let Some(code) = conn_state.lock().close_code.take() {
                     if closing_with.is_none() {
                         closing_with = Some(code);
                         shutdown = true;
@@ -857,7 +943,7 @@ where
                             let request_fn = request_fn.clone();
                             let date_cache = date_cache.clone();
                             let shared = shared.clone();
-                            let conn_close_for_task = conn_close.clone();
+                            let conn_state_for_task = conn_state.clone();
                             vibeio::spawn(async move {
                                 let _end = end_tx;
                                 handle_request(
@@ -868,7 +954,7 @@ where
                                     date_cache,
                                     send_continue_response,
                                     send_date_header,
-                                    conn_close_for_task,
+                                    conn_state_for_task,
                                 )
                                 .await;
                             });

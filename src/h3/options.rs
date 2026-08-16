@@ -20,6 +20,8 @@ pub struct Http3Options {
     pub(super) handshake_timeout: Option<std::time::Duration>,
     pub(super) send_continue_response: bool,
     pub(super) send_date_header: bool,
+    pub(super) max_local_error_reset_streams: Option<usize>,
+    pub(super) max_pending_accept_reset_streams: Option<usize>,
 }
 
 impl Http3Options {
@@ -32,9 +34,11 @@ impl Http3Options {
     /// | `send_continue_response` | `true` |
     /// | `send_date_header` | `true` |
     /// | `qpack_max_table_capacity` | `0` (RFC 9204 default) |
-    /// | `qpack_blocked_streams` | `0` (RFC 9204 default) |
-    /// | `max_field_section_size` | 65,536 |
-    /// | `enable_connect_protocol` | `false` |
+    ///     | `qpack_blocked_streams` | `0` (RFC 9204 default) |
+    ///     | `max_field_section_size` | 65,536 |
+    ///     | `enable_connect_protocol` | `false` |
+    ///     | `max_local_error_reset_streams` | `1024` |
+    ///     | `max_pending_accept_reset_streams` | `20` |
     ///
     /// The QPACK/limit settings are advertised to the peer in this
     /// endpoint's SETTINGS frame and bound its codecs: the decoder's
@@ -50,6 +54,8 @@ impl Http3Options {
             handshake_timeout: Some(std::time::Duration::from_secs(30)),
             send_continue_response: true,
             send_date_header: true,
+            max_local_error_reset_streams: Some(1024),
+            max_pending_accept_reset_streams: Some(20),
         }
     }
 
@@ -138,6 +144,30 @@ impl Http3Options {
     #[inline]
     pub fn send_date_header(mut self, send: bool) -> Self {
         self.send_date_header = send;
+        self
+    }
+
+    /// Sets the maximum number of RESET_STREAM frames this endpoint sends
+    /// in response to protocol errors made by the peer across the lifetime
+    /// of the connection (RFC 9114 Section 10.5): a peer that keeps
+    /// sending malformed requests past this limit costs the connection
+    /// rather than the stream, which is then closed with `H3_EXCESSIVE_LOAD`.
+    /// `None` disables the limit. Defaults to `Some(1024)`.
+    #[inline]
+    pub fn max_local_error_reset_streams(mut self, max: Option<usize>) -> Self {
+        self.max_local_error_reset_streams = max;
+        self
+    }
+
+    /// Sets the maximum number of streams the peer opened and then
+    /// terminated (RESET_STREAM or STOP_SENDING) before this endpoint
+    /// accepted them (RFC 9114 Section 10.5): a peer that churns through
+    /// streams without dispatching a single request exceeds this budget,
+    /// and the connection is closed with `H3_EXCESSIVE_LOAD`. `None`
+    /// disables the limit. Defaults to `Some(20)`.
+    #[inline]
+    pub fn max_pending_accept_reset_streams(mut self, max: Option<usize>) -> Self {
+        self.max_pending_accept_reset_streams = max;
         self
     }
 }

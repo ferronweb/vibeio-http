@@ -67,6 +67,15 @@ pub struct ConnectionOptions {
     /// Close the connection after this long with no frame from the peer
     /// (RFC 9113 Section 10.5). `None` disables the idle timeout.
     pub idle_timeout: Option<Duration>,
+    /// Maximum number of RST_STREAM frames we send in response to
+    /// protocol errors made by the peer over the connection's lifetime.
+    /// `None` disables the limit; when it is exceeded the connection
+    /// closes with GOAWAY `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
+    pub max_local_error_reset_streams: Option<usize>,
+    /// Maximum number of streams the peer reset before we accepted them.
+    /// `None` disables the limit; when it is exceeded the connection
+    /// closes with GOAWAY `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
+    pub max_pending_accept_reset_streams: Option<usize>,
 }
 
 impl Default for ConnectionOptions {
@@ -82,6 +91,8 @@ impl Default for ConnectionOptions {
             max_header_list_size: u32::MAX,
             enable_connect_protocol: false,
             idle_timeout: None,
+            max_local_error_reset_streams: Some(1024),
+            max_pending_accept_reset_streams: Some(20),
         }
     }
 }
@@ -148,8 +159,13 @@ pub struct Connection<Io> {
     /// idle-stream frames.
     closed_streams: FxHashSet<u32>,
     /// Behavior options for this connection (used by [`Connection::handle`]).
-    #[allow(dead_code)]
     opts: ConnectionOptions,
+    /// RST_STREAM frames this endpoint has sent in response to the
+    /// peer's protocol errors (bounded by `opts.max_local_error_reset_streams`).
+    local_error_resets: usize,
+    /// Streams the peer reset before this endpoint accepted them
+    /// (bounded by `opts.max_pending_accept_reset_streams`).
+    pending_accept_resets: usize,
     /// Wakes the drive loop when a stream task fills its outbound
     /// channel; the loop drains channels between reads.
     wake_tx: Option<kanal::AsyncSender<()>>,
@@ -200,6 +216,8 @@ where
             conn_window: DEFAULT_INITIAL_WINDOW_SIZE as i64,
             closed_streams: FxHashSet::default(),
             opts: ConnectionOptions::default(),
+            local_error_resets: 0,
+            pending_accept_resets: 0,
             wake_tx: None,
             complete_blocks: Vec::new(),
             drain_ids: Vec::new(),

@@ -36,6 +36,14 @@ pub struct Http2Options {
     /// Close a connection after this long with no frame from the peer
     /// (RFC 9113 Section 10.5). `None` disables the idle timeout.
     pub(crate) idle_timeout: Option<Duration>,
+    /// Maximum number of RST_STREAM frames this endpoint sends in
+    /// response to protocol errors made by the peer across the lifetime
+    /// of the connection. `None` disables the limit.
+    pub(crate) max_local_error_reset_streams: Option<usize>,
+    /// Maximum number of streams the peer reset before this endpoint
+    /// accepted them (their request was never dispatched). `None`
+    /// disables the limit.
+    pub(crate) max_pending_accept_reset_streams: Option<usize>,
 }
 
 impl Default for Http2Options {
@@ -52,6 +60,8 @@ impl Default for Http2Options {
             max_header_list_size: 1024 * 16,
             enable_connect_protocol: false,
             idle_timeout: None,
+            max_local_error_reset_streams: Some(1024),
+            max_pending_accept_reset_streams: Some(20),
         }
     }
 }
@@ -139,6 +149,30 @@ impl Http2Options {
     #[inline]
     pub fn idle_timeout(mut self, idle_timeout: Option<Duration>) -> Self {
         self.idle_timeout = idle_timeout;
+        self
+    }
+
+    /// Sets the maximum number of RST_STREAM frames this endpoint sends in
+    /// response to protocol errors made by the peer across the lifetime of
+    /// the connection. When the peer keeps producing protocol errors past
+    /// this many local resets, the connection is closed with a GOAWAY of
+    /// type `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2). `None` disables
+    /// the limit. Defaults to `Some(1024)`.
+    #[inline]
+    pub fn max_local_error_reset_streams(mut self, max: Option<usize>) -> Self {
+        self.max_local_error_reset_streams = max;
+        self
+    }
+
+    /// Sets the maximum number of streams the peer reset before this endpoint
+    /// accepted them (their request was never dispatched) that may be
+    /// counted at a time. When the peer keeps opening and resetting streams
+    /// faster than they are consumed, the connection is closed with a GOAWAY
+    /// of type `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2). `None` disables
+    /// the limit. Defaults to `Some(20)`.
+    #[inline]
+    pub fn max_pending_accept_reset_streams(mut self, max: Option<usize>) -> Self {
+        self.max_pending_accept_reset_streams = max;
         self
     }
 }

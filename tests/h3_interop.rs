@@ -1238,3 +1238,171 @@ async fn fixture_client_dynamic_table_eviction_pressure() {
     .await
     .expect("fixture_client_dynamic_table_eviction_fix timed out");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_malformed_message_resets_stream_and_connection_survives() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new(),
+            cancel.clone(),
+            |request| async move {
+                let (_parts, _) = request.into_parts();
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(b"still-alive".to_vec())))
+                        .expect("response"),
+                )
+            },
+        );
+
+        let mut fixture = Fixture::new(client_conn).await;
+        // A request without `:method` is a malformed message: the server
+        // must abort the stream with H3_MESSAGE_ERROR, not the connection
+        // (RFC 9114 Section 4.1.2).
+        let (mut send, mut recv) = fixture
+            .request_open(&pseudo(&[
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/malformed"),
+            ]))
+            .await;
+        let _ = send.finish();
+        let stream_id = u64::from(recv.id());
+        let mut buf = [0u8; 1];
+        let reset_code = match recv.read(&mut buf).await {
+            Err(quinn::ReadError::Reset(code)) => code.into_inner(),
+            other => panic!("expected stream reset, got {other:?}"),
+        };
+        assert_eq!(reset_code, 0x010e, "H3_MESSAGE_ERROR expected");
+        assert_eq!(stream_id, u64::from(recv.id()));
+
+        // The connection survived the malformed stream: a valid request
+        // on another stream is served normally.
+        let (mut send, recv) = fixture
+            .request_open(&pseudo(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/ok"),
+            ]))
+            .await;
+        send.finish().expect("finish request");
+        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
+        assert_eq!(data, b"still-alive");
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_malformed_message_resets_stream_and_connection_survives timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_local_error_reset_budget_closes_with_excessive_load() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new().max_local_error_reset_streams(Some(2)),
+            cancel.clone(),
+            |request| async move {
+                let (_parts, _) = request.into_parts();
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(b"unused".to_vec())))
+                        .expect("response"),
+                )
+            },
+        );
+
+        let mut fixture = Fixture::new(client_conn.clone()).await;
+        // Two malformed messages fit the local-reset budget; the third
+        // costs the connection: RESET_STREAM gives way to a close with
+        // H3_EXCESSIVE_LOAD (RFC 9114 Section 10.5).
+        for i in 0..3 {
+            let (mut send, _recv) = fixture
+                .request_open(&pseudo(&[
+                    (":scheme", "https"),
+                    (":authority", "localhost"),
+                    (":path", &format!("/bad-{i}")),
+                ]))
+                .await;
+            let _ = send.finish();
+        }
+        let closed = client_conn.closed().await;
+        match closed {
+            quinn::ConnectionError::ApplicationClosed(close) => {
+                assert_eq!(close.error_code.into_inner(), 0x0107, "H3_EXCESSIVE_LOAD");
+            }
+            other => panic!("expected application close with H3_EXCESSIVE_LOAD, got {other:?}"),
+        }
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_local_error_reset_budget_closes_with_excessive_load timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_pending_accept_reset_budget_closes_with_excessive_load() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new().max_pending_accept_reset_streams(Some(2)),
+            cancel.clone(),
+            |request| async move {
+                let (_parts, _) = request.into_parts();
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(b"unused".to_vec())))
+                        .expect("response"),
+                )
+            },
+        );
+
+        let fixture = Fixture::new(client_conn.clone()).await;
+        // Streams opened and terminated before any request bytes were
+        // sent never reach the handler: they churn through the
+        // pending-accept budget (RFC 9114 Sections 4.1.2, 10.5), and the
+        // third one costs the connection.
+        for _ in 0..3 {
+            let (mut send, _recv) = fixture.conn.open_bi().await.expect("open request stream");
+            let _ = send.reset(0x010cu32.into()); // H3_REQUEST_CANCELLED
+        }
+        let closed = client_conn.closed().await;
+        match closed {
+            quinn::ConnectionError::ApplicationClosed(close) => {
+                assert_eq!(close.error_code.into_inner(), 0x0107, "H3_EXCESSIVE_LOAD");
+            }
+            other => panic!("expected application close with H3_EXCESSIVE_LOAD, got {other:?}"),
+        }
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_pending_accept_reset_budget_closes_with_excessive_load timed out");
+}

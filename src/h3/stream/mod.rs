@@ -50,10 +50,11 @@ use crate::h3::transport::BidiStream;
 
 /// A failure on a request stream.
 ///
-/// Most variants are connection-scoped protocol errors: the driver closes
-/// the connection with [`StreamError::h3_code`]. [`StreamError::Transport`]
-/// with a `Reset`/`Stopped` error is stream-scoped: the driver abandons
-/// the stream and the exchange.
+/// [`StreamError::Transport`] with a `Reset`/`Stopped` error and
+/// [`StreamError::Message`] are stream-scoped: the driver abandons the
+/// stream (counting it against the connection's reset budgets). Most
+/// other variants are connection-scoped protocol errors: the driver
+/// closes the connection with [`StreamError::h3_code`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StreamError {
     /// The transport failed: the stream was reset by the peer

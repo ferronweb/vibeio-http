@@ -1,5 +1,11 @@
 # `vibeio-http` change log
 
+## `vibeio-http` UNRELEASED
+
+**Not yet released**
+
+- Mitigated Rapid Reset and MadeYouReset vulnerabilites in HTTP/2 and HTTP/3
+
 ## `vibeio-http` 0.4.0
 
 **Released in August 15, 2026**

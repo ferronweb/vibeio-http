@@ -1,6 +1,7 @@
 use super::*;
 use crate::h2::codec::Setting;
 use crate::h2::error::Reason;
+use crate::h2::hpack::{Encoder, Header as HpackHeader};
 use crate::h2::stream::{BodyMsg, StreamMsg};
 
 /// Runs a connection against a scripted peer over an in-memory
@@ -15,6 +16,25 @@ fn run_connection(
     frames: &[u8],
     preface_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
+) -> Vec<u8> {
+    run_connection_with(
+        preface,
+        frames,
+        preface_timeout,
+        ConnectionOptions {
+            idle_timeout,
+            ..Default::default()
+        },
+    )
+}
+
+/// Like [`run_connection`], with full control over connection options.
+#[inline]
+fn run_connection_with(
+    preface: &[u8],
+    frames: &[u8],
+    preface_timeout: Option<Duration>,
+    opts: ConnectionOptions,
 ) -> Vec<u8> {
     let script: Vec<u8> = [preface, frames].concat();
     vibeio::RuntimeBuilder::new()
@@ -32,10 +52,7 @@ fn run_connection(
                         Arc::new(|_| {
                             std::future::pending::<Result<Response<Incoming>, std::io::Error>>()
                         }),
-                        ConnectionOptions {
-                            idle_timeout,
-                            ..Default::default()
-                        },
+                        opts,
                     )
                     .await;
             });
@@ -294,4 +311,143 @@ fn graceful_shutdown_queues_goaway() {
                 .collect();
             assert_eq!(codes, vec![Reason::NoError.code(), Reason::NoError.code()]);
         });
+}
+
+/// A header block carrying only `:method`: decodes fine but fails
+/// request parsing, so the server answers with RST_STREAM
+/// PROTOCOL_ERROR (RFC 9113 Section 8.1.1).
+#[inline]
+fn malformed_request_block() -> Vec<u8> {
+    let mut encoder = Encoder::new(4096);
+    let mut block = Vec::new();
+    encoder.encode(&[HpackHeader::new(":method", "GET")], &mut block);
+    block
+}
+
+#[test]
+fn local_reset_budget_closes_with_enhance_your_calm() {
+    // A peer whose protocol errors would force more RST_STREAM frames
+    // than the budget allows must cost the connection: GOAWAY with
+    // ENHANCE_YOUR_CALM (RFC 9113 Section 10.5.2).
+    let block = malformed_request_block();
+    let script = [client_script(|w, out| {
+        for id in [1u32, 3, 5] {
+            w.write_headers(out, id, false, true, None, &block);
+        }
+    })]
+    .concat();
+    let reply = run_connection_with(
+        CLIENT_PREFACE,
+        &script,
+        Some(Duration::from_secs(5)),
+        ConnectionOptions {
+            max_local_error_reset_streams: Some(2),
+            ..Default::default()
+        },
+    );
+    let decoded = decode_frames(&reply);
+    let count = |pred: fn(&Frame) -> bool| decoded.iter().filter(|f| pred(f)).count();
+    // Two resets fit the budget; the third error closes the connection.
+    assert_eq!(count(|f| matches!(f, Frame::Reset { .. })), 2);
+    assert_eq!(
+        count(|f| matches!(
+            f,
+            Frame::GoAway { error_code, .. } if *error_code == Reason::EnhanceYourCalm.code()
+        )),
+        1,
+        "expected ENHANCE_YOUR_CALM GOAWAY, got {decoded:?}"
+    );
+}
+
+#[test]
+fn local_reset_budget_can_be_disabled() {
+    // With the budget disabled, protocol errors only ever cost their
+    // own streams: one RST_STREAM per error, no GOAWAY.
+    let block = malformed_request_block();
+    let script = [client_script(|w, out| {
+        for id in [1u32, 3, 5, 7] {
+            w.write_headers(out, id, false, true, None, &block);
+        }
+    })]
+    .concat();
+    let reply = run_connection_with(
+        CLIENT_PREFACE,
+        &script,
+        Some(Duration::from_secs(5)),
+        ConnectionOptions {
+            max_local_error_reset_streams: None,
+            ..Default::default()
+        },
+    );
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded.iter().all(|f| !matches!(f, Frame::GoAway { .. })),
+        "no GOAWAY expected, got {decoded:?}"
+    );
+    assert!(matches!(
+        decoded.last(),
+        Some(Frame::Reset { stream_id: 7, .. })
+    ));
+}
+
+/// Injects a stream entry that is open but not yet dispatched (the
+/// peer's HEADERS arrived but the request was not accepted), the state
+/// a pending-accept reset arrives in.
+#[inline]
+fn inject_pending_stream(conn: &mut Connection<tokio::io::DuplexStream>, id: u32) {
+    let (body_tx, _) = kanal::bounded_async::<BodyMsg>(1);
+    let (reset_tx, _) = kanal::bounded_async::<u32>(1);
+    let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
+    conn.streams
+        .insert(id, StreamEntry::new(body_tx, reset_tx, msg_rx));
+}
+
+#[test]
+fn pending_accept_reset_budget_closes_with_enhance_your_calm() {
+    // A peer that opens streams and resets them before their request
+    // was dispatched churns through the pending-accept budget (RFC
+    // 9113 Section 10.5.2): on exceeding it the connection closes
+    // with ENHANCE_YOUR_CALM.
+    let (_client, server) = tokio::io::duplex(1 << 16);
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    conn.opts.max_pending_accept_reset_streams = Some(2);
+    for id in [1u32, 3, 5] {
+        inject_pending_stream(&mut conn, id);
+        conn.handle_reset_frame(id, Reason::Cancel.code());
+    }
+    let decoded = decode_frames(&conn.out);
+    assert!(
+        decoded.iter().any(|f| matches!(
+            f,
+            Frame::GoAway { error_code, .. } if *error_code == Reason::EnhanceYourCalm.code()
+        )),
+        "expected ENHANCE_YOUR_CALM GOAWAY, got {decoded:?}"
+    );
+    // The two in-budget resets were handled normally; the third must
+    // not have reset anything further.
+    assert_eq!(count_resets(&decoded), 0);
+}
+
+#[test]
+fn pending_accept_reset_budget_can_be_disabled() {
+    let (_client, server) = tokio::io::duplex(1 << 16);
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    conn.opts.max_pending_accept_reset_streams = None;
+    for id in [1u32, 3, 5, 7, 9] {
+        inject_pending_stream(&mut conn, id);
+        conn.handle_reset_frame(id, Reason::Cancel.code());
+    }
+    let decoded = decode_frames(&conn.out);
+    assert!(
+        decoded.iter().all(|f| !matches!(f, Frame::GoAway { .. })),
+        "no GOAWAY expected, got {decoded:?}"
+    );
+}
+
+#[inline]
+fn count_resets(decoded: &[Frame]) -> usize {
+    decoded
+        .iter()
+        .filter(|f| matches!(f, Frame::Reset { .. }))
+        .count()
 }

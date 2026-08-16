@@ -147,6 +147,8 @@ where
             max_header_list_size: self.options.max_header_list_size,
             enable_connect_protocol: self.options.enable_connect_protocol,
             idle_timeout: self.options.idle_timeout,
+            max_local_error_reset_streams: self.options.max_local_error_reset_streams,
+            max_pending_accept_reset_streams: self.options.max_pending_accept_reset_streams,
         };
         // The trait hands us a plain `Fn`; the native connection needs
         // a `Clone` closure (it is reused across streams). Wrap it in an
