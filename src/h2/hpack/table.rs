@@ -542,11 +542,17 @@ mod tests {
 
         assert_eq!(table.find_name(header("a", "").name_bytes()), Some(62));
         assert_eq!(
-            table.find(header("a", "3").name_bytes(), header("a", "3").value_bytes()),
+            table.find(
+                header("a", "3").name_bytes(),
+                header("a", "3").value_bytes()
+            ),
             Some(62)
         );
         assert_eq!(
-            table.find(header("a", "1").name_bytes(), header("a", "1").value_bytes()),
+            table.find(
+                header("a", "1").name_bytes(),
+                header("a", "1").value_bytes()
+            ),
             Some(64)
         );
 
@@ -554,12 +560,18 @@ mod tests {
         // newer `a`/`3` must remain the stored name match.
         table.set_max_size(70); // three 34-octet entries = 102 > 70 -> one evicted
         assert_eq!(
-            table.find(header("a", "1").name_bytes(), header("a", "1").value_bytes()),
+            table.find(
+                header("a", "1").name_bytes(),
+                header("a", "1").value_bytes()
+            ),
             None
         );
         assert_eq!(table.find_name(header("a", "").name_bytes()), Some(62));
         assert_eq!(
-            table.find(header("a", "3").name_bytes(), header("a", "3").value_bytes()),
+            table.find(
+                header("a", "3").name_bytes(),
+                header("a", "3").value_bytes()
+            ),
             Some(62)
         );
         assert_eq!(table.find_name(header("b", "").name_bytes()), Some(63));
