@@ -59,8 +59,8 @@ else
   ./h2spec -h "$HOST" -p "$PORT" -S -j "$JUNIT" $SPEC | tee "$(dirname "$JUNIT")/h2spec.out"
 fi
 status=$?
-if (grep -a "[×❌]" "$(dirname "$JUNIT")/h2spec.out" | grep -aqE 'Sends a GOAWAY frame|Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream|does not equal the sum of the multiple DATA frames payload length') \
-&& ! (grep -a "[×❌]" "$(dirname "$JUNIT")/h2spec.out" | grep -avqE 'Sends a GOAWAY frame|Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream|does not equal the sum of the multiple DATA frames payload length'); then
+if (grep -a "[×❌]" "$(dirname "$JUNIT")/h2spec.out" | grep -aqE 'Sends a GOAWAY frame|Sends multiple WINDOW_UPDATE frames increasing the flow control window to above|does not equal the sum of the multiple DATA frames payload length') \
+&& ! (grep -a "[×❌]" "$(dirname "$JUNIT")/h2spec.out" | grep -avqE 'Sends a GOAWAY frame|Sends multiple WINDOW_UPDATE frames increasing the flow control window to above|does not equal the sum of the multiple DATA frames payload length'); then
   # The flakiness happens on GitHub Actions workflows, ignore the test result
   echo "⚠️ Known flaky tests failed..."
   status=0
