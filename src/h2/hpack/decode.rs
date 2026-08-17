@@ -42,7 +42,7 @@ impl Decoder {
     #[inline]
     pub fn new(max_table_size: usize) -> Self {
         Decoder {
-            table: Table::with_max_size(max_table_size),
+            table: Table::with_max_size_no_maps(max_table_size),
             max_table_size,
             queued_size_update: None,
             max_header_list_size: usize::MAX,

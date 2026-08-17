@@ -217,7 +217,7 @@ impl Decoder {
     #[inline]
     pub fn new(max_capacity: u64, max_blocked_streams: usize) -> Self {
         Self {
-            dynamic: DynamicTable::new(0),
+            dynamic: DynamicTable::without_maps(0),
             max_capacity,
             known_received: 0,
             blocked: VecDeque::new(),

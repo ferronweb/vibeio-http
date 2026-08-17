@@ -1,7 +1,137 @@
 //! HPACK header tables (RFC 7541 Sections 2.3 and 4).
 
 use bytes::Bytes;
+use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
+
+/// Perfect-hash lookup of the static table by exact `(name, value)`. Built once
+/// at compile time, so `find` never scans the 61-entry table (RFC 7541
+/// Appendix A) on the hot path.
+static STATIC_EXACT: phf::Map<(&[u8], &[u8]), usize> = phf::phf_map! {
+    (b":authority", b"") => 1,
+    (b":method", b"GET") => 2,
+    (b":method", b"POST") => 3,
+    (b":path", b"/") => 4,
+    (b":path", b"/index.html") => 5,
+    (b":scheme", b"http") => 6,
+    (b":scheme", b"https") => 7,
+    (b":status", b"200") => 8,
+    (b":status", b"204") => 9,
+    (b":status", b"206") => 10,
+    (b":status", b"304") => 11,
+    (b":status", b"400") => 12,
+    (b":status", b"404") => 13,
+    (b":status", b"500") => 14,
+    (b"accept-charset", b"") => 15,
+    (b"accept-encoding", b"gzip, deflate") => 16,
+    (b"accept-language", b"") => 17,
+    (b"accept-ranges", b"") => 18,
+    (b"accept", b"") => 19,
+    (b"access-control-allow-origin", b"") => 20,
+    (b"age", b"") => 21,
+    (b"allow", b"") => 22,
+    (b"authorization", b"") => 23,
+    (b"cache-control", b"") => 24,
+    (b"content-disposition", b"") => 25,
+    (b"content-encoding", b"") => 26,
+    (b"content-language", b"") => 27,
+    (b"content-length", b"") => 28,
+    (b"content-location", b"") => 29,
+    (b"content-range", b"") => 30,
+    (b"content-type", b"") => 31,
+    (b"cookie", b"") => 32,
+    (b"date", b"") => 33,
+    (b"etag", b"") => 34,
+    (b"expect", b"") => 35,
+    (b"expires", b"") => 36,
+    (b"from", b"") => 37,
+    (b"host", b"") => 38,
+    (b"if-match", b"") => 39,
+    (b"if-modified-since", b"") => 40,
+    (b"if-none-match", b"") => 41,
+    (b"if-range", b"") => 42,
+    (b"if-unmodified-since", b"") => 43,
+    (b"last-modified", b"") => 44,
+    (b"link", b"") => 45,
+    (b"location", b"") => 46,
+    (b"max-forwards", b"") => 47,
+    (b"proxy-authenticate", b"") => 48,
+    (b"proxy-authorization", b"") => 49,
+    (b"range", b"") => 50,
+    (b"referer", b"") => 51,
+    (b"refresh", b"") => 52,
+    (b"retry-after", b"") => 53,
+    (b"server", b"") => 54,
+    (b"set-cookie", b"") => 55,
+    (b"strict-transport-security", b"") => 56,
+    (b"transfer-encoding", b"") => 57,
+    (b"user-agent", b"") => 58,
+    (b"vary", b"") => 59,
+    (b"via", b"") => 60,
+    (b"www-authenticate", b"") => 61,
+};
+
+/// Perfect-hash lookup of the static table by name alone, mapping each name to
+/// its lowest-indexed entry (matching the original left-to-right scan).
+static STATIC_NAME: phf::Map<&[u8], usize> = phf::phf_map! {
+    b":authority" => 1,
+    b":method" => 2,
+    b":path" => 4,
+    b":scheme" => 6,
+    b":status" => 8,
+    b"accept-charset" => 15,
+    b"accept-encoding" => 16,
+    b"accept-language" => 17,
+    b"accept-ranges" => 18,
+    b"accept" => 19,
+    b"access-control-allow-origin" => 20,
+    b"age" => 21,
+    b"allow" => 22,
+    b"authorization" => 23,
+    b"cache-control" => 24,
+    b"content-disposition" => 25,
+    b"content-encoding" => 26,
+    b"content-language" => 27,
+    b"content-length" => 28,
+    b"content-location" => 29,
+    b"content-range" => 30,
+    b"content-type" => 31,
+    b"cookie" => 32,
+    b"date" => 33,
+    b"etag" => 34,
+    b"expect" => 35,
+    b"expires" => 36,
+    b"from" => 37,
+    b"host" => 38,
+    b"if-match" => 39,
+    b"if-modified-since" => 40,
+    b"if-none-match" => 41,
+    b"if-range" => 42,
+    b"if-unmodified-since" => 43,
+    b"last-modified" => 44,
+    b"link" => 45,
+    b"location" => 46,
+    b"max-forwards" => 47,
+    b"proxy-authenticate" => 48,
+    b"proxy-authorization" => 49,
+    b"range" => 50,
+    b"referer" => 51,
+    b"refresh" => 52,
+    b"retry-after" => 53,
+    b"server" => 54,
+    b"set-cookie" => 55,
+    b"strict-transport-security" => 56,
+    b"transfer-encoding" => 57,
+    b"user-agent" => 58,
+    b"vary" => 59,
+    b"via" => 60,
+    b"www-authenticate" => 61,
+};
+
+/// Composite `(name, value)` key for the dynamic exact-match map. `Bytes` are
+/// refcount-bumped clones of the stored header, so lookups never allocate.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct NameValue(Bytes, Bytes);
 
 /// The static table (RFC 7541 Appendix A): 61 immutable entries.
 /// Index 1 is `:authority`, index 61 is `www-authenticate`.
@@ -72,6 +202,12 @@ const STATIC_TABLE: [(&[u8], &[u8]); 61] = [
 /// Number of entries in the static table.
 pub(crate) const STATIC_LEN: usize = 61;
 
+/// Below this many dynamic entries, `find`/`find_name` use a linear scan
+/// (cheap early exits for common headers); at or above it they use the
+/// perfect-hash static maps plus the hash-map dynamic index. Tiny tables
+/// favour the scan; large tables favour the hash map.
+const HYBRID_THRESHOLD: usize = 32;
+
 /// The entry-size overhead (RFC 7541 Section 4.1).
 const ENTRY_OVERHEAD: usize = 32;
 
@@ -113,6 +249,18 @@ impl Header {
     pub fn value(&self) -> &[u8] {
         &self.value
     }
+
+    /// Owned `Bytes` view of the name (a refcount bump, no copy).
+    #[inline]
+    pub(crate) fn name_bytes(&self) -> &Bytes {
+        &self.name
+    }
+
+    /// Owned `Bytes` view of the value (a refcount bump, no copy).
+    #[inline]
+    pub(crate) fn value_bytes(&self) -> &Bytes {
+        &self.value
+    }
 }
 
 /// The HPACK header table: the immutable static table followed by a
@@ -126,6 +274,16 @@ pub(crate) struct Table {
     size: usize,
     /// Maximum combined size the dynamic table may grow to.
     max_size: usize,
+    /// Exact `(name, value)` -> combined index for the dynamic entries. Always
+    /// holds the newest index of each pair (RFC 7541, newest first).
+    exact: FxHashMap<NameValue, usize>,
+    /// Name -> combined index for the dynamic entries, holding the newest
+    /// index of each name.
+    name: FxHashMap<Bytes, usize>,
+    /// When false (decoder side), the lookup maps are never built or
+    /// consulted: the decoder resolves by index and never calls `find`, so
+    /// maintaining them would be pure overhead.
+    maintain_maps: bool,
 }
 
 impl Table {
@@ -142,6 +300,24 @@ impl Table {
             entries: VecDeque::new(),
             size: 0,
             max_size,
+            exact: FxHashMap::default(),
+            name: FxHashMap::default(),
+            maintain_maps: true,
+        }
+    }
+
+    /// Like [`Table::with_max_size`] but without lookup-map maintenance,
+    /// for the decoder which resolves entries by index and never queries
+    /// the maps.
+    #[inline]
+    pub(crate) fn with_max_size_no_maps(max_size: usize) -> Self {
+        Table {
+            entries: VecDeque::new(),
+            size: 0,
+            max_size,
+            exact: FxHashMap::default(),
+            name: FxHashMap::default(),
+            maintain_maps: false,
         }
     }
 
@@ -174,15 +350,28 @@ impl Table {
     /// the static table is searched first, then the dynamic table
     /// (newest first).
     #[inline]
-    pub(crate) fn find(&self, name: &[u8], value: &[u8]) -> Option<usize> {
-        for (i, (n, v)) in STATIC_TABLE.iter().enumerate() {
-            if *n == name && *v == value {
+    pub(crate) fn find(&self, name: &Bytes, value: &Bytes) -> Option<usize> {
+        if self.maintain_maps && self.entries.len() > HYBRID_THRESHOLD {
+            if let Some(&index) = STATIC_EXACT.get(&(name.as_ref(), value.as_ref())) {
+                return Some(index);
+            }
+            return self
+                .exact
+                .get(&NameValue(name.clone(), value.clone()))
+                .copied();
+        }
+        // Linear fallback: static table first (lowest index), then dynamic
+        // (newest first). Matches the original scan for tiny tables.
+        let name_ref = name.as_ref();
+        let value_ref = value.as_ref();
+        for (i, entry) in STATIC_TABLE.iter().enumerate() {
+            if entry.0 == name_ref && entry.1 == value_ref {
                 return Some(i + 1);
             }
         }
-        for (i, entry) in self.entries.iter().enumerate() {
-            if entry.name() == name && entry.value() == value {
-                return Some(STATIC_LEN + i + 1);
+        for (i, header) in self.entries.iter().enumerate() {
+            if header.name() == name_ref && header.value() == value_ref {
+                return Some(STATIC_LEN + 1 + i);
             }
         }
         None
@@ -192,15 +381,22 @@ impl Table {
     /// static table is searched first, then the dynamic table (newest
     /// first).
     #[inline]
-    pub(crate) fn find_name(&self, name: &[u8]) -> Option<usize> {
-        for (i, (n, _)) in STATIC_TABLE.iter().enumerate() {
-            if *n == name {
+    pub(crate) fn find_name(&self, name: &Bytes) -> Option<usize> {
+        if self.maintain_maps && self.entries.len() > HYBRID_THRESHOLD {
+            if let Some(&index) = STATIC_NAME.get(name.as_ref()) {
+                return Some(index);
+            }
+            return self.name.get(name.as_ref()).copied();
+        }
+        let name_ref = name.as_ref();
+        for (i, entry) in STATIC_TABLE.iter().enumerate() {
+            if entry.0 == name_ref {
                 return Some(i + 1);
             }
         }
-        for (i, entry) in self.entries.iter().enumerate() {
-            if entry.name() == name {
-                return Some(STATIC_LEN + i + 1);
+        for (i, header) in self.entries.iter().enumerate() {
+            if header.name() == name_ref {
+                return Some(STATIC_LEN + 1 + i);
             }
         }
         None
@@ -234,9 +430,31 @@ impl Table {
         self.max_size = max_size;
         while self.size > self.max_size {
             match self.entries.pop_back() {
-                Some(entry) => self.size -= entry.size(),
+                Some(entry) => {
+                    self.size -= entry.size();
+                    let combined = STATIC_LEN + self.entries.len() + 1;
+                    self.evict_entry(&entry, combined);
+                }
                 None => break,
             }
+        }
+    }
+
+    /// Drops `entry` from the lookup maps if it is still the stored newest
+    /// match for its key. Back-eviction only ever removes the oldest entry,
+    /// so a map value equals `combined` only when `entry` was the sole
+    /// occurrence of its key in the table.
+    #[inline]
+    fn evict_entry(&mut self, entry: &Header, combined: usize) {
+        if !self.maintain_maps {
+            return;
+        }
+        if self.name.get(entry.name()).copied() == Some(combined) {
+            self.name.remove(entry.name());
+        }
+        let key = NameValue(entry.name_bytes().clone(), entry.value_bytes().clone());
+        if self.exact.get(&key).copied() == Some(combined) {
+            self.exact.remove(&key);
         }
     }
 
@@ -248,16 +466,45 @@ impl Table {
         if header.size() > self.max_size {
             self.entries.clear();
             self.size = 0;
+            if self.maintain_maps {
+                self.exact.clear();
+                self.name.clear();
+            }
             return;
         }
         while self.size + header.size() > self.max_size {
             match self.entries.pop_back() {
-                Some(entry) => self.size -= entry.size(),
+                Some(entry) => {
+                    self.size -= entry.size();
+                    let combined = STATIC_LEN + self.entries.len() + 1;
+                    self.evict_entry(&entry, combined);
+                }
                 None => break,
             }
         }
+        if self.maintain_maps {
+            // A front insertion shifts every existing dynamic entry's combined
+            // index up by one; bump the stored indices to match.
+            for v in self.exact.values_mut() {
+                *v += 1;
+            }
+            for v in self.name.values_mut() {
+                *v += 1;
+            }
+        }
+
+        let combined = STATIC_LEN + 1;
         self.size += header.size();
-        self.entries.push_front(header);
+        if self.maintain_maps {
+            let name = header.name_bytes().clone();
+            let value = header.value_bytes().clone();
+            self.entries.push_front(header);
+            self.exact
+                .insert(NameValue(name.clone(), value.clone()), combined);
+            self.name.insert(name, combined);
+        } else {
+            self.entries.push_front(header);
+        }
     }
 }
 
@@ -281,6 +528,41 @@ mod tests {
             Bytes::copy_from_slice(name.as_bytes()),
             Bytes::copy_from_slice(value.as_bytes()),
         )
+    }
+
+    /// The hash-map backed `find`/`find_name` must stay correct across the
+    /// front-insert index shift and back-eviction, including for duplicate
+    /// names and values.
+    #[test]
+    fn find_tracks_eviction_and_duplicates() {
+        let mut table = Table::with_max_size(200);
+        table.add(header("a", "1")); // combined 62
+        table.add(header("b", "2")); // combined 63
+        table.add(header("a", "3")); // combined 62 (newest), `a`/`1` shifts to 64
+
+        assert_eq!(table.find_name(header("a", "").name_bytes()), Some(62));
+        assert_eq!(
+            table.find(header("a", "3").name_bytes(), header("a", "3").value_bytes()),
+            Some(62)
+        );
+        assert_eq!(
+            table.find(header("a", "1").name_bytes(), header("a", "1").value_bytes()),
+            Some(64)
+        );
+
+        // Evict the oldest entry (`a`/`1` at combined 64) by shrinking; the
+        // newer `a`/`3` must remain the stored name match.
+        table.set_max_size(70); // three 34-octet entries = 102 > 70 -> one evicted
+        assert_eq!(
+            table.find(header("a", "1").name_bytes(), header("a", "1").value_bytes()),
+            None
+        );
+        assert_eq!(table.find_name(header("a", "").name_bytes()), Some(62));
+        assert_eq!(
+            table.find(header("a", "3").name_bytes(), header("a", "3").value_bytes()),
+            Some(62)
+        );
+        assert_eq!(table.find_name(header("b", "").name_bytes()), Some(63));
     }
 
     #[test]

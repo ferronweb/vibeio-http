@@ -92,7 +92,7 @@ impl Encoder {
         for header in headers {
             let name = header.name();
             if NEVER_INDEXED.contains(&name) {
-                match self.table.find_name(name) {
+                match self.table.find_name(header.name_bytes()) {
                     Some(index) => integer::encode(out, index as u64, 4, LITERAL_NEVER_INDEXED),
                     None => {
                         out.push(LITERAL_NEVER_INDEXED);
@@ -103,12 +103,12 @@ impl Encoder {
                 continue;
             }
 
-            match self.table.find(name, header.value()) {
+            match self.table.find(header.name_bytes(), header.value_bytes()) {
                 Some(index) => {
                     integer::encode(out, index as u64, 7, INDEXED);
                 }
                 None => {
-                    match self.table.find_name(name) {
+                    match self.table.find_name(header.name_bytes()) {
                         Some(index) => integer::encode(out, index as u64, 6, LITERAL_WITH_INDEXING),
                         None => {
                             out.push(LITERAL_WITH_INDEXING);

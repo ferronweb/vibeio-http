@@ -22,6 +22,12 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
+use rustc_hash::FxHashMap;
+
+/// Composite `(name, value)` key for the dynamic exact-match map. `Bytes` are
+/// refcount-bumped clones of the stored entry, so lookups never allocate.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct NameValue(Bytes, Bytes);
 
 /// Error returned when an entry cannot be inserted.
 ///
@@ -46,7 +52,22 @@ pub(crate) struct DynamicTable {
     capacity: u64,
     size: u64,
     inserted: u64,
+    /// Exact `(name, value)` -> absolute index for the dynamic entries, always
+    /// holding the newest absolute index of each pair.
+    exact: FxHashMap<NameValue, u64>,
+    /// Name -> absolute index for the dynamic entries, holding the newest
+    /// absolute index of each name.
+    name: FxHashMap<Bytes, u64>,
+    /// When false (decoder side), the lookup maps are never built or
+    /// consulted: the decoder resolves entries by absolute index and never
+    /// calls `find_*`, so maintaining them would be pure overhead.
+    maintain_maps: bool,
 }
+
+/// Below this many dynamic entries, `find_full_or_name`/`find_name` use a
+/// linear scan (cheap early exits); at or above it they use the hash maps.
+/// Tiny tables favour the scan; large tables favour the hash map.
+pub(crate) const HYBRID_THRESHOLD: usize = 64;
 
 impl std::fmt::Debug for DynamicTable {
     #[inline]
@@ -64,11 +85,26 @@ impl DynamicTable {
     /// Creates an empty table with the given initial `capacity`.
     #[inline]
     pub(crate) fn new(capacity: u64) -> Self {
+        Self::with_maps(capacity, true)
+    }
+
+    /// Creates an empty table without lookup-map maintenance, for the decoder
+    /// which resolves entries by absolute index and never queries the maps.
+    #[inline]
+    pub(crate) fn without_maps(capacity: u64) -> Self {
+        Self::with_maps(capacity, false)
+    }
+
+    #[inline]
+    fn with_maps(capacity: u64, maintain_maps: bool) -> Self {
         Self {
             entries: VecDeque::new(),
             capacity,
             size: 0,
             inserted: 0,
+            exact: FxHashMap::default(),
+            name: FxHashMap::default(),
+            maintain_maps,
         }
     }
 
@@ -175,23 +211,35 @@ impl DynamicTable {
         self.len() as u64 - survivors
     }
 
-    /// Finds the most recent exact match and the most recent name match in
-    /// one pass. The encoder uses both results when choosing a field-line
+    /// Finds the most recent exact match and the most recent name match.
+    /// The encoder uses both results when choosing a field-line
     /// representation, so this avoids scanning a busy dynamic table twice.
     #[inline]
     pub(crate) fn find_full_or_name(
         &self,
-        name: &[u8],
-        value: &[u8],
+        name: &Bytes,
+        value: &Bytes,
     ) -> (Option<u64>, Option<u64>) {
+        if self.maintain_maps && self.entries.len() > HYBRID_THRESHOLD {
+            let exact = self
+                .exact
+                .get(&NameValue(name.clone(), value.clone()))
+                .copied();
+            let name_match = self.name.get(name.as_ref()).copied();
+            return (exact, name_match);
+        }
+        // Linear fallback: entries are newest-first, so the first match wins
+        // (highest absolute index), matching the hash-map stored value.
+        let name_ref = name.as_ref();
+        let value_ref = value.as_ref();
         let mut name_match = None;
         for (i, (entry_name, entry_value)) in self.entries.iter().enumerate() {
-            if entry_name != name {
+            if entry_name.as_ref() != name_ref {
                 continue;
             }
             let abs = self.inserted - 1 - i as u64;
             name_match.get_or_insert(abs);
-            if entry_value == value {
+            if entry_value.as_ref() == value_ref {
                 return (Some(abs), name_match);
             }
         }
@@ -203,10 +251,15 @@ impl DynamicTable {
     /// Returns the entry's absolute index.
     #[inline]
     pub(crate) fn find_name(&self, name: &[u8]) -> Option<u64> {
-        self.entries
-            .iter()
-            .position(|(n, _)| n == name)
-            .map(|i| self.inserted - 1 - i as u64)
+        if self.maintain_maps && self.entries.len() > HYBRID_THRESHOLD {
+            return self.name.get(name).copied();
+        }
+        for (i, (n, _)) in self.entries.iter().enumerate() {
+            if n.as_ref() == name {
+                return Some(self.inserted - 1 - i as u64);
+            }
+        }
+        None
     }
 
     /// Inserts a new entry at the insertion point, evicting oldest entries
@@ -222,9 +275,15 @@ impl DynamicTable {
             return Err(InsertError::EntryTooLarge);
         }
         self.evict_to_fit(self.capacity - entry_size);
-        self.entries.push_front((name, value));
+        let abs = self.next_absolute();
+        self.entries.push_front((name.clone(), value.clone()));
         self.size += entry_size;
         self.inserted += 1;
+        if self.maintain_maps {
+            self.exact
+                .insert(NameValue(name.clone(), value.clone()), abs);
+            self.name.insert(name, abs);
+        }
         Ok(())
     }
 
@@ -329,6 +388,19 @@ impl DynamicTable {
                 None => break,
             };
             self.size -= Self::entry_size(&name, &value);
+            // The evicted entry is the oldest (smallest absolute index) of its
+            // key, so a map value equals `abs` only when it was the sole
+            // occurrence and must be dropped.
+            let abs = self.inserted - self.entries.len() as u64 - 1;
+            if self.maintain_maps {
+                if self.name.get(name.as_ref()).copied() == Some(abs) {
+                    self.name.remove(name.as_ref());
+                }
+                let key = NameValue(name, value);
+                if self.exact.get(&key).copied() == Some(abs) {
+                    self.exact.remove(&key);
+                }
+            }
         }
     }
 }
@@ -343,6 +415,41 @@ mod tests {
             Bytes::copy_from_slice(name.as_bytes()),
             Bytes::copy_from_slice(value.as_bytes()),
         )
+    }
+
+    /// The hash-map backed lookups must stay correct across insertion (newest
+    /// absolute index wins) and eviction (oldest removed), including duplicate
+    /// names.
+    #[test]
+    fn find_tracks_eviction_and_duplicates() {
+        let mut table = DynamicTable::new(1000);
+        insert(&mut table, "a", "1").unwrap(); // abs 0
+        insert(&mut table, "b", "2").unwrap(); // abs 1
+        insert(&mut table, "a", "3").unwrap(); // abs 2 (newest `a`)
+
+        assert_eq!(
+            table.find_full_or_name(&Bytes::from_static(b"a"), &Bytes::from_static(b"3")),
+            (Some(2), Some(2))
+        );
+        assert_eq!(
+            table.find_full_or_name(&Bytes::from_static(b"a"), &Bytes::from_static(b"1")),
+            (Some(0), Some(2))
+        );
+        assert_eq!(table.find_name(&Bytes::from_static(b"a")), Some(2));
+        assert_eq!(table.find_name(&Bytes::from_static(b"b")), Some(1));
+
+        // Evict the oldest entry (`a`/`1`, abs 0) by shrinking capacity.
+        table.set_capacity(70); // three 34-octet entries = 102 > 70 -> one evicted
+        assert_eq!(
+            table.find_full_or_name(&Bytes::from_static(b"a"), &Bytes::from_static(b"1")),
+            (None, Some(2))
+        );
+        assert_eq!(table.find_name(&Bytes::from_static(b"a")), Some(2));
+        assert_eq!(table.find_name(&Bytes::from_static(b"b")), Some(1));
+        assert_eq!(
+            table.find_full_or_name(&Bytes::from_static(b"a"), &Bytes::from_static(b"3")),
+            (Some(2), Some(2))
+        );
     }
 
     #[test]

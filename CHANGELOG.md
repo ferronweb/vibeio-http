@@ -1,5 +1,11 @@
 # `vibeio-http` change log
 
+## `vibeio-http` UNRELEASED
+
+**Not yet released**
+
+- Optimized HPACK (HTTP/2) and QPACK (HTTP/3) implementations for large dynamic tables (for example for variable headers)
+
 ## `vibeio-http` 0.4.1
 
 **Released in August 16, 2026**
