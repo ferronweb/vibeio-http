@@ -1,7 +1,7 @@
 //! HPACK Huffman coding (RFC 7541 Appendix B).
 //!
 //! Encoding walks the 257-symbol code table; decoding walks a precomputed
-//! 4-bit finite-state machine that consumes four encoded bits per table
+//! finite-state machine that consumes one encoded byte per table
 //! lookup (vs. one bit per walk in a binary tree). The FSM enforces the
 //! RFC 7541 Section 5.2 rules: the EOS symbol must not appear in the data,
 //! and trailing padding must be at most 7 bits of the EOS code's most
@@ -14,7 +14,7 @@
 //! (<https://github.com/litespeedtech/ls-hpack>), which uses the same RFC
 //! code table.
 
-use super::huffman_table::HUFF_DFA;
+use super::huffman_table::HUFF_DFA8;
 use super::HpackError;
 
 // __HPACK_HUFFMAN_TABLE__
@@ -333,9 +333,10 @@ pub(crate) fn encoded_len(src: &[u8]) -> usize {
 ///
 /// Fails per RFC 7541 Section 5.2 if the EOS symbol appears in the data,
 /// if the data ends mid-code with more than 7 padding bits, or if the
-/// padding is not a prefix of the EOS code. The 4-bit DFA ([`HUFF_DFA`])
-/// advances one nibble at a time, so each encoded byte costs two table
-/// lookups instead of the eight a bit-by-bit walk would need.
+/// padding is not a prefix of the EOS code. The 8-bit DFA ([`HUFF_DFA8`])
+/// advances one byte per lookup (built at compile time from the 4-bit DFA),
+/// so each encoded byte costs a single table lookup instead of the eight a
+/// bit-by-bit walk would need.
 #[inline]
 pub(crate) fn decode(src: &[u8], dst: &mut Vec<u8>) -> Result<(), HpackError> {
     dst.clear();
@@ -351,20 +352,19 @@ pub(crate) fn decode(src: &[u8], dst: &mut Vec<u8>) -> Result<(), HpackError> {
     let mut state: usize = 0;
     let mut accepted = true;
     for &byte in src {
-        // High nibble, then low nibble (Huffman bits are most-significant first).
-        let high = HUFF_DFA[(state << 4) + (byte >> 4) as usize];
-        let low = HUFF_DFA[((high.0 as usize) << 4) + (byte & 0x0f) as usize];
-        if (high.1 | low.1) & 0x04 != 0 {
+        // One lookup for the whole byte (Huffman bits are most-significant first).
+        let el = HUFF_DFA8[(state << 8) | byte as usize];
+        if el.1 & 0x04 != 0 {
             return Err(HpackError::InvalidHuffman);
         }
-        if high.1 & 0x02 != 0 {
-            dst.push(high.2);
+        if el.1 & 0x02 != 0 {
+            dst.push(el.2[0]);
         }
-        if low.1 & 0x02 != 0 {
-            dst.push(low.2);
+        if el.1 & 0x01 != 0 {
+            dst.push(el.2[1]);
         }
-        accepted = low.1 & 0x01 != 0;
-        state = low.0 as usize;
+        accepted = el.1 & 0x08 != 0;
+        state = el.0 as usize;
     }
     if !accepted {
         return Err(HpackError::InvalidHuffman);

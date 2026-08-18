@@ -4099,3 +4099,40 @@ pub(crate) const HUFF_DFA: [(u8, u8, u8); 256 * 16] = [
     (0u8, 4u8, 0u8),
     (0u8, 4u8, 0u8),
 ];
+
+/// 8-bit Huffman decode DFA, built from [`HUFF_DFA`] at compile time. It
+/// collapses the two 4-bit lookups (high nibble, then low nibble) for one
+/// encoded byte into a single lookup indexed by `(state << 8) | byte`.
+///
+/// Entry = `(next_state, flags, [high_sym, low_sym])`. flags: 0x04 FAIL,
+/// 0x02 high symbol emitted, 0x01 low symbol emitted, 0x08 ACCEPTED (valid
+/// termination / padding point). The two decoded bytes are the symbols the
+/// high and low nibbles would have produced, in that order.
+pub(crate) const HUFF_DFA8: [(u8, u8, [u8; 2]); 256 * 256] = build_huff_dfa8();
+
+const fn build_huff_dfa8() -> [(u8, u8, [u8; 2]); 256 * 256] {
+    let mut out = [(0u8, 0u8, [0u8; 2]); 256 * 256];
+    let mut i = 0usize;
+    while i < out.len() {
+        let state = i >> 8;
+        let byte = i & 0xff;
+        let high = HUFF_DFA[(state << 4) + (byte >> 4) as usize];
+        let low = HUFF_DFA[((high.0 as usize) << 4) + (byte & 0x0f) as usize];
+        let mut flags = 0u8;
+        if (high.1 | low.1) & 0x04 != 0 {
+            flags |= 0x04;
+        }
+        if high.1 & 0x02 != 0 {
+            flags |= 0x02;
+        }
+        if low.1 & 0x02 != 0 {
+            flags |= 0x01;
+        }
+        if low.1 & 0x01 != 0 {
+            flags |= 0x08;
+        }
+        out[i] = (low.0, flags, [high.2, low.2]);
+        i += 1;
+    }
+    out
+}
