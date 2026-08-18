@@ -361,7 +361,7 @@ impl Decoder {
 
         // Unblock every field section whose Required Insert Count has been
         // reached, in arrival order.
-        let mut sections = Vec::new();
+        let mut sections = Vec::with_capacity(self.blocked.len());
         while let Some(front) = self.blocked.front() {
             if front.ric > self.dynamic.inserted() {
                 break;
@@ -545,7 +545,7 @@ impl Decoder {
         let mut out = Vec::new();
         integer::encode(&mut out, stream_id, 6, STREAM_CANCELLATION);
         self.decoder_stream.extend_from_slice(&out);
-        Bytes::from(out)
+        Bytes::from_owner(out)
     }
 
     /// Drops blocked sections older than `max_age` in the caller's clock
@@ -554,7 +554,7 @@ impl Decoder {
     #[inline]
     pub fn expire_blocked(&mut self, now: u64, max_age: u64) -> Bytes {
         let mut out = Vec::new();
-        let mut cancelled = Vec::new();
+        let mut cancelled = Vec::with_capacity(self.blocked.len() / 2);
         for blocked in &self.blocked {
             if now.saturating_sub(blocked.since) > max_age
                 && !cancelled.contains(&blocked.stream_id)

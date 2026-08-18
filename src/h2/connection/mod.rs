@@ -201,6 +201,8 @@ pub struct Connection<Io> {
     /// Shared `Date` header value, refreshed periodically for the
     /// responses the stream tasks emit.
     date_cache: Arc<DateCache>,
+    /// Buffer for HTTP/2 frame encoding reuse
+    frame_buffer: Vec<u8>,
 }
 
 impl<Io> Connection<Io>
@@ -236,6 +238,7 @@ where
             graceful_last_stream: 0,
             shutdown: None,
             date_cache: Arc::new(DateCache::new()),
+            frame_buffer: Vec::new(),
         }
     }
 

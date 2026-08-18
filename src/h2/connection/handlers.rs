@@ -788,7 +788,7 @@ where
                     return;
                 }
                 entry.local_ended = true;
-                let mut block = Vec::new();
+                self.frame_buffer.clear();
                 let mut headers: Vec<HpackHeader> = Vec::with_capacity(trailers.len());
                 for (name, value) in trailers.iter() {
                     headers.push(HpackHeader::new(
@@ -796,9 +796,9 @@ where
                         value.as_bytes().to_vec(),
                     ));
                 }
-                self.encoder.encode(&headers, &mut block);
+                self.encoder.encode(&headers, &mut self.frame_buffer);
                 self.writer
-                    .write_field_block(&mut self.out, stream_id, true, &block);
+                    .write_field_block(&mut self.out, stream_id, true, &self.frame_buffer);
             }
             StreamMsg::Reset { error_code, .. } => {
                 self.writer
@@ -854,10 +854,10 @@ where
                 value.as_bytes().to_vec(),
             ));
         }
-        let mut block = Vec::new();
-        self.encoder.encode(&fields, &mut block);
+        self.frame_buffer.clear();
+        self.encoder.encode(&fields, &mut self.frame_buffer);
         self.writer
-            .write_field_block(&mut self.out, stream_id, end_stream, &block);
+            .write_field_block(&mut self.out, stream_id, end_stream, &self.frame_buffer);
     }
 
     #[inline]

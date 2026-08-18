@@ -100,7 +100,7 @@ fn bench_roundtrip(c: &mut Criterion) {
                     b.iter(|| {
                         let mut encoder = Encoder::new(capacity, huffman);
                         if let Some(bytes) = encoder.set_capacity(capacity) {
-                            criterion::black_box(&bytes);
+                            std::hint::black_box(&bytes);
                         }
                         encoder.encode_section(0, &headers)
                     });

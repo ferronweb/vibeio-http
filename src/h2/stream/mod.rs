@@ -332,7 +332,7 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
     let mut pseudo_phase = true;
     for header in headers {
         let name = header.name();
-        let value = header.value();
+        let value = header.value_bytes();
         if name.first() == Some(&b':') {
             if !pseudo_phase {
                 // A pseudo-header after a regular header (Section
@@ -398,8 +398,8 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
                 return Err(MalformedRequest);
             }
             let name = http::header::HeaderName::from_bytes(name).map_err(|_| MalformedRequest)?;
-            let value =
-                http::header::HeaderValue::from_bytes(value).map_err(|_| MalformedRequest)?;
+            let value = http::header::HeaderValue::from_maybe_shared(value.clone())
+                .map_err(|_| MalformedRequest)?;
             regular.append(name, value);
         }
     }
@@ -533,8 +533,8 @@ pub(crate) fn parse_trailers(headers: &[Header]) -> Result<HeaderMap, MalformedR
             return Err(MalformedRequest);
         }
         let name = http::header::HeaderName::from_bytes(name).map_err(|_| MalformedRequest)?;
-        let value =
-            http::header::HeaderValue::from_bytes(header.value()).map_err(|_| MalformedRequest)?;
+        let value = http::header::HeaderValue::from_maybe_shared(header.value_bytes().clone())
+            .map_err(|_| MalformedRequest)?;
         trailers.append(name, value);
     }
     Ok(trailers)

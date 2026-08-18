@@ -151,7 +151,7 @@ mod tests {
     #[inline]
     fn encode(encoder: &mut Encoder, list: &[(&str, &str)]) -> Vec<u8> {
         let list = headers(list);
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(list.len() * 3);
         encoder.encode(&list, &mut out);
         out
     }

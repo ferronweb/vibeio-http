@@ -4,7 +4,8 @@
 
 **Not yet released**
 
-- Optimized HPACK (HTTP/2) and QPACK (HTTP/3) implementations for large dynamic tables (for example for variable headers)
+- Optimized HPACK (HTTP/2) and QPACK (HTTP/3) implementations for large dynamic tables (for example for variable headers).
+- Reduced memory allocations across HTTP/2 and HTTP/3.
 
 ## `vibeio-http` 0.4.1
 

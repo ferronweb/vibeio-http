@@ -862,7 +862,7 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
             pseudo_done = true;
             regular.push((
                 HeaderName::from_bytes(&name).map_err(|_| StreamError::Message)?,
-                HeaderValue::from_bytes(&value).map_err(|_| StreamError::Message)?,
+                HeaderValue::from_maybe_shared(value).map_err(|_| StreamError::Message)?,
             ));
         }
     }
@@ -970,7 +970,7 @@ fn header_map(headers: Vec<(Bytes, Bytes)>) -> Result<HeaderMap, StreamError> {
         }
         map.append(
             HeaderName::from_bytes(&name).map_err(|_| StreamError::Message)?,
-            HeaderValue::from_bytes(&value).map_err(|_| StreamError::Message)?,
+            HeaderValue::from_maybe_shared(value).map_err(|_| StreamError::Message)?,
         );
     }
     Ok(map)

@@ -67,7 +67,7 @@ pub(crate) fn decode(
     *off = end;
 
     if first & HUFFMAN_FLAG != 0 {
-        let mut value = Vec::new();
+        let mut value = Vec::with_capacity(len);
         huffman::decode(slice, &mut value)?;
         if value.len() > max_length {
             return Err(HpackError::InvalidString);

@@ -84,7 +84,7 @@ impl Decoder {
         }
 
         let mut off = 0usize;
-        let mut headers = Vec::new();
+        let mut headers = Vec::with_capacity(buf.len() / 3);
         // Size updates must precede any header field representation
         // (RFC 7541 Section 6.3).
         let mut can_resize = true;
