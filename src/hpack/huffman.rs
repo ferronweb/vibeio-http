@@ -352,8 +352,8 @@ pub(crate) fn decode(src: &[u8], dst: &mut Vec<u8>) -> Result<(), HpackError> {
     let mut accepted = true;
     for &byte in src {
         // High nibble, then low nibble (Huffman bits are most-significant first).
-        let high = HUFF_DFA[state * 16 + (byte >> 4) as usize];
-        let low = HUFF_DFA[high.0 as usize * 16 + (byte & 0x0f) as usize];
+        let high = HUFF_DFA[state << 4 + (byte >> 4) as usize];
+        let low = HUFF_DFA[(high.0 as usize) << 4 + (byte & 0x0f) as usize];
         if (high.1 | low.1) & 0x04 != 0 {
             return Err(HpackError::InvalidHuffman);
         }
