@@ -571,6 +571,7 @@ where
                 return;
             }
             self.conn_window += inc;
+            self.drain_pending_data(None);
         } else {
             let Some(entry) = self.streams.get_mut(&stream_id) else {
                 // WINDOW_UPDATE on an idle stream is a connection
@@ -586,8 +587,8 @@ where
                 return;
             }
             entry.send_window += inc;
+            self.drain_pending_data(Some(stream_id));
         }
-        self.drain_pending_data();
     }
 
     /// Sends queued DATA chunks for one stream, respecting the flow
@@ -687,9 +688,14 @@ where
     /// Attempts to drain every stream's queued DATA after the flow
     /// control windows opened up.
     #[inline]
-    pub(crate) fn drain_pending_data(&mut self) {
+    pub(crate) fn drain_pending_data(&mut self, stream_id: Option<u32>) {
         let mut ids = std::mem::take(&mut self.drain_ids);
-        ids.extend(self.streams.keys().copied());
+        ids.clear();
+        if let Some(id) = stream_id {
+            ids.push(id);
+        } else {
+            ids.extend(self.streams.keys().copied());
+        }
         for id in &ids {
             self.pump_stream_data(*id);
         }
