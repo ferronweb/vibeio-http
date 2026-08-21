@@ -342,6 +342,10 @@ where
 
         let (wake_tx, wake_rx) = kanal::bounded_async(1);
         self.wake_tx = Some(wake_tx);
+        // Pre-reserve output buffers to avoid per-response reallocations
+        // and enable single flush after drain_outbound + pending_data.
+        self.out.reserve(64 * 1024);
+        self.frame_buffer.reserve(self.opts.max_frame_size as usize);
 
         let mut buf = [0u8; 8192];
         let mut peer_goaway = false;
