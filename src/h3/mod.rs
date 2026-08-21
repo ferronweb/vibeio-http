@@ -124,13 +124,6 @@ static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
 ];
 
 /// The read half of a shared request stream, as a [`Body`].
-///
-/// Previously `H3Body` wrapped `H3BodyState` in a `tokio::sync::Mutex` and
-/// then locked the `RequestStream` (`SharedRequest`) inside it — a double
-/// async lock per `poll_frame` plus an extra pending wake for
-/// `send_continue_body`. Like `h2`'s bonded `kanal` channel, this version
-/// holds the stream directly and tracks `data_done` inline, so `poll_frame`
-/// locks only the stream once.
 pub(crate) struct H3Body {
     stream: SharedRequest,
     data_done: bool,
@@ -910,14 +903,12 @@ where
                                 return Poll::Ready(outcome.take().unwrap_or(Ok(())));
                             }
                         } else {
-                            drain_grace = Some(vibeio::time::sleep(
-                                std::time::Duration::from_millis(50),
-                            ));
+                            drain_grace =
+                                Some(vibeio::time::sleep(std::time::Duration::from_millis(50)));
                         }
                     } else if shutdown_sleep.is_none() {
-                        shutdown_sleep = Some(vibeio::time::sleep(
-                            std::time::Duration::from_millis(10),
-                        ));
+                        shutdown_sleep =
+                            Some(vibeio::time::sleep(std::time::Duration::from_millis(10)));
                     }
                 }
 

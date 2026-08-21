@@ -145,9 +145,7 @@ fn map_frame_error(err: FrameError) -> StreamError {
 ///
 /// `decoder` and `encoder` are split into separate `Mutex`es so that
 /// `poll_send_response` (encoder) and `decode_block` (decoder) do not
-/// convoy on a single lock at high throughput (previously every
-/// `poll_send_response` held the `Mutex` across `encode_section`
-/// allocation).
+/// convoy on a single lock at high throughput.
 #[derive(Debug)]
 pub(crate) struct SharedCodecs {
     /// Decoder for the peer's field sections, sized by our own SETTINGS.
@@ -211,7 +209,11 @@ impl SharedCodecs {
     /// re-polls, finds nothing, and re-registers.
     #[inline]
     pub(crate) fn take_waiters(&self) -> Vec<Waker> {
-        self.waiters.lock().drain().map(|(_, waker)| waker).collect()
+        self.waiters
+            .lock()
+            .drain()
+            .map(|(_, waker)| waker)
+            .collect()
     }
 
     /// Drains and returns waiters only for the given stream IDs.
@@ -248,9 +250,9 @@ enum PendingSend {
 /// the payload is written on its own.
 ///
 /// Increased from 1024 to 16384 (quinn's max datagram/frame coalesce):
-/// 1k-16k responses previously incurred two copies (coalesce in
-/// `poll_write_parts` + copy into `BytesMut buf` in `quinn::Send::poll_write`).
-/// 16k covers typical small responses (<16 KiB) in one write; larger payloads
+/// 1k-16k responses incurred two copies (coalesce in `poll_write_parts`
+/// + copy into `BytesMut buf` in `quinn::Send::poll_write`). 16k covers
+/// typical small responses (<16 KiB) in one write; larger payloads
 /// stay vectored to avoid copy.
 const WRITE_INLINE_LIMIT: usize = 16384;
 
