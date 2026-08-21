@@ -112,6 +112,9 @@ pub struct Encoder {
     /// Sections 2.1.1 and 4.4.1). A section is freed by a Section
     /// Acknowledgment for its stream or by a Stream Cancellation.
     pending_refs: VecDeque<(u64, u64)>,
+    /// Cached minimum of `pending_refs` second values (`u64::MAX` when empty).
+    /// Avoids `O(N_pending)` scan per header insertion in `evictable_floor`.
+    cached_min_pending: u64,
     /// Bytes of the peer's decoder stream received so far but not yet forming
     /// a complete instruction. QPACK decoder-stream instructions can span the
     /// arbitrary chunk boundaries of the underlying QUIC stream, so partial
@@ -131,6 +134,7 @@ impl Encoder {
             huffman,
             known_received: 0,
             pending_refs: VecDeque::new(),
+            cached_min_pending: u64::MAX,
             decoder_stream_pending: Vec::new(),
         }
     }
@@ -148,13 +152,17 @@ impl Encoder {
     /// is skipped.
     #[inline]
     fn evictable_floor(&self) -> u64 {
-        let pending = self
+        self.known_received.min(self.cached_min_pending)
+    }
+
+    #[inline]
+    fn recompute_min_pending(&mut self) {
+        self.cached_min_pending = self
             .pending_refs
             .iter()
             .map(|(_, min_ref)| *min_ref)
             .min()
             .unwrap_or(u64::MAX);
-        self.known_received.min(pending)
     }
 
     /// Encodes `headers` for the field section on `stream_id` into an
@@ -317,8 +325,11 @@ impl Encoder {
         // A section with dynamic references pins the referenced entries
         // until the decoder acknowledges it (Section 4.4.1).
         if ric > 0 {
-            self.pending_refs
-                .push_back((stream_id, min_rel_ref.unwrap_or(0)));
+            let min_ref = min_rel_ref.unwrap_or(0);
+            self.pending_refs.push_back((stream_id, min_ref));
+            if min_ref < self.cached_min_pending {
+                self.cached_min_pending = min_ref;
+            }
         }
 
         // Encoded Field Section Prefix (RFC 9204 4.5.1).
@@ -638,7 +649,16 @@ impl Encoder {
                     .iter()
                     .position(|(id, _)| *id == stream_id)
                 {
+                    let removed_min = self.pending_refs[pos].1;
                     self.pending_refs.remove(pos);
+                    if removed_min == self.cached_min_pending {
+                        self.cached_min_pending = self
+                            .pending_refs
+                            .iter()
+                            .map(|(_, min_ref)| *min_ref)
+                            .min()
+                            .unwrap_or(u64::MAX);
+                    }
                 }
             } else if header & 0x40 != 0 {
                 // `01` + 6-bit stream ID: Stream Cancellation (4.4.2).
@@ -646,7 +666,16 @@ impl Encoder {
                 // cancellation for a stream with none is a no-op.
                 let stream_id = integer::decode(instr, &mut off, 6, header)
                     .map_err(|_| QpackError::DecoderStream)?;
+                let prev_len = self.pending_refs.len();
                 self.pending_refs.retain(|(id, _)| *id != stream_id);
+                if self.pending_refs.len() != prev_len {
+                    self.cached_min_pending = self
+                        .pending_refs
+                        .iter()
+                        .map(|(_, min_ref)| *min_ref)
+                        .min()
+                        .unwrap_or(u64::MAX);
+                }
             } else {
                 // `00` + 6-bit increment: Insert Count Increment (4.4.3).
                 // A zero increment is forbidden, and the total may not
