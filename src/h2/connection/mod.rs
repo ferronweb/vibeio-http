@@ -363,15 +363,15 @@ where
             // Idle timeout (RFC 9113 Section 10.5): no frame received from the
             // peer within `idle_timeout` => graceful shutdown. Recreated each
             // iteration so it measures the gap since the last received frame.
-            let mut idle: Pin<Box<dyn futures_util::future::FusedFuture<Output = ()>>> =
-                match self.opts.idle_timeout {
-                    Some(d) => Box::pin(
-                        vibeio::time::timeout(d, futures_util::future::pending::<()>())
-                            .map(|_| ())
-                            .fuse(),
-                    ),
-                    None => Box::pin(futures_util::future::pending::<()>().fuse()),
-                };
+            let timeout = self.opts.idle_timeout;
+            let idle_unfuse = std::pin::pin!(async move {
+                if let Some(d) = timeout {
+                    vibeio::time::sleep(d).await;
+                } else {
+                    futures_util::future::pending::<()>().await;
+                }
+            });
+            let mut idle = idle_unfuse.fuse();
             futures_util::select! {
                 n = read => {
                     let n = match n {
