@@ -16,6 +16,7 @@
 //! `http2/6.4` and `http2/8.1` groups cover.
 
 use std::{
+    collections::VecDeque,
     future::Future,
     pin::Pin,
     sync::{atomic::AtomicBool, Arc},
@@ -176,8 +177,8 @@ pub struct Connection<Io> {
     wake_tx: Option<kanal::AsyncSender<()>>,
     /// Stream ids whose FIELD_BLOCK completed (END_HEADERS seen) and
     /// awaits finalization; drained one per frame by
-    /// [`Connection::process_frames`].
-    complete_blocks: Vec<u32>,
+    /// [`Connection::process_frames`] in FIFO order for fairness.
+    complete_blocks: VecDeque<u32>,
     /// Maximum number of frames a single header field block may span before
     /// it is treated as a CONTINUATION flood and reset (CVE-2024-27919).
     max_continuation_frames: usize,
@@ -229,7 +230,7 @@ where
             local_error_resets: 0,
             pending_accept_resets: 0,
             wake_tx: None,
-            complete_blocks: Vec::new(),
+            complete_blocks: VecDeque::new(),
             max_continuation_frames: 16,
             drain_ids: Vec::new(),
             highest_stream_id: 0,

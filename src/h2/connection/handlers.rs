@@ -30,7 +30,7 @@ where
                     entry.extend_block(block);
                     if end_headers {
                         entry.continuation_frames = 0;
-                        self.complete_blocks.push(stream_id);
+                        self.complete_blocks.push_back(stream_id);
                     }
                     (false, false)
                 }
@@ -59,7 +59,7 @@ where
         entry.extend_block(block);
         if end_headers {
             entry.continuation_frames = 0;
-            self.complete_blocks.push(stream_id);
+            self.complete_blocks.push_back(stream_id);
         } else {
             self.check_continuation_flood(stream_id);
         }
@@ -126,7 +126,7 @@ where
         entry.pending_end_stream = end_stream;
         entry.extend_block(block);
         if end_headers {
-            self.complete_blocks.push(stream_id);
+            self.complete_blocks.push_back(stream_id);
         } else {
             // The opening HEADERS is the first frame of the block.
             entry.continuation_frames = 1;
@@ -134,10 +134,10 @@ where
         self.streams.insert(stream_id, entry);
     }
 
-    /// Removes the completed-block marker for a stream, if any.
+    /// Removes the completed-block marker for a stream, if any. FIFO for fairness.
     #[inline]
     pub(crate) fn take_complete_block(&mut self) -> Option<u32> {
-        while let Some(stream_id) = self.complete_blocks.pop() {
+        while let Some(stream_id) = self.complete_blocks.pop_front() {
             // The stream may have been removed in the meantime (e.g.
             // stream_error); skip stale completions.
             if self.streams.contains_key(&stream_id) {
