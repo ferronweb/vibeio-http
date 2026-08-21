@@ -423,8 +423,7 @@ impl FrameDecoder {
             self.len -= n;
             return bytes;
         }
-        if self.bufs.front().is_some_and(|front| front.len() > n) {
-            let mut first = self.bufs.pop_front().unwrap();
+        if let Some(mut first) = self.bufs.pop_front_if(|front| front.len() > n) {
             let payload = first.split_to(n);
             if !first.is_empty() {
                 self.bufs.push_front(first);
