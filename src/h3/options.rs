@@ -34,11 +34,11 @@ impl Http3Options {
     /// | `send_continue_response` | `true` |
     /// | `send_date_header` | `true` |
     /// | `qpack_max_table_capacity` | `0` (RFC 9204 default) |
-    ///     | `qpack_blocked_streams` | `0` (RFC 9204 default) |
-    ///     | `max_field_section_size` | 65,536 |
-    ///     | `enable_connect_protocol` | `false` |
-    ///     | `max_local_error_reset_streams` | `1024` |
-    ///     | `max_pending_accept_reset_streams` | `20` |
+    /// | `qpack_blocked_streams` | `0` (RFC 9204 default) |
+    /// | `max_field_section_size` | 65,536 |
+    /// | `enable_connect_protocol` | `false` |
+    /// | `max_local_error_reset_streams` | `1024` |
+    /// | `max_pending_accept_reset_streams` | `20` |
     ///
     /// The QPACK/limit settings are advertised to the peer in this
     /// endpoint's SETTINGS frame and bound its codecs: the decoder's
