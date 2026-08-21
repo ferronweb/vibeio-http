@@ -396,7 +396,7 @@ impl FrameDecoder {
 
     #[inline]
     fn advance(&mut self, n: usize) {
-        assert!(n <= self.len);
+        debug_assert!(n <= self.len);
         let mut remaining = n;
         while remaining > 0 {
             let front_len = self.bufs.front().expect("advance within len").len();
@@ -418,7 +418,7 @@ impl FrameDecoder {
         if n == 0 {
             return Bytes::new();
         }
-        assert!(n <= self.len);
+        debug_assert!(n <= self.len);
         if let Some(bytes) = self.bufs.pop_front_if(|front| front.len() == n) {
             self.len -= n;
             return bytes;
