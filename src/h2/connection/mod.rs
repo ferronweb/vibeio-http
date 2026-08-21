@@ -164,6 +164,8 @@ pub struct Connection<Io> {
     /// Section 5.1); used to tell closed-stream frames apart from
     /// idle-stream frames.
     closed_streams: FxHashSet<u32>,
+    /// LRU order for `closed_streams` to avoid bulk clear at 4096.
+    closed_order: VecDeque<u32>,
     /// Behavior options for this connection (used by [`Connection::handle`]).
     opts: ConnectionOptions,
     /// RST_STREAM frames this endpoint has sent in response to the
@@ -226,6 +228,7 @@ where
             streams: FxHashMap::default(),
             conn_window: DEFAULT_INITIAL_WINDOW_SIZE as i64,
             closed_streams: FxHashSet::default(),
+            closed_order: VecDeque::with_capacity(4096),
             opts: ConnectionOptions::default(),
             local_error_resets: 0,
             pending_accept_resets: 0,

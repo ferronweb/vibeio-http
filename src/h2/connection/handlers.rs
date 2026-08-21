@@ -306,14 +306,18 @@ where
 
     /// Remembers a stream id whose stream has ended for good, so
     /// frames for it can be told apart from idle-stream frames
-    /// (RFC 9113 Section 5.1). Bounded to avoid unbounded growth on
-    /// hostile input.
+    /// (RFC 9113 Section 5.1). Bounded to 4096 via LRU eviction to
+    /// avoid bulk-clear tail spike at the boundary.
     #[inline]
     pub(crate) fn mark_closed(&mut self, stream_id: u32) {
         if self.closed_streams.len() >= 4096 {
-            self.closed_streams.clear();
+            if let Some(old) = self.closed_order.pop_front() {
+                self.closed_streams.remove(&old);
+            }
         }
-        self.closed_streams.insert(stream_id);
+        if self.closed_streams.insert(stream_id) {
+            self.closed_order.push_back(stream_id);
+        }
     }
 
     /// A DATA frame: forward to the task and restore flow-control
