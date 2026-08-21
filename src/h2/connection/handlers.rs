@@ -826,7 +826,10 @@ where
             self.conn_window -= amount as i64;
             if all {
                 let retire = {
-                    let entry = self.streams.get_mut(&stream_id).unwrap();
+                    let entry = self
+                        .streams
+                        .get_mut(&stream_id)
+                        .expect("stream entry exists");
                     entry.pending_data.pop_front();
                     if frame_end {
                         entry.local_ended = true;

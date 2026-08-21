@@ -385,7 +385,7 @@ impl FrameDecoder {
         }
         let mut value = u64::from(first & 0x3f);
         for i in 1..len {
-            let b = self.byte_at(offset + i).unwrap();
+            let b = self.byte_at(offset + i).expect("offset + offest_len < len");
             value = (value << 8) | u64::from(b);
         }
         if len > 1 && value < MIN_VARINT[usize::from(first >> 6)] {
@@ -404,7 +404,7 @@ impl FrameDecoder {
                 self.bufs.pop_front();
                 remaining -= front_len;
             } else {
-                let mut front = self.bufs.pop_front().unwrap();
+                let mut front = self.bufs.pop_front().expect("advance within len");
                 front = front.slice(remaining..);
                 self.bufs.push_front(front);
                 remaining = 0;
