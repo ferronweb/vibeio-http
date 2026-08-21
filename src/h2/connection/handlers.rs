@@ -1,4 +1,5 @@
 use super::*;
+use smallvec::SmallVec;
 
 impl<Io> Connection<Io>
 where
@@ -795,11 +796,12 @@ where
                 }
                 entry.local_ended = true;
                 self.frame_buffer.clear();
-                let mut headers: Vec<HpackHeader> = Vec::with_capacity(trailers.len());
+                let mut headers: SmallVec<[HpackHeader; 8]> =
+                    SmallVec::with_capacity(trailers.len());
                 for (name, value) in trailers.iter() {
                     headers.push(HpackHeader::new(
-                        name.as_str().as_bytes().to_vec(),
-                        value.as_bytes().to_vec(),
+                        Bytes::copy_from_slice(name.as_str().as_bytes()),
+                        Bytes::copy_from_slice(value.as_bytes()),
                     ));
                 }
                 self.encoder.encode(&headers, &mut self.frame_buffer);
@@ -842,10 +844,17 @@ where
         status: StatusCode,
         headers: &http::HeaderMap,
     ) {
-        let mut fields: Vec<HpackHeader> = Vec::with_capacity(headers.len() + 1);
+        // Fast 3-digit status without per-response `to_string` allocation.
+        let code = status.as_u16();
+        let mut status_buf = [b'0'; 3];
+        status_buf[0] = b'0' + (code / 100) as u8;
+        status_buf[1] = b'0' + ((code / 10) % 10) as u8;
+        status_buf[2] = b'0' + (code % 10) as u8;
+        let mut fields: SmallVec<[HpackHeader; 8]> =
+            SmallVec::with_capacity(headers.len() + 1);
         fields.push(HpackHeader::new(
             Bytes::from_static(b":status"),
-            status.as_u16().to_string().into_bytes(),
+            Bytes::copy_from_slice(&status_buf),
         ));
         for (name, value) in headers.iter() {
             let name_bytes = name.as_str().as_bytes();
@@ -856,12 +865,21 @@ where
                 continue;
             }
             fields.push(HpackHeader::new(
-                name_bytes.to_vec(),
-                value.as_bytes().to_vec(),
+                Bytes::copy_from_slice(name_bytes),
+                Bytes::copy_from_slice(value.as_bytes()),
             ));
         }
         self.frame_buffer.clear();
+        // Pre-reserve to avoid per-response reallocations for typical
+        // header blocks bounded by `max_frame_size`.
+        if self.frame_buffer.capacity() < self.opts.max_frame_size as usize {
+            self.frame_buffer.reserve(self.opts.max_frame_size as usize);
+        }
         self.encoder.encode(&fields, &mut self.frame_buffer);
+        // Ensure `out` can hold the field block without growing.
+        if self.out.capacity() - self.out.len() < self.frame_buffer.len() + 9 {
+            self.out.reserve(self.frame_buffer.len() + 9);
+        }
         self.writer
             .write_field_block(&mut self.out, stream_id, end_stream, &self.frame_buffer);
     }

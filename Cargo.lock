@@ -1711,6 +1711,7 @@ dependencies = [
  "rustc-hash",
  "send_wrapper",
  "serde_json",
+ "smallvec",
  "tokio",
  "tokio-util",
  "vibeio",

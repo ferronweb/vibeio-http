@@ -33,6 +33,7 @@ tokio-util = { version = "0.7.18", optional = true }
 
 # HTTP/2
 rustc-hash = "2.1.3"
+smallvec = "1.15"
 
 # HTTP/3
 quinn = { version = "0.11", optional = true }
