@@ -250,8 +250,8 @@ enum PendingSend {
 /// the payload is written on its own.
 ///
 /// Increased from 1024 to 16384 (quinn's max datagram/frame coalesce):
-/// 1k-16k responses incurred two copies (coalesce in `poll_write_parts`
-/// + copy into `BytesMut buf` in `quinn::Send::poll_write`). 16k covers
+/// 1k-16k responses incurred two copies (coalesce in `poll_write_parts` +
+/// copy into `BytesMut buf` in `quinn::Send::poll_write`). 16k covers
 /// typical small responses (<16 KiB) in one write; larger payloads
 /// stay vectored to avoid copy.
 const WRITE_INLINE_LIMIT: usize = 16384;

@@ -419,21 +419,18 @@ impl FrameDecoder {
             return Bytes::new();
         }
         assert!(n <= self.len);
-        if let Some(front) = self.bufs.front() {
-            if front.len() == n {
-                let bytes = self.bufs.pop_front().unwrap();
-                self.len -= n;
-                return bytes;
+        if let Some(bytes) = self.bufs.pop_front_if(|front| front.len() == n) {
+            self.len -= n;
+            return bytes;
+        }
+        if self.bufs.front().is_some_and(|front| front.len() > n) {
+            let mut first = self.bufs.pop_front().unwrap();
+            let payload = first.split_to(n);
+            if !first.is_empty() {
+                self.bufs.push_front(first);
             }
-            if front.len() > n {
-                let mut first = self.bufs.pop_front().unwrap();
-                let payload = first.split_to(n);
-                if !first.is_empty() {
-                    self.bufs.push_front(first);
-                }
-                self.len -= n;
-                return payload;
-            }
+            self.len -= n;
+            return payload;
         }
         // Fragmented across multiple chunks: coalesce.
         let mut out = BytesMut::with_capacity(n);
