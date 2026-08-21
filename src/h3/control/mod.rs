@@ -491,16 +491,18 @@ impl ControlStreams {
             if let Some(stream) = self.in_encoder.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(chunk)) => {
-                        let (mut unblocked, acks, waiters) = {
+                        let (mut unblocked, acks) = {
                             let mut decoder = self.shared.decoder.lock();
                             let unblocked = match decoder.feed_encoder_stream(&chunk) {
                                 Ok(unblocked) => unblocked,
                                 Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
                             };
                             let acks = decoder.take_decoder_stream();
-                            let waiters = self.shared.take_waiters();
-                            (unblocked, acks, waiters)
+                            (unblocked, acks)
                         };
+                        // Wake only the streams whose sections were unblocked.
+                        let ids: Vec<u64> = unblocked.iter().map(|s| s.stream_id).collect();
+                        let waiters = self.shared.take_waiters_for(&ids);
                         if !unblocked.is_empty() {
                             self.shared.unblocked.lock().append(&mut unblocked);
                         }
@@ -621,16 +623,17 @@ impl ControlStreams {
                         return Poll::Ready(Err(ControlError::StreamCreation));
                     }
                     if !leftover.is_empty() {
-                        let (mut unblocked, acks, waiters) = {
+                        let (mut unblocked, acks) = {
                             let mut decoder = self.shared.decoder.lock();
                             let unblocked = match decoder.feed_encoder_stream(&leftover) {
                                 Ok(unblocked) => unblocked,
                                 Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
                             };
                             let acks = decoder.take_decoder_stream();
-                            let waiters = self.shared.take_waiters();
-                            (unblocked, acks, waiters)
+                            (unblocked, acks)
                         };
+                        let ids: Vec<u64> = unblocked.iter().map(|s| s.stream_id).collect();
+                        let waiters = self.shared.take_waiters_for(&ids);
                         if !unblocked.is_empty() {
                             self.shared.unblocked.lock().append(&mut unblocked);
                         }
@@ -684,16 +687,13 @@ impl ControlStreams {
                 }
                 self.settings_received = true;
                 self.peer.apply(&settings);
-                let waiters = {
+                {
                     *self.shared.encoder.lock() =
                         Some(Encoder::new(self.peer.qpack_max_table_capacity(), true));
                     *self.shared.peer_max_field_section_size.lock() =
                         self.peer.max_field_section_size();
-                    self.shared.take_waiters()
-                };
-                for waker in waiters {
-                    waker.wake();
                 }
+                self.shared.encoder_notify.notify_waiters();
                 self.events
                     .push_back(ControlEvent::Settings(self.peer.clone()));
             }

@@ -245,19 +245,16 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
 /// Waits until the peer's SETTINGS bound the QPACK encoder, so field
 /// sections can be encoded (RFC 9204 Section 5).
 ///
-/// The control plane wakes this task (via the shared waiters map) when
-/// the SETTINGS frame arrives.
+/// The control plane wakes this task via `encoder_notify` when the
+/// SETTINGS frame arrives; no per-stream waker map is needed.
 #[inline]
-async fn wait_for_encoder(shared: &Arc<SharedCodecs>, stream_id: u64) {
-    std::future::poll_fn(|cx| {
+async fn wait_for_encoder(shared: &Arc<SharedCodecs>, _stream_id: u64) {
+    loop {
         if shared.encoder.lock().is_some() {
-            shared.waiters.lock().remove(&stream_id);
-            return Poll::Ready(());
+            return;
         }
-        shared.waiters.lock().insert(stream_id, cx.waker().clone());
-        Poll::Pending
-    })
-    .await
+        shared.encoder_notify.notified().await;
+    }
 }
 
 /// Writes an interim (1xx) response HEADERS frame.

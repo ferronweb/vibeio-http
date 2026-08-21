@@ -38,6 +38,7 @@ use http::header::{HeaderMap, HeaderName, HeaderValue};
 use http::{Method, Request, StatusCode, Uri, Version};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use tokio::sync::Notify;
 
 use crate::h3::error::{H3Error, TransportError};
 use crate::h3::frame::{
@@ -165,11 +166,14 @@ pub(crate) struct SharedCodecs {
     /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE` once its SETTINGS
     /// frame arrived; `None` means unlimited.
     pub(crate) peer_max_field_section_size: Mutex<Option<u64>>,
-    /// Wakers of request-stream tasks parked on shared codec state: a
-    /// field section blocked on a dynamic-table entry, or the send side
-    /// waiting for the peer's SETTINGS to create the encoder. Keyed by
-    /// stream ID; the control plane wakes them when the state changes.
+    /// Wakers of request-stream tasks parked on blocked QPACK sections.
+    /// Keyed by stream ID; the control plane wakes only the streams whose
+    /// sections were unblocked.
     pub(crate) waiters: Mutex<FxHashMap<u64, Waker>>,
+    /// Notifier for tasks waiting for the encoder to be created (peer's
+    /// SETTINGS). `wait_for_encoder` awaits this; the control plane calls
+    /// `notify_waiters` once.
+    pub(crate) encoder_notify: Notify,
 }
 
 impl SharedCodecs {
@@ -196,6 +200,7 @@ impl SharedCodecs {
             unblocked: Mutex::new(Vec::new()),
             peer_max_field_section_size: Mutex::new(None),
             waiters: Mutex::new(FxHashMap::default()),
+            encoder_notify: Notify::new(),
         }
     }
 
@@ -207,6 +212,19 @@ impl SharedCodecs {
     #[inline]
     pub(crate) fn take_waiters(&self) -> Vec<Waker> {
         self.waiters.lock().drain().map(|(_, waker)| waker).collect()
+    }
+
+    /// Drains and returns waiters only for the given stream IDs.
+    #[inline]
+    pub(crate) fn take_waiters_for(&self, ids: &[u64]) -> Vec<Waker> {
+        let mut waiters = self.waiters.lock();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(waker) = waiters.remove(id) {
+                out.push(waker);
+            }
+        }
+        out
     }
 }
 
