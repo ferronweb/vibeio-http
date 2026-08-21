@@ -125,6 +125,9 @@ pub(crate) struct StreamEntry {
     /// out; each entry is `(bytes, end_stream)`. Drained as the window
     /// opens up (WINDOW_UPDATE or SETTINGS_INITIAL_WINDOW_SIZE).
     pub(crate) pending_data: VecDeque<(Bytes, bool)>,
+    /// Deficit for DRR fairness when draining `pending_data` across
+    /// streams under connection flow-control.
+    pub(crate) deficit: usize,
     /// Header field size
     pub(crate) header_list_size: usize,
     /// Frames seen so far in the open field block (HEADERS without
@@ -159,6 +162,7 @@ impl StreamEntry {
             task_done: false,
             send_window: 65535,
             pending_data: VecDeque::new(),
+            deficit: 0,
             header_list_size: 0,
             continuation_frames: 0,
         }

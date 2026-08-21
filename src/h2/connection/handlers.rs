@@ -691,22 +691,161 @@ where
     }
 
     /// Attempts to drain every stream's queued DATA after the flow
-    /// control windows opened up.
+    /// control windows opened up. For per-stream `WINDOW_UPDATE` only
+    /// that stream is pumped; for connection `WINDOW_UPDATE` we use
+    /// deficit round-robin (quantum = max_frame_size) for fairness so a
+    /// single 10 MiB response cannot hog `conn_window` and starve
+    /// small responses.
     #[inline]
     pub(crate) fn drain_pending_data(&mut self, stream_id: Option<u32>) {
+        if let Some(id) = stream_id {
+            self.pump_stream_data(id);
+            return;
+        }
+        let quantum = self.peer.max_frame_size;
+        // Collect streams with pending data.
         let mut ids = std::mem::take(&mut self.drain_ids);
         ids.clear();
-        if let Some(id) = stream_id {
-            ids.push(id);
-        } else {
-            ids.extend(self.streams.keys().copied());
+        for (id, entry) in self.streams.iter() {
+            if !entry.pending_data.is_empty() && !entry.local_ended {
+                ids.push(*id);
+            }
         }
-        for id in &ids {
-            self.pump_stream_data(*id);
+        if ids.is_empty() {
+            self.drain_ids = ids;
+            return;
+        }
+        let mut next_ids = Vec::new();
+        let mut progress = true;
+        while progress && self.conn_window > 0 && !ids.is_empty() {
+            progress = false;
+            next_ids.clear();
+            for &id in &ids {
+                let Some(entry) = self.streams.get_mut(&id) else {
+                    continue;
+                };
+                if entry.pending_data.is_empty() || entry.local_ended || entry.send_window <= 0 {
+                    continue;
+                }
+                entry.deficit = entry.deficit.saturating_add(quantum);
+                let before_conn = self.conn_window;
+                self.pump_stream_data_drr(id);
+                if self.conn_window < before_conn {
+                    progress = true;
+                }
+                if self
+                    .streams
+                    .get(&id)
+                    .is_some_and(|e| !e.pending_data.is_empty() && !e.local_ended)
+                {
+                    next_ids.push(id);
+                }
+                if self.conn_window <= 0 {
+                    break;
+                }
+            }
+            std::mem::swap(&mut ids, &mut next_ids);
         }
         self.drain_ids = ids;
     }
 
+    /// Like `pump_stream_data` but capped by `deficit` and sends at most
+    /// one frame (quantum) per call for DRR fairness.
+    #[inline]
+    fn pump_stream_data_drr(&mut self, stream_id: u32) {
+        loop {
+            let (amount, limited) = match self.streams.get_mut(&stream_id) {
+                None => return,
+                Some(entry) => {
+                    if entry.local_ended {
+                        return;
+                    }
+                    let Some((data, end_stream)) = entry.pending_data.front() else {
+                        return;
+                    };
+                    if data.is_empty() {
+                        let end = *end_stream;
+                        self.writer.write_data(&mut self.out, stream_id, end, data);
+                        let retire = {
+                            let entry = self
+                                .streams
+                                .get_mut(&stream_id)
+                                .expect("stream entry exists");
+                            entry.pending_data.pop_front();
+                            if end {
+                                entry.local_ended = true;
+                                entry.task_done
+                            } else {
+                                false
+                            }
+                        };
+                        if retire {
+                            self.mark_closed(stream_id);
+                            self.streams.remove(&stream_id);
+                            return;
+                        }
+                        continue;
+                    }
+                    if entry.deficit == 0 {
+                        return;
+                    }
+                    let available = self.conn_window.min(entry.send_window);
+                    if available <= 0 {
+                        return;
+                    }
+                    let orig_amount = (data.len() as u64).min(available as u64);
+                    let capped = orig_amount.min(entry.deficit as u64);
+                    let amount = capped.min(self.peer.max_frame_size as u64);
+                    if amount == 0 {
+                        return;
+                    }
+                    (amount as usize, orig_amount != amount || capped != orig_amount)
+                }
+            };
+            let (frame_end, all, chunk) = {
+                let entry = self
+                    .streams
+                    .get_mut(&stream_id)
+                    .expect("stream entry exists");
+                let (data, end_stream) = entry
+                    .pending_data
+                    .front_mut()
+                    .expect("pending chunk exists");
+                let all = amount == data.len();
+                let frame_end = *end_stream && all;
+                let chunk = data.split_to(amount);
+                entry.send_window -= amount as i64;
+                entry.deficit -= amount;
+                (frame_end, all, chunk)
+            };
+            self.writer
+                .write_data(&mut self.out, stream_id, frame_end, &chunk);
+            self.conn_window -= amount as i64;
+            if all {
+                let retire = {
+                    let entry = self.streams.get_mut(&stream_id).unwrap();
+                    entry.pending_data.pop_front();
+                    if frame_end {
+                        entry.local_ended = true;
+                        entry.task_done
+                    } else {
+                        false
+                    }
+                };
+                if retire {
+                    self.mark_closed(stream_id);
+                    self.streams.remove(&stream_id);
+                    return;
+                }
+            } else if !limited {
+                break;
+            }
+            // DRR: one frame per quantum.
+            break;
+        }
+    }
+
+    
     /// Drains every stream task's outbound channel, turning messages
     /// into frames. Called after each read and whenever a wake fires.
     #[inline]
