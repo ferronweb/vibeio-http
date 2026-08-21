@@ -352,6 +352,7 @@ where
         self.frame_buffer.reserve(self.opts.max_frame_size as usize);
 
         let mut buf = [0u8; 8192];
+        let mut wake_rx_drain = Vec::new();
         let mut peer_goaway = false;
         while !peer_goaway && !(self.graceful && self.streams.is_empty()) {
             let wake_recv = wake_rx.recv().fuse();
@@ -407,6 +408,10 @@ where
                 }
                 _ = wake_recv => {
                     // A stream task parked on a full channel; drain it.
+
+                    // But first, drain the wake notifications to prevent busy looping
+                    let _ = wake_rx.drain_into(&mut wake_rx_drain);
+                    wake_rx_drain.clear();
                     self.drain_outbound();
                     self.flush().await?;
                 }
