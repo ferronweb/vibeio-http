@@ -33,6 +33,7 @@ use std::{
         Arc,
     },
     task::{Context, Poll},
+    time::Instant,
 };
 
 use bytes::Bytes;
@@ -744,8 +745,8 @@ where
             if let Some(token) = cancel_token.as_ref() {
                 cancel_fut = Some(Box::pin(token.cancelled()));
             }
-            let mut accept_sleep: Option<Pin<Box<vibeio::time::Sleep>>> = None;
-            let mut shutdown_sleep: Option<Pin<Box<vibeio::time::Sleep>>> = None;
+            let mut accept_sleep: Option<vibeio::time::Sleep> = None;
+            let mut shutdown_sleep: Option<vibeio::time::Sleep> = None;
             // Once graceful shutdown has drained every in-flight request we
             // must not issue `CONNECTION_CLOSE` immediately: quinn's
             // `close()` sends exactly one frame and then stops transmitting,
@@ -753,7 +754,7 @@ where
             // scheduler. A short grace window lets the background transmit
             // flush those bytes so the peer observes the response, not the
             // close.
-            let mut drain_grace: Option<Pin<Box<vibeio::time::Sleep>>> = None;
+            let mut drain_grace: Option<vibeio::time::Sleep> = None;
             let mut shutdown = false;
             let mut control_dead = false;
             // When set, the connection is being torn down by a protocol error
@@ -789,12 +790,12 @@ where
                 // stream is accepted; it bounds waiting for the next one.
                 let mut timeout_fired = false;
                 if let Some(sleep) = accept_sleep.as_mut() {
-                    if let Poll::Ready(()) = sleep.as_mut().poll(cx) {
+                    if let Poll::Ready(()) = Pin::new(&mut *sleep).poll(cx) {
                         accept_sleep = None;
                         timeout_fired = true;
                     }
                 } else if let Some(accept_timeout) = options.accept_timeout {
-                    accept_sleep = Some(Box::pin(vibeio::time::sleep(accept_timeout)));
+                    accept_sleep = Some(vibeio::time::sleep(accept_timeout));
                     continue;
                 }
 
@@ -802,8 +803,8 @@ where
                 // in-flight requests, re-poll periodically so the close
                 // with `H3_NO_ERROR` cannot be starved by a lost wake-up.
                 if let Some(sleep) = shutdown_sleep.as_mut() {
-                    if let Poll::Ready(()) = sleep.as_mut().poll(cx) {
-                        shutdown_sleep = None;
+                    if let Poll::Ready(()) = Pin::new(&mut *sleep).poll(cx) {
+                        sleep.reset(Instant::now() + std::time::Duration::from_millis(10));
                     }
                 }
 
@@ -903,21 +904,21 @@ where
                         // the last response before we close. See the comment
                         // on `drain_grace` above.
                         if let Some(grace) = drain_grace.as_mut() {
-                            if grace.as_mut().poll(cx).is_ready() {
+                            if Pin::new(&mut *grace).poll(cx).is_ready() {
                                 ready!(conn
                                     .poll_shutdown(cx, H3_NO_ERROR)
                                     .map_err(h3_transport_error_to_io))?;
                                 return Poll::Ready(outcome.take().unwrap_or(Ok(())));
                             }
                         } else {
-                            drain_grace = Some(Box::pin(vibeio::time::sleep(
+                            drain_grace = Some(vibeio::time::sleep(
                                 std::time::Duration::from_millis(50),
-                            )));
+                            ));
                         }
                     } else if shutdown_sleep.is_none() {
-                        shutdown_sleep = Some(Box::pin(vibeio::time::sleep(
+                        shutdown_sleep = Some(vibeio::time::sleep(
                             std::time::Duration::from_millis(10),
-                        )));
+                        ));
                     }
                 }
 
@@ -927,7 +928,15 @@ where
                         Poll::Ready(Ok(Some(stream))) => {
                             let id = stream.id();
                             last_request_id = last_request_id.max(id);
-                            accept_sleep = None;
+                            if let Some(sleep) = accept_sleep.as_mut() {
+                                if let Some(timeout) = options.accept_timeout {
+                                    sleep.reset(Instant::now() + timeout);
+                                } else {
+                                    accept_sleep = None;
+                                }
+                            } else {
+                                accept_sleep = None;
+                            }
                             if shutdown
                                 && (controls.goaway_sent().is_none()
                                     || id > controls.goaway_sent().unwrap_or(u64::MAX))
