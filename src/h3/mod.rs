@@ -124,25 +124,26 @@ static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
 ];
 
 /// The read half of a shared request stream, as a [`Body`].
-struct H3BodyState {
+///
+/// Previously `H3Body` wrapped `H3BodyState` in a `tokio::sync::Mutex` and
+/// then locked the `RequestStream` (`SharedRequest`) inside it — a double
+/// async lock per `poll_frame` plus an extra pending wake for
+/// `send_continue_body`. Like `h2`'s bonded `kanal` channel, this version
+/// holds the stream directly and tracks `data_done` inline, so `poll_frame`
+/// locks only the stream once.
+pub(crate) struct H3Body {
     stream: SharedRequest,
     data_done: bool,
     send_continue_body: Option<Arc<AtomicBool>>,
-}
-
-pub(crate) struct H3Body {
-    inner: tokio::sync::Mutex<H3BodyState>,
 }
 
 impl H3Body {
     #[inline]
     fn new(stream: SharedRequest, send_continue_body: Option<Arc<AtomicBool>>) -> Self {
         Self {
-            inner: tokio::sync::Mutex::new(H3BodyState {
-                stream,
-                data_done: false,
-                send_continue_body,
-            }),
+            stream,
+            data_done: false,
+            send_continue_body,
         }
     }
 }
@@ -156,14 +157,12 @@ impl Body for H3Body {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<BodyFrame<Self::Data>, Self::Error>>> {
-        let mut inner = match std::pin::pin!(self.inner.lock()).poll_unpin(cx) {
-            Poll::Ready(inner) => inner,
-            Poll::Pending => return Poll::Pending,
-        };
+        // Safety: H3Body is Unpin (all fields are Unpin), so we can get &mut Self.
+        let this = unsafe { self.get_unchecked_mut() };
 
-        if !inner.data_done {
+        if !this.data_done {
             loop {
-                let mut stream = match std::pin::pin!(inner.stream.lock()).poll_unpin(cx) {
+                let mut stream = match std::pin::pin!(this.stream.lock()).poll_unpin(cx) {
                     Poll::Ready(stream) => stream,
                     Poll::Pending => return Poll::Pending,
                 };
@@ -176,14 +175,14 @@ impl Body for H3Body {
                     }
                     Poll::Ready(Ok(None)) => {
                         drop(stream);
-                        inner.data_done = true;
+                        this.data_done = true;
                         break;
                     }
                     Poll::Ready(Err(err)) => {
                         return Poll::Ready(Some(Err(h3_stream_error_to_io(err))));
                     }
                     Poll::Pending => {
-                        if let Some(scb) = inner.send_continue_body.as_ref() {
+                        if let Some(scb) = this.send_continue_body.as_ref() {
                             scb.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         return Poll::Pending;
@@ -192,10 +191,10 @@ impl Body for H3Body {
             }
         }
 
-        let mut stream = match std::pin::pin!(inner.stream.lock()).poll_unpin(cx) {
+        let mut stream = match std::pin::pin!(this.stream.lock()).poll_unpin(cx) {
             Poll::Ready(stream) => stream,
             Poll::Pending => {
-                if let Some(scb) = inner.send_continue_body.as_ref() {
+                if let Some(scb) = this.send_continue_body.as_ref() {
                     scb.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 return Poll::Pending;
@@ -206,7 +205,7 @@ impl Body for H3Body {
             Poll::Ready(Ok(None)) => Poll::Ready(None),
             Poll::Ready(Err(err)) => Poll::Ready(Some(Err(h3_stream_error_to_io(err)))),
             Poll::Pending => {
-                if let Some(scb) = inner.send_continue_body.as_ref() {
+                if let Some(scb) = this.send_continue_body.as_ref() {
                     scb.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Poll::Pending
