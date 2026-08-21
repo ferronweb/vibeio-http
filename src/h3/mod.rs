@@ -929,53 +929,57 @@ where
                 }
 
                 // Accept request streams.
-                match conn.poll_accept(cx) {
-                    Poll::Ready(Ok(Some(stream))) => {
-                        let id = stream.id();
-                        last_request_id = last_request_id.max(id);
-                        accept_sleep = None;
-                        if shutdown
-                            && (controls.goaway_sent().is_none()
-                                || id > controls.goaway_sent().unwrap_or(u64::MAX))
-                        {
-                            // A request after our GOAWAY: reject it
-                            // (RFC 9114 Section 5.2).
-                            let mut rejected = RequestStream::new(stream, shared.clone());
-                            let _ = rejected.poll_reset(cx, H3_REQUEST_REJECTED);
-                        } else {
-                            let (end_tx, end_rx) = oneshot::async_channel();
-                            ongoing.push(end_rx);
-                            let request_stream = Arc::new(tokio::sync::Mutex::new(
-                                RequestStream::new(stream, shared.clone()),
-                            ));
-                            let request_fn = request_fn.clone();
-                            let date_cache = date_cache.clone();
-                            let shared = shared.clone();
-                            let conn_state_for_task = conn_state.clone();
-                            vibeio::spawn(async move {
-                                let _end = end_tx;
-                                handle_request(
-                                    request_stream,
-                                    shared.clone(),
-                                    id,
-                                    request_fn,
-                                    date_cache,
-                                    send_continue_response,
-                                    send_date_header,
-                                    conn_state_for_task,
-                                )
-                                .await;
-                            });
+                loop {
+                    match conn.poll_accept(cx) {
+                        Poll::Ready(Ok(Some(stream))) => {
+                            let id = stream.id();
+                            last_request_id = last_request_id.max(id);
+                            accept_sleep = None;
+                            if shutdown
+                                && (controls.goaway_sent().is_none()
+                                    || id > controls.goaway_sent().unwrap_or(u64::MAX))
+                            {
+                                // A request after our GOAWAY: reject it
+                                // (RFC 9114 Section 5.2).
+                                let mut rejected = RequestStream::new(stream, shared.clone());
+                                let _ = rejected.poll_reset(cx, H3_REQUEST_REJECTED);
+                            } else {
+                                let (end_tx, end_rx) = oneshot::async_channel();
+                                ongoing.push(end_rx);
+                                let request_stream = Arc::new(tokio::sync::Mutex::new(
+                                    RequestStream::new(stream, shared.clone()),
+                                ));
+                                let request_fn = request_fn.clone();
+                                let date_cache = date_cache.clone();
+                                let shared = shared.clone();
+                                let conn_state_for_task = conn_state.clone();
+                                vibeio::spawn(async move {
+                                    let _end = end_tx;
+                                    handle_request(
+                                        request_stream,
+                                        shared.clone(),
+                                        id,
+                                        request_fn,
+                                        date_cache,
+                                        send_continue_response,
+                                        send_date_header,
+                                        conn_state_for_task,
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
+                        // The connection closed: nothing left to do.
+                        Poll::Ready(Ok(None)) => {
+                            return Poll::Ready(Ok(()));
+                        }
+                        Poll::Ready(Err(err)) => {
+                            return Poll::Ready(Err(h3_transport_error_to_io(err)));
+                        }
+                        Poll::Pending => {
+                            break;
                         }
                     }
-                    // The connection closed: nothing left to do.
-                    Poll::Ready(Ok(None)) => {
-                        return Poll::Ready(Ok(()));
-                    }
-                    Poll::Ready(Err(err)) => {
-                        return Poll::Ready(Err(h3_transport_error_to_io(err)));
-                    }
-                    Poll::Pending => {}
                 }
 
                 // Collect finished request tasks. Their completion
