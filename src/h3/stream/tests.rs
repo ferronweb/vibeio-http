@@ -458,7 +458,12 @@ fn headers_blocked_then_unblocked_by_encoder_stream() {
     };
     assert_eq!(unblocked.len(), 1);
     assert_eq!(unblocked[0].stream_id, 33);
-    shared.unblocked.lock().extend(unblocked);
+    {
+        let mut map = shared.unblocked.lock();
+        for sec in unblocked {
+            map.entry(sec.stream_id).or_default().push_back(sec);
+        }
+    }
 
     let req = match request.poll_headers(&mut cx) {
         Poll::Ready(Ok(Some(request))) => request,

@@ -248,7 +248,12 @@ impl ControlStreams {
     /// request-stream handler.
     #[inline]
     pub(crate) fn take_unblocked(&mut self) -> Vec<UnblockedSection> {
-        std::mem::take(&mut *self.shared.unblocked.lock())
+        let mut map = self.shared.unblocked.lock();
+        let mut out = Vec::new();
+        for (_, mut deque) in map.drain() {
+            out.extend(deque.drain(..));
+        }
+        out
     }
 
     /// Whether the peer's SETTINGS frame was received.
@@ -504,7 +509,10 @@ impl ControlStreams {
                         let ids: Vec<u64> = unblocked.iter().map(|s| s.stream_id).collect();
                         let waiters = self.shared.take_waiters_for(&ids);
                         if !unblocked.is_empty() {
-                            self.shared.unblocked.lock().append(&mut unblocked);
+                            let mut map = self.shared.unblocked.lock();
+                            for sec in unblocked.drain(..) {
+                                map.entry(sec.stream_id).or_default().push_back(sec);
+                            }
                         }
                         for waker in waiters {
                             waker.wake();
@@ -635,7 +643,10 @@ impl ControlStreams {
                         let ids: Vec<u64> = unblocked.iter().map(|s| s.stream_id).collect();
                         let waiters = self.shared.take_waiters_for(&ids);
                         if !unblocked.is_empty() {
-                            self.shared.unblocked.lock().append(&mut unblocked);
+                            let mut map = self.shared.unblocked.lock();
+                            for sec in unblocked.drain(..) {
+                                map.entry(sec.stream_id).or_default().push_back(sec);
+                            }
                         }
                         for waker in waiters {
                             waker.wake();

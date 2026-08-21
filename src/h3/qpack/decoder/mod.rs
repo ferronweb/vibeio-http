@@ -33,6 +33,7 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
+use rustc_hash::FxHashMap;
 
 use crate::h3::qpack::error::QpackError;
 use crate::h3::qpack::static_table;
@@ -113,7 +114,7 @@ pub struct Decoder {
     /// Number of blocked sections per stream. Kept separately so admission
     /// does not rescan every buffered section (or allocate a temporary list)
     /// for every field section received while the table is catching up.
-    blocked_by_stream: Vec<(u64, usize)>,
+    blocked_by_stream: FxHashMap<u64, usize>,
     /// Decoded field-section size per stream, summed so the
     /// `SETTINGS_MAX_FIELD_SECTION_SIZE` budget applies across a stream's
     /// field sections (request headers, trailers) like
@@ -126,7 +127,7 @@ pub struct Decoder {
     /// [`Decoder::stream_cancelled`], [`Decoder::expire_blocked`]); QUIC
     /// stream IDs are never reused, so a stale entry could not affect
     /// another stream anyway.
-    section_size_by_stream: Vec<(u64, usize)>,
+    section_size_by_stream: FxHashMap<u64, usize>,
     /// The maximum number of streams that may be blocked at once,
     /// SETTINGS_QPACK_BLOCKED_STREAMS (RFC 9204 Section 5).
     max_blocked_streams: usize,
@@ -221,8 +222,8 @@ impl Decoder {
             max_capacity,
             known_received: 0,
             blocked: VecDeque::new(),
-            blocked_by_stream: Vec::new(),
-            section_size_by_stream: Vec::new(),
+            blocked_by_stream: FxHashMap::default(),
+            section_size_by_stream: FxHashMap::default(),
             max_blocked_streams,
             max_field_section_size: usize::MAX,
             decoder_stream: Vec::new(),
@@ -529,8 +530,7 @@ impl Decoder {
     /// stream (headers, trailers) has decoded.
     #[inline]
     pub fn stream_finished(&mut self, stream_id: u64) {
-        self.section_size_by_stream
-            .retain(|(id, _)| *id != stream_id);
+        self.section_size_by_stream.remove(&stream_id);
     }
 
     /// Notifies that `stream_id` was reset or abandoned: buffered blocked
@@ -539,9 +539,8 @@ impl Decoder {
     #[inline]
     pub fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
         self.blocked.retain(|b| b.stream_id != stream_id);
-        self.blocked_by_stream.retain(|(id, _)| *id != stream_id);
-        self.section_size_by_stream
-            .retain(|(id, _)| *id != stream_id);
+        self.blocked_by_stream.remove(&stream_id);
+        self.section_size_by_stream.remove(&stream_id);
         let mut out = Vec::new();
         integer::encode(&mut out, stream_id, 6, STREAM_CANCELLATION);
         self.decoder_stream.extend_from_slice(&out);
@@ -569,10 +568,10 @@ impl Decoder {
             // per-stream accounting in lockstep.
             self.blocked
                 .retain(|blocked| !cancelled.contains(&blocked.stream_id));
-            self.blocked_by_stream
-                .retain(|(stream_id, _)| !cancelled.contains(stream_id));
-            self.section_size_by_stream
-                .retain(|(stream_id, _)| !cancelled.contains(stream_id));
+            for id in &cancelled {
+                self.blocked_by_stream.remove(id);
+                self.section_size_by_stream.remove(id);
+            }
         }
         self.decoder_stream.extend_from_slice(&out);
         Bytes::from(out)
@@ -782,23 +781,13 @@ impl Decoder {
     /// Whether `stream_id` has buffered blocked sections.
     #[inline]
     fn stream_has_blocked(&self, stream_id: u64) -> bool {
-        self.blocked_by_stream
-            .iter()
-            .any(|(id, _)| *id == stream_id)
+        self.blocked_by_stream.contains_key(&stream_id)
     }
 
     /// Records a newly buffered field section without rescanning the queue.
     #[inline]
     fn add_blocked_section(&mut self, stream_id: u64) {
-        if let Some((_, count)) = self
-            .blocked_by_stream
-            .iter_mut()
-            .find(|(id, _)| *id == stream_id)
-        {
-            *count += 1;
-        } else {
-            self.blocked_by_stream.push((stream_id, 1));
-        }
+        *self.blocked_by_stream.entry(stream_id).or_insert(0) += 1;
     }
 
     /// Charges `size` against `stream_id`'s field-section budget and
@@ -810,34 +799,22 @@ impl Decoder {
     /// diverge arbitrarily (RFC 9114 Section 7.2.4.1).
     #[inline]
     fn account_section(&mut self, stream_id: u64, size: usize) -> usize {
-        if let Some((_, total)) = self
-            .section_size_by_stream
-            .iter_mut()
-            .find(|(id, _)| *id == stream_id)
-        {
-            *total = total.saturating_add(size);
-            *total
-        } else {
-            self.section_size_by_stream.push((stream_id, size));
-            size
-        }
+        let total = self.section_size_by_stream.entry(stream_id).or_insert(0);
+        *total = total.saturating_add(size);
+        *total
     }
 
     /// Removes one decoded blocked section from the per-stream count.
     #[inline]
     fn remove_blocked_section(&mut self, stream_id: u64) {
-        let Some(index) = self
-            .blocked_by_stream
-            .iter()
-            .position(|(id, _)| *id == stream_id)
-        else {
+        let Some(count) = self.blocked_by_stream.get_mut(&stream_id) else {
             debug_assert!(false, "blocked section missing stream accounting");
             return;
         };
-        if self.blocked_by_stream[index].1 == 1 {
-            self.blocked_by_stream.swap_remove(index);
+        if *count == 1 {
+            self.blocked_by_stream.remove(&stream_id);
         } else {
-            self.blocked_by_stream[index].1 -= 1;
+            *count -= 1;
         }
     }
 }

@@ -159,10 +159,10 @@ pub(crate) struct SharedCodecs {
     /// send path; the control plane writes them on the QPACK encoder
     /// stream.
     pub(crate) encoder_stream: Mutex<VecDeque<Bytes>>,
-    /// Field sections the peer's encoder stream unblocked, in arrival
-    /// order; the request streams waiting on them take the entries
-    /// matching their stream ID.
-    pub(crate) unblocked: Mutex<Vec<UnblockedSection>>,
+    /// Field sections the peer's encoder stream unblocked, per stream.
+    /// Each stream's sections are queued in arrival order; `take_unblocked_for`
+    /// pops the oldest for that stream in O(1).
+    pub(crate) unblocked: Mutex<FxHashMap<u64, VecDeque<UnblockedSection>>>,
     /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE` once its SETTINGS
     /// frame arrived; `None` means unlimited.
     pub(crate) peer_max_field_section_size: Mutex<Option<u64>>,
@@ -197,7 +197,7 @@ impl SharedCodecs {
             decoder: Mutex::new(decoder),
             encoder: Mutex::new(None),
             encoder_stream: Mutex::new(VecDeque::new()),
-            unblocked: Mutex::new(Vec::new()),
+            unblocked: Mutex::new(FxHashMap::default()),
             peer_max_field_section_size: Mutex::new(None),
             waiters: Mutex::new(FxHashMap::default()),
             encoder_notify: Notify::new(),
@@ -829,11 +829,13 @@ fn take_unblocked_for(
 ) -> Option<UnblockedSection> {
     {
         let mut unblocked = shared.unblocked.lock();
-        if let Some(index) = unblocked
-            .iter()
-            .position(|section| section.stream_id == stream_id)
-        {
-            return Some(unblocked.remove(index));
+        if let Some(queue) = unblocked.get_mut(&stream_id) {
+            if let Some(section) = queue.pop_front() {
+                if queue.is_empty() {
+                    unblocked.remove(&stream_id);
+                }
+                return Some(section);
+            }
         }
     }
     // No unblocked section yet: park this task until the control
