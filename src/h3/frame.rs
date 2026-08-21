@@ -31,7 +31,9 @@
 //! was truncated; RFC 9114 Section 7.1 requires that be treated as
 //! `H3_FRAME_ERROR` by the driver.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::collections::VecDeque;
+
+use bytes::{BufMut, Bytes, BytesMut};
 
 /// The largest value a QUIC variable-length integer can carry.
 pub const MAX_VARINT: u64 = (1 << 62) - 1;
@@ -260,13 +262,15 @@ impl FrameError {
 /// The decoder owns its buffer: the driver calls [`FrameDecoder::extend`]
 /// with every received chunk and [`FrameDecoder::next_frame`] once per
 /// event-loop turn, draining as many complete frames as are buffered.
+///
+/// The buffer is a `VecDeque<Bytes>` that keeps each QUIC chunk intact.
+/// `extend` is zero-copy (push), and `DATA` payloads are returned as
+/// refcounted slices when they lie in a single chunk, avoiding the
+/// `BytesMut` coalesce on every fragment.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
-    // Keep a transport chunk intact whenever it contains complete frames.
-    // `Bytes` slicing is reference-counted, so DATA and HEADERS can then be
-    // handed to the caller without a second copy. Fragmented frames still
-    // need coalescing when their next chunk arrives.
-    buf: Bytes,
+    bufs: VecDeque<Bytes>,
+    len: usize,
 }
 
 impl FrameDecoder {
@@ -282,21 +286,14 @@ impl FrameDecoder {
         if data.is_empty() {
             return;
         }
-        if self.buf.is_empty() {
-            self.buf = data;
-            return;
-        }
-
-        let mut joined = BytesMut::with_capacity(self.buf.len() + data.len());
-        joined.extend_from_slice(&self.buf);
-        joined.extend_from_slice(&data);
-        self.buf = joined.freeze();
+        self.len += data.len();
+        self.bufs.push_back(data);
     }
 
     /// Bytes buffered but not yet consumed by a frame.
     #[inline]
     pub fn buffered(&self) -> usize {
-        self.buf.len()
+        self.len
     }
 
     /// Pops the next complete frame, if any.
@@ -308,28 +305,28 @@ impl FrameDecoder {
     #[inline]
     pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
         loop {
-            let Some((ty, type_len)) = parse_varint(&self.buf)? else {
+            let Some((ty, type_len)) = self.parse_varint_at(0)? else {
                 return Ok(None);
             };
             if matches!(ty, 0x02 | 0x06 | 0x08 | 0x09) {
                 return Err(FrameError::Unexpected(ty));
             }
-            let Some((len, len_len)) = parse_varint(&self.buf[type_len..])? else {
+            let Some((len, len_len)) = self.parse_varint_at(type_len)? else {
                 return Ok(None);
             };
             let header_len = type_len + len_len;
             let Some(total) = header_len.checked_add(len as usize) else {
                 return Err(FrameError::Frame);
             };
-            if total > self.buf.len() {
+            if total > self.len {
                 return Ok(None);
             }
             if !is_known_frame_type(ty) {
-                self.buf.advance(total);
+                self.advance(total);
                 continue;
             }
-            let mut chunk = self.buf.split_to(total);
-            let payload = chunk.split_off(header_len);
+            self.advance(header_len);
+            let payload = self.take_bytes(len as usize);
             let frame = match ty {
                 FRAME_DATA => Frame::Data(payload),
                 FRAME_HEADERS => Frame::Headers(payload),
@@ -351,19 +348,110 @@ impl FrameDecoder {
             return Ok(Some(frame));
         }
     }
-}
 
-impl FrameDecoder {
     /// Returns the type of the next frame without consuming it, or `None`
     /// when the type varint is incomplete. Used to pre-reject control-plane
     /// frames on request streams (RFC 9114 Sections 7.2.3-7.2.7) before the
     /// decoder parses (and would otherwise accept or mismatch) them.
     #[inline]
     pub fn peek_frame_type(&self) -> Option<u64> {
-        match parse_varint(&self.buf) {
+        match self.parse_varint_at(0) {
             Ok(Some((ty, _))) => Some(ty),
             _ => None,
         }
+    }
+
+    #[inline]
+    fn byte_at(&self, offset: usize) -> Option<u8> {
+        let mut remaining = offset;
+        for buf in &self.bufs {
+            if remaining < buf.len() {
+                return Some(buf[remaining]);
+            }
+            remaining -= buf.len();
+        }
+        None
+    }
+
+    #[inline]
+    fn parse_varint_at(&self, offset: usize) -> Result<Option<(u64, usize)>, FrameError> {
+        if offset >= self.len {
+            return Ok(None);
+        }
+        let first = self.byte_at(offset).expect("offset < len");
+        let len = 1usize << (first >> 6);
+        if self.len < offset + len {
+            return Ok(None);
+        }
+        let mut value = u64::from(first & 0x3f);
+        for i in 1..len {
+            let b = self.byte_at(offset + i).unwrap();
+            value = (value << 8) | u64::from(b);
+        }
+        if len > 1 && value < MIN_VARINT[usize::from(first >> 6)] {
+            return Err(FrameError::Frame);
+        }
+        Ok(Some((value, len)))
+    }
+
+    #[inline]
+    fn advance(&mut self, n: usize) {
+        assert!(n <= self.len);
+        let mut remaining = n;
+        while remaining > 0 {
+            let front_len = self.bufs.front().expect("advance within len").len();
+            if front_len <= remaining {
+                self.bufs.pop_front();
+                remaining -= front_len;
+            } else {
+                let mut front = self.bufs.pop_front().unwrap();
+                front = front.slice(remaining..);
+                self.bufs.push_front(front);
+                remaining = 0;
+            }
+        }
+        self.len -= n;
+    }
+
+    #[inline]
+    fn take_bytes(&mut self, n: usize) -> Bytes {
+        if n == 0 {
+            return Bytes::new();
+        }
+        assert!(n <= self.len);
+        if let Some(front) = self.bufs.front() {
+            if front.len() == n {
+                let bytes = self.bufs.pop_front().unwrap();
+                self.len -= n;
+                return bytes;
+            }
+            if front.len() > n {
+                let mut first = self.bufs.pop_front().unwrap();
+                let payload = first.split_to(n);
+                if !first.is_empty() {
+                    self.bufs.push_front(first);
+                }
+                self.len -= n;
+                return payload;
+            }
+        }
+        // Fragmented across multiple chunks: coalesce.
+        let mut out = BytesMut::with_capacity(n);
+        let mut remaining = n;
+        while remaining > 0 {
+            let mut front = self.bufs.pop_front().expect("take_bytes within len");
+            if front.len() <= remaining {
+                out.extend_from_slice(&front);
+                remaining -= front.len();
+            } else {
+                let part = front.split_to(remaining);
+                out.extend_from_slice(&part);
+                self.bufs.push_front(front);
+                remaining = 0;
+            }
+        }
+        self.len -= n;
+        out.freeze()
     }
 }
 
