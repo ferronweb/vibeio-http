@@ -40,7 +40,6 @@ use std::task::{Context, Poll};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::ready;
-use parking_lot::Mutex;
 
 use crate::h3::error::{H3Error, TransportError};
 use crate::h3::frame::{self, Frame, FrameDecoder, FrameError};
@@ -190,7 +189,7 @@ pub(crate) struct ControlStreams {
     // The connection's QPACK codecs, shared with the request streams. The
     // decoder's capacity is fixed by our own SETTINGS; the encoder is
     // created when the peer's SETTINGS bound its table.
-    shared: Arc<Mutex<SharedCodecs>>,
+    shared: Arc<SharedCodecs>,
 
     settings_received: bool,
     max_push_id: Option<u64>,
@@ -205,7 +204,7 @@ impl ControlStreams {
     /// [`ControlStreams::poll_init`].
     #[inline]
     pub(crate) fn new(local: LocalSettings) -> Self {
-        let shared = Arc::new(Mutex::new(SharedCodecs::new(&local)));
+        let shared = Arc::new(SharedCodecs::new(&local));
         Self {
             local,
             peer: PeerSettings::default(),
@@ -241,7 +240,7 @@ impl ControlStreams {
     /// created once the peer's SETTINGS bound its table (see
     /// [`ControlStreams::poll_read`]).
     #[inline]
-    pub(crate) fn shared(&self) -> &Arc<Mutex<SharedCodecs>> {
+    pub(crate) fn shared(&self) -> &Arc<SharedCodecs> {
         &self.shared
     }
 
@@ -249,7 +248,7 @@ impl ControlStreams {
     /// request-stream handler.
     #[inline]
     pub(crate) fn take_unblocked(&mut self) -> Vec<UnblockedSection> {
-        std::mem::take(&mut self.shared.lock().unblocked)
+        std::mem::take(&mut *self.shared.unblocked.lock())
     }
 
     /// Whether the peer's SETTINGS frame was received.
@@ -399,6 +398,15 @@ impl ControlStreams {
         self.encoder_pending.append(bytes);
     }
 
+    /// Drains the shared encoder stream queue (split-Mutex version).
+    #[inline]
+    pub(crate) fn queue_encoder_streams_from_shared(&mut self, shared: &SharedCodecs) {
+        let mut pending = shared.encoder_stream.lock();
+        if !pending.is_empty() {
+            self.encoder_pending.append(&mut *pending);
+        }
+    }
+
     /// Accepts and services the peer's unidirectional streams and reads
     /// its control stream, yielding at most one event per call.
     ///
@@ -483,14 +491,19 @@ impl ControlStreams {
             if let Some(stream) = self.in_encoder.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(chunk)) => {
-                        let mut shared = self.shared.lock();
-                        match shared.decoder.feed_encoder_stream(&chunk) {
-                            Ok(mut unblocked) => shared.unblocked.append(&mut unblocked),
-                            Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
+                        let (mut unblocked, acks, waiters) = {
+                            let mut decoder = self.shared.decoder.lock();
+                            let unblocked = match decoder.feed_encoder_stream(&chunk) {
+                                Ok(unblocked) => unblocked,
+                                Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
+                            };
+                            let acks = decoder.take_decoder_stream();
+                            let waiters = self.shared.take_waiters();
+                            (unblocked, acks, waiters)
+                        };
+                        if !unblocked.is_empty() {
+                            self.shared.unblocked.lock().append(&mut unblocked);
                         }
-                        let acks = shared.decoder.take_decoder_stream();
-                        let waiters = shared.take_waiters();
-                        drop(shared);
                         for waker in waiters {
                             waker.wake();
                         }
@@ -514,16 +527,19 @@ impl ControlStreams {
             if let Some(stream) = self.in_decoder.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(chunk)) => {
-                        let mut shared = self.shared.lock();
-                        if let Some(encoder) = shared.encoder.as_mut() {
-                            if let Err(err) = encoder.feed_decoder_stream(&chunk) {
-                                drop(shared);
-                                return Poll::Ready(Err(ControlError::Qpack(err)));
+                        {
+                            let mut encoder_guard = self.shared.encoder.lock();
+                            if let Some(encoder) = encoder_guard.as_mut() {
+                                if let Err(err) = encoder.feed_decoder_stream(&chunk) {
+                                    return Poll::Ready(Err(ControlError::Qpack(err)));
+                                }
                             }
                         }
-                        if let Err(err) = shared.decoder.feed_decoder_stream(&chunk) {
-                            drop(shared);
-                            return Poll::Ready(Err(ControlError::Qpack(err)));
+                        {
+                            let mut decoder = self.shared.decoder.lock();
+                            if let Err(err) = decoder.feed_decoder_stream(&chunk) {
+                                return Poll::Ready(Err(ControlError::Qpack(err)));
+                            }
                         }
                         progressed = true;
                     }
@@ -605,14 +621,19 @@ impl ControlStreams {
                         return Poll::Ready(Err(ControlError::StreamCreation));
                     }
                     if !leftover.is_empty() {
-                        let mut shared = self.shared.lock();
-                        match shared.decoder.feed_encoder_stream(&leftover) {
-                            Ok(mut unblocked) => shared.unblocked.append(&mut unblocked),
-                            Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
+                        let (mut unblocked, acks, waiters) = {
+                            let mut decoder = self.shared.decoder.lock();
+                            let unblocked = match decoder.feed_encoder_stream(&leftover) {
+                                Ok(unblocked) => unblocked,
+                                Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
+                            };
+                            let acks = decoder.take_decoder_stream();
+                            let waiters = self.shared.take_waiters();
+                            (unblocked, acks, waiters)
+                        };
+                        if !unblocked.is_empty() {
+                            self.shared.unblocked.lock().append(&mut unblocked);
                         }
-                        let acks = shared.decoder.take_decoder_stream();
-                        let waiters = shared.take_waiters();
-                        drop(shared);
                         for waker in waiters {
                             waker.wake();
                         }
@@ -627,10 +648,9 @@ impl ControlStreams {
                         return Poll::Ready(Err(ControlError::StreamCreation));
                     }
                     if !leftover.is_empty() {
-                        let mut shared = self.shared.lock();
-                        match shared.decoder.feed_decoder_stream(&leftover) {
-                            Ok(()) => {}
-                            Err(err) => return Poll::Ready(Err(ControlError::Qpack(err))),
+                        let mut decoder = self.shared.decoder.lock();
+                        if let Err(err) = decoder.feed_decoder_stream(&leftover) {
+                            return Poll::Ready(Err(ControlError::Qpack(err)));
                         }
                     }
                     self.in_decoder = Some(stream);
@@ -665,10 +685,11 @@ impl ControlStreams {
                 self.settings_received = true;
                 self.peer.apply(&settings);
                 let waiters = {
-                    let mut shared = self.shared.lock();
-                    shared.encoder = Some(Encoder::new(self.peer.qpack_max_table_capacity(), true));
-                    shared.peer_max_field_section_size = self.peer.max_field_section_size();
-                    shared.take_waiters()
+                    *self.shared.encoder.lock() =
+                        Some(Encoder::new(self.peer.qpack_max_table_capacity(), true));
+                    *self.shared.peer_max_field_section_size.lock() =
+                        self.peer.max_field_section_size();
+                    self.shared.take_waiters()
                 };
                 for waker in waiters {
                     waker.wake();
@@ -710,7 +731,7 @@ impl ControlStreams {
     /// stream queue.
     #[inline]
     fn queue_decoder_acks(&mut self) {
-        let acks = self.shared.lock().decoder.take_decoder_stream();
+        let acks = self.shared.decoder.lock().take_decoder_stream();
         if !acks.is_empty() {
             self.decoder_pending.push_back(acks);
         }

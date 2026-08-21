@@ -248,14 +248,13 @@ fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
 /// The control plane wakes this task (via the shared waiters map) when
 /// the SETTINGS frame arrives.
 #[inline]
-async fn wait_for_encoder(shared: &Arc<parking_lot::Mutex<SharedCodecs>>, stream_id: u64) {
+async fn wait_for_encoder(shared: &Arc<SharedCodecs>, stream_id: u64) {
     std::future::poll_fn(|cx| {
-        let mut shared = shared.lock();
-        if shared.encoder.is_some() {
-            shared.waiters.remove(&stream_id);
+        if shared.encoder.lock().is_some() {
+            shared.waiters.lock().remove(&stream_id);
             return Poll::Ready(());
         }
-        shared.waiters.insert(stream_id, cx.waker().clone());
+        shared.waiters.lock().insert(stream_id, cx.waker().clone());
         Poll::Pending
     })
     .await
@@ -278,7 +277,7 @@ async fn send_interim_response(
 #[inline]
 async fn send_response(
     stream: &SharedRequest,
-    shared: &Arc<parking_lot::Mutex<SharedCodecs>>,
+    shared: &Arc<SharedCodecs>,
     stream_id: u64,
     status: StatusCode,
     headers: &http::HeaderMap,
@@ -330,7 +329,7 @@ async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
 #[allow(clippy::too_many_arguments)]
 async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     stream: SharedRequest,
-    shared: Arc<parking_lot::Mutex<SharedCodecs>>,
+    shared: Arc<SharedCodecs>,
     stream_id: u64,
     request_fn: Rc<F>,
     date_cache: DateCache,
@@ -833,10 +832,7 @@ where
 
                 // Hand the request streams' queued QPACK encoder
                 // instructions to the control plane.
-                {
-                    let mut shared = shared.lock();
-                    controls.queue_encoder_streams(&mut shared.encoder_stream);
-                }
+                controls.queue_encoder_streams_from_shared(&shared);
 
                 // Write the control plane's outbound streams. If the peer tore
                 // it down while we were shutting down (e.g. an h3 0.0.8 client

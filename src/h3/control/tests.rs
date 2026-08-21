@@ -293,8 +293,8 @@ fn peer_settings_then_goaway_events() {
     assert_eq!(
         plane
             .shared()
-            .lock()
             .encoder
+            .lock()
             .as_ref()
             .expect("encoder")
             .max_capacity(),
@@ -561,7 +561,7 @@ fn peer_encoder_stream_feeds_the_qpack_decoder() {
 
     let events = drain_events(&mut plane, &mut conn).expect("encoder stream is valid");
     assert!(events.is_empty());
-    assert_eq!(plane.shared().lock().decoder.inserted(), 1);
+    assert_eq!(plane.shared().decoder.lock().inserted(), 1);
     // Nothing was blocked, so nothing was unblocked, and a plain insert
     // needs no acknowledgement yet.
     assert!(plane.take_unblocked().is_empty());

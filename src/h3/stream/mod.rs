@@ -141,29 +141,35 @@ fn map_frame_error(err: FrameError) -> StreamError {
 /// [`SharedCodecs::encoder_stream`] onto the QPACK encoder stream; every
 /// request stream decodes and encodes through the same instances, so
 /// dynamic table state stays coherent across the connection.
+///
+/// `decoder` and `encoder` are split into separate `Mutex`es so that
+/// `poll_send_response` (encoder) and `decode_block` (decoder) do not
+/// convoy on a single lock at high throughput (previously every
+/// `poll_send_response` held the `Mutex` across `encode_section`
+/// allocation).
 #[derive(Debug)]
 pub(crate) struct SharedCodecs {
     /// Decoder for the peer's field sections, sized by our own SETTINGS.
-    pub(crate) decoder: Decoder,
+    pub(crate) decoder: Mutex<Decoder>,
     /// Encoder for our field sections, created once the peer's SETTINGS
     /// bound its dynamic table; `None` before that (RFC 9204 Section 5).
-    pub(crate) encoder: Option<Encoder>,
+    pub(crate) encoder: Mutex<Option<Encoder>>,
     /// Encoder stream instructions (RFC 9204 Section 4.2) queued by the
     /// send path; the control plane writes them on the QPACK encoder
     /// stream.
-    pub(crate) encoder_stream: VecDeque<Bytes>,
+    pub(crate) encoder_stream: Mutex<VecDeque<Bytes>>,
     /// Field sections the peer's encoder stream unblocked, in arrival
     /// order; the request streams waiting on them take the entries
     /// matching their stream ID.
-    pub(crate) unblocked: Vec<UnblockedSection>,
+    pub(crate) unblocked: Mutex<Vec<UnblockedSection>>,
     /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE` once its SETTINGS
     /// frame arrived; `None` means unlimited.
-    pub(crate) peer_max_field_section_size: Option<u64>,
+    pub(crate) peer_max_field_section_size: Mutex<Option<u64>>,
     /// Wakers of request-stream tasks parked on shared codec state: a
     /// field section blocked on a dynamic-table entry, or the send side
     /// waiting for the peer's SETTINGS to create the encoder. Keyed by
     /// stream ID; the control plane wakes them when the state changes.
-    pub(crate) waiters: FxHashMap<u64, Waker>,
+    pub(crate) waiters: Mutex<FxHashMap<u64, Waker>>,
 }
 
 impl SharedCodecs {
@@ -184,12 +190,12 @@ impl SharedCodecs {
                 .unwrap_or(usize::MAX),
         );
         Self {
-            decoder,
-            encoder: None,
-            encoder_stream: VecDeque::new(),
-            unblocked: Vec::new(),
-            peer_max_field_section_size: None,
-            waiters: FxHashMap::default(),
+            decoder: Mutex::new(decoder),
+            encoder: Mutex::new(None),
+            encoder_stream: Mutex::new(VecDeque::new()),
+            unblocked: Mutex::new(Vec::new()),
+            peer_max_field_section_size: Mutex::new(None),
+            waiters: Mutex::new(FxHashMap::default()),
         }
     }
 
@@ -199,8 +205,8 @@ impl SharedCodecs {
     /// Waking a waiter whose section is still blocked is harmless: it
     /// re-polls, finds nothing, and re-registers.
     #[inline]
-    pub(crate) fn take_waiters(&mut self) -> Vec<Waker> {
-        self.waiters.drain().map(|(_, waker)| waker).collect()
+    pub(crate) fn take_waiters(&self) -> Vec<Waker> {
+        self.waiters.lock().drain().map(|(_, waker)| waker).collect()
     }
 }
 
@@ -237,7 +243,7 @@ pub(crate) struct RequestStream {
     stream: Box<dyn BidiStream>,
     stream_id: u64,
     frame_decoder: FrameDecoder,
-    shared: Arc<Mutex<SharedCodecs>>,
+    shared: Arc<SharedCodecs>,
 
     // Receive state.
     awaiting_headers: bool,
@@ -261,7 +267,7 @@ impl RequestStream {
     /// ID, used to correlate QPACK state (blocked field sections, section
     /// acknowledgements).
     #[inline]
-    pub(crate) fn new(stream: Box<dyn BidiStream>, shared: Arc<Mutex<SharedCodecs>>) -> Self {
+    pub(crate) fn new(stream: Box<dyn BidiStream>, shared: Arc<SharedCodecs>) -> Self {
         let stream_id = stream.id();
         Self {
             stream,
@@ -626,29 +632,27 @@ impl RequestStream {
     /// lets the transport write the QPACK output without copying it again.
     #[inline]
     fn encode_headers(&mut self, lines: &[(Bytes, Bytes)]) -> Result<(Bytes, Bytes), StreamError> {
-        let mut shared = self.shared.lock();
-        if shared.encoder.is_none() {
-            // The peer's SETTINGS (which bound its dynamic table) has
-            // not arrived; its encoder is unusable (RFC 9204
-            // Section 5).
-            return Err(StreamError::Message);
-        }
-        let encoder = shared.encoder.as_mut().expect("encoder ensured");
-        let section = encoder.encode_section_with_ack_base(self.stream_id, lines);
+        let section = {
+            let mut encoder_guard = self.shared.encoder.lock();
+            let encoder = encoder_guard.as_mut().ok_or(StreamError::Message)?;
+            encoder.encode_section_with_ack_base(self.stream_id, lines)
+        };
         let size = section.block.len() as u64;
-        if let Some(limit) = shared.peer_max_field_section_size {
+        if let Some(limit) = *self.shared.peer_max_field_section_size.lock() {
             if size > limit {
                 return Err(StreamError::HeadersTooBig { size, limit });
             }
         }
-        if !section.encoder_stream.is_empty() {
-            shared.encoder_stream.push_back(section.encoder_stream);
+        let block = section.block;
+        let encoder_stream = section.encoder_stream;
+        if !encoder_stream.is_empty() {
+            self.shared.encoder_stream.lock().push_back(encoder_stream);
         }
         let mut frame_header =
-            BytesMut::with_capacity(1 + crate::h3::frame::varint_size(section.block.len() as u64));
+            BytesMut::with_capacity(1 + crate::h3::frame::varint_size(block.len() as u64));
         write_varint(FRAME_HEADERS, &mut frame_header);
-        write_varint(section.block.len() as u64, &mut frame_header);
-        Ok((frame_header.freeze(), section.block))
+        write_varint(block.len() as u64, &mut frame_header);
+        Ok((frame_header.freeze(), block))
     }
 
     /// Decodes one encoded field section with the shared decoder, marking
@@ -656,8 +660,8 @@ impl RequestStream {
     #[inline]
     fn decode_block(&self, block: &[u8]) -> Result<Option<Vec<(Bytes, Bytes)>>, StreamError> {
         self.shared
-            .lock()
             .decoder
+            .lock()
             .decode_block(block, self.stream_id, now())
             .map_err(StreamError::Qpack)
     }
@@ -673,7 +677,7 @@ impl RequestStream {
     #[inline]
     fn finish_recv(&mut self) {
         self.recv_finished = true;
-        self.shared.lock().decoder.stream_finished(self.stream_id);
+        self.shared.decoder.lock().stream_finished(self.stream_id);
     }
 
     /// After the trailers, reads and discards unknown frames; a known
@@ -795,24 +799,23 @@ impl RequestStream {
 /// Takes the oldest unblocked field section for `stream_id`.
 #[inline]
 fn take_unblocked_for(
-    shared: &Arc<Mutex<SharedCodecs>>,
+    shared: &Arc<SharedCodecs>,
     stream_id: u64,
     cx: &mut Context<'_>,
 ) -> Option<UnblockedSection> {
-    let mut shared = shared.lock();
-    match shared
-        .unblocked
-        .iter()
-        .position(|section| section.stream_id == stream_id)
     {
-        Some(index) => Some(shared.unblocked.remove(index)),
-        // No unblocked section yet: park this task until the control
-        // plane feeds the peer's encoder stream and unblocks it.
-        None => {
-            shared.waiters.insert(stream_id, cx.waker().clone());
-            None
+        let mut unblocked = shared.unblocked.lock();
+        if let Some(index) = unblocked
+            .iter()
+            .position(|section| section.stream_id == stream_id)
+        {
+            return Some(unblocked.remove(index));
         }
     }
+    // No unblocked section yet: park this task until the control
+    // plane feeds the peer's encoder stream and unblocks it.
+    shared.waiters.lock().insert(stream_id, cx.waker().clone());
+    None
 }
 
 /// The monotonic clock the QPACK decoder records blocked sections with.
