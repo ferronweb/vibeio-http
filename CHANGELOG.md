@@ -9,6 +9,7 @@
 - Optimized Huffman decoding logic (using 8-bit lookup table instead of 4-bit, reducing memory lookups from 2 per byte to just 1 per byte).
 - Per-stream client's `WINDOW_UPDATE` frame now drains pending data for one stream instead of all streams.
 - Reduced memory allocations across HTTP/2 and HTTP/3.
+- Improved HTTP/2 flow-control fairness: added deficit round-robin (DRR) for connection-level `WINDOW_UPDATE` to prevent a single large response from hogging the connection window; changed `complete_blocks` from a simple `Vec` to `VecDeque` for FIFO processing of pipelined `HEADERS` frames.
 
 ## `vibeio-http` 0.4.1
 
