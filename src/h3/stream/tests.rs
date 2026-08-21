@@ -156,7 +156,9 @@ fn full_request_exchange() {
     let (shared, mut enc) = shared_and_peer_encoder();
     let mut wire = BytesMut::new();
     let section = enc.encode_section(0, &request_lines("POST", "/submit"));
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -170,7 +172,9 @@ fn full_request_exchange() {
             Bytes::from_static(b"sum"),
         )],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -219,7 +223,9 @@ fn request_without_body_is_finished_by_fin() {
     let (shared, mut enc) = shared_and_peer_encoder();
     let mut wire = BytesMut::new();
     let section = enc.encode_section(0, &request_lines("GET", "/index"));
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -303,12 +309,16 @@ fn empty_body_with_trailers() {
     let (shared, mut enc) = shared_and_peer_encoder();
     let mut wire = BytesMut::new();
     let section = enc.encode_section(0, &request_lines("PUT", "/x"));
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
     let section = enc.encode_section(0, &[(Bytes::from_static(b"x-a"), Bytes::from_static(b"1"))]);
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -332,7 +342,9 @@ fn trailers_with_pseudo_headers_are_message_error() {
     let (shared, mut enc) = shared_and_peer_encoder();
     let mut wire = BytesMut::new();
     let section = enc.encode_section(0, &request_lines("GET", "/x"));
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -340,7 +352,9 @@ fn trailers_with_pseudo_headers_are_message_error() {
         0,
         &[(Bytes::from_static(b":status"), Bytes::from_static(b"200"))],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -361,12 +375,16 @@ fn known_frame_after_trailers_is_frame_unexpected() {
     let (shared, mut enc) = shared_and_peer_encoder();
     let mut wire = BytesMut::new();
     let section = enc.encode_section(0, &request_lines("GET", "/x"));
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
     let section = enc.encode_section(0, &[]);
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -393,12 +411,16 @@ fn unknown_frames_after_trailers_are_ignored() {
     let (shared, mut enc) = shared_and_peer_encoder();
     let mut wire = BytesMut::new();
     let section = enc.encode_section(0, &request_lines("GET", "/x"));
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
     let section = enc.encode_section(0, &[]);
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     Frame::Headers(section.block).encode(&mut wire);
@@ -616,7 +638,9 @@ fn missing_method_is_message_error() {
             (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
         ],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     let mut wire = BytesMut::new();
@@ -647,7 +671,9 @@ fn unknown_pseudo_header_is_message_error() {
             (Bytes::from_static(b":frobnicate"), Bytes::from_static(b"1")),
         ],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     let mut wire = BytesMut::new();
@@ -679,7 +705,9 @@ fn pseudo_header_after_regular_is_message_error() {
             ),
         ],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     let mut wire = BytesMut::new();
@@ -711,7 +739,9 @@ fn connect_request_shape() {
             ),
         ],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     let mut wire = BytesMut::new();
@@ -752,7 +782,9 @@ fn connect_request_shape() {
             ),
         ],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     let mut wire = BytesMut::new();
@@ -785,7 +817,9 @@ fn connect_with_path_is_message_error() {
             (Bytes::from_static(b":path"), Bytes::from_static(b"/")),
         ],
     );
-    shared.decoder.lock()
+    shared
+        .decoder
+        .lock()
         .feed_encoder_stream(&section.encoder_stream)
         .expect("valid");
     let mut wire = BytesMut::new();

@@ -799,7 +799,10 @@ where
                     if amount == 0 {
                         return;
                     }
-                    (amount as usize, orig_amount != amount || capped != orig_amount)
+                    (
+                        amount as usize,
+                        orig_amount != amount || capped != orig_amount,
+                    )
                 }
             };
             let (frame_end, all, chunk) = {
@@ -845,7 +848,6 @@ where
         }
     }
 
-    
     /// Drains every stream task's outbound channel, turning messages
     /// into frames. Called after each read and whenever a wake fires.
     #[inline]
@@ -993,8 +995,7 @@ where
         status_buf[0] = b'0' + (code / 100) as u8;
         status_buf[1] = b'0' + ((code / 10) % 10) as u8;
         status_buf[2] = b'0' + (code % 10) as u8;
-        let mut fields: SmallVec<[HpackHeader; 8]> =
-            SmallVec::with_capacity(headers.len() + 1);
+        let mut fields: SmallVec<[HpackHeader; 8]> = SmallVec::with_capacity(headers.len() + 1);
         fields.push(HpackHeader::new(
             Bytes::from_static(b":status"),
             Bytes::copy_from_slice(&status_buf),
