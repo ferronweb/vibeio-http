@@ -4,6 +4,7 @@
 
 **Not yet released**
 
+- Fixed custom server max frame size setting incorrectly applied into peer defaults (causing frame size mismatch errors for HTTP/2 clients using libnghttp2).
 - Optimized HPACK (HTTP/2) and QPACK (HTTP/3) implementations for large dynamic tables (for example for variable headers).
 - Optimized Huffman decoding logic (using 8-bit lookup table instead of 4-bit, reducing memory lookups from 2 per byte to just 1 per byte).
 - Reduced memory allocations across HTTP/2 and HTTP/3.

@@ -294,8 +294,6 @@ where
             .set_max_header_list_size(self.opts.max_header_list_size as usize);
         self.decoder
             .set_max_frame_size(self.opts.max_frame_size as usize);
-        self.writer.max_frame_size = self.opts.max_frame_size as usize;
-        self.peer.max_frame_size = self.opts.max_frame_size as usize;
         self.conn_window = self.opts.initial_connection_window_size as i64;
         // Resolved CONTINUATION-flood limit (CVE-2024-27919); `Http2Options`
         // already applies the safe default when none was configured.
