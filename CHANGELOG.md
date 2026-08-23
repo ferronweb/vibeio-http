@@ -5,6 +5,7 @@
 **Not yet released**
 
 - Fixed custom server max frame size setting incorrectly applied into peer defaults (causing frame size mismatch errors for HTTP/2 clients using libnghttp2).
+- Fixed `curl: (18) HTTP/3 stream 0 reset by server (error 0x0 unknown)` on `curl` for HTTP/3. ([GitHub issue](https://github.com/ferronweb/ferron/issues/887))
 - Optimized HPACK (HTTP/2) and QPACK (HTTP/3) implementations for large dynamic tables (for example for variable headers).
 - Optimized Huffman decoding logic (using 8-bit lookup table instead of 4-bit, reducing memory lookups from 2 per byte to just 1 per byte).
 - Per-stream client's `WINDOW_UPDATE` frame now drains pending data for one stream instead of all streams.

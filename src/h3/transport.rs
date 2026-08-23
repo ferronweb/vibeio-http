@@ -55,6 +55,14 @@ pub trait SendStream: Unpin + Send {
     /// returned when the peer sends `STOP_SENDING`.
     fn poll_send(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<Result<(), TransportError>>;
 
+    /// Polls until the peer stops the stream or reads the stream to
+    /// completion.
+    #[allow(unused_variables)]
+    #[inline]
+    fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
+        Poll::Ready(Ok(()))
+    }
+
     /// Polls to finish the sending side of the stream (`FIN`). The peer
     /// then observes `Ok(None)` from its receive side when all data is
     /// delivered.
@@ -173,6 +181,11 @@ mod tests {
             _cx: &mut Context<'_>,
             _data: &[u8],
         ) -> Poll<Result<(), TransportError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        #[inline]
+        fn poll_stopped(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
             Poll::Ready(Ok(()))
         }
 

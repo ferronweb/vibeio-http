@@ -305,9 +305,13 @@ async fn send_trailers(
 #[inline]
 async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
     let mut guard = stream.lock().await;
-    std::future::poll_fn(|cx| guard.poll_finish(cx))
+    let result = std::future::poll_fn(|cx| guard.poll_finish(cx))
         .await
-        .map_err(h3_stream_error_to_io)
+        .map_err(h3_stream_error_to_io);
+    let result2 = std::future::poll_fn(|cx| guard.poll_stopped(cx))
+        .await
+        .map_err(h3_stream_error_to_io);
+    result.or(result2)
 }
 
 /// A request task's end is observed by the connection driver through the

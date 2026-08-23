@@ -627,6 +627,12 @@ impl RequestStream {
         self.stream.poll_finish(cx).map_err(StreamError::Transport)
     }
 
+    /// Waits until the peer stops the stream or reads the stream to completion.
+    #[inline]
+    pub(crate) fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
+        self.stream.poll_stopped(cx).map_err(StreamError::Transport)
+    }
+
     /// Resets the sending side of the stream with `code` (RFC 9114
     /// Section 4.1), discarding buffered data.
     #[inline]

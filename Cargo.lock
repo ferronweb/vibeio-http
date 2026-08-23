@@ -1704,6 +1704,7 @@ version = "0.4.1"
 dependencies = [
  "bytes",
  "criterion",
+ "futures-executor",
  "futures-util",
  "h2",
  "h3",

@@ -27,6 +27,7 @@
 //! degenerates to [`TransportError::Transport`].
 
 use std::{
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -43,6 +44,7 @@ use crate::h3::transport::{
 
 /// An infinite stream of `quinn` accept/open outcomes.
 type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + std::marker::Send + 'static>>;
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + std::marker::Send + 'static>>;
 
 type AcceptBiItem = Result<(quinn::SendStream, quinn::RecvStream), quinn::ConnectionError>;
 type AcceptUniItem = Result<quinn::RecvStream, quinn::ConnectionError>;
@@ -192,6 +194,7 @@ pub(crate) struct Send {
     /// `extend_from_slice` the same bytes again, duplicating and growing
     /// `buf` without bound — fatal for large responses under backpressure.
     in_flight: Option<(usize, usize)>,
+    stopped_future: Option<BoxFuture<Result<Option<quinn::VarInt>, quinn::StoppedError>>>,
 }
 
 impl Send {
@@ -201,6 +204,7 @@ impl Send {
             stream,
             buf: bytes::BytesMut::new(),
             in_flight: None,
+            stopped_future: None,
         }
     }
 
@@ -232,6 +236,18 @@ impl Send {
                 .map_err(map_write_error)?;
             debug_assert!(written > 0);
             self.buf.advance(written);
+        }
+    }
+
+    #[inline]
+    fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
+        let mut fut = self
+            .stopped_future
+            .get_or_insert_with(|| Box::pin(self.stream.stopped()));
+        match Pin::new(&mut fut).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(TransportError::Other)),
         }
     }
 
@@ -350,6 +366,11 @@ impl SendStreamTrait for BidiStream {
     }
 
     #[inline]
+    fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
+        self.send.poll_stopped(cx)
+    }
+
+    #[inline]
     fn poll_reset(&mut self, cx: &mut Context<'_>, code: u64) -> Poll<Result<(), TransportError>> {
         self.send.poll_reset(cx, code)
     }
@@ -407,6 +428,14 @@ impl SendStreamTrait for UniStream {
     fn poll_send(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<Result<(), TransportError>> {
         match self {
             UniStream::Send(send) => send.poll_send(cx, data),
+            UniStream::Recv(_) => Poll::Ready(Err(TransportError::Transport)),
+        }
+    }
+
+    #[inline]
+    fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
+        match self {
+            UniStream::Send(send) => send.poll_stopped(cx),
             UniStream::Recv(_) => Poll::Ready(Err(TransportError::Transport)),
         }
     }

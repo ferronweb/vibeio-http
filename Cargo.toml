@@ -40,6 +40,7 @@ quinn = { version = "0.11", optional = true }
 
 # Static-table perfect hashing.
 phf = { version = "0.14", features = ["macros"] }
+futures-executor = "0.3.34"
 
 [dev-dependencies]
 tokio = { version = "1.50.0", features = ["test-util", "full"] }
