@@ -1,9 +1,9 @@
-//! # vibeio-http
+//! # zincio-http
 //!
 //! High-performance HTTP/1.1, HTTP/2, and HTTP/3 server implementation
-//! for the [`vibeio`] async runtime.
+//! for the [`zincio`] async runtime.
 //!
-//! `vibeio-http` provides protocol-specific connection handlers behind a common
+//! `zincio-http` provides protocol-specific connection handlers behind a common
 //! [`HttpProtocol`] trait. Handlers receive an `http::Request<`[`Incoming`]`>`
 //! and return an `http::Response<B>` where `B` implements
 //! [`http_body::Body`] with `bytes::Bytes` chunks.
@@ -34,9 +34,9 @@
 //! use bytes::Bytes;
 //! use http::Response;
 //! use http_body_util::Full;
-//! use vibeio::net::TcpListener;
-//! use vibeio::RuntimeBuilder;
-//! use vibeio_http::{Http1, Http1Options, HttpProtocol};
+//! use zincio::net::TcpListener;
+//! use zincio::RuntimeBuilder;
+//! use zincio_http::{Http1, Http1Options, HttpProtocol};
 //!
 //! let runtime = RuntimeBuilder::new().enable_timer(true).build()?;
 //!

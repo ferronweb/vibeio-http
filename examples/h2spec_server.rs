@@ -3,16 +3,16 @@ mod server {
     use bytes::Bytes;
     use http::{Response, StatusCode};
     use http_body_util::Full;
-    use vibeio::net::TcpListener;
-    use vibeio::RuntimeBuilder;
-    use vibeio_http::{Http2, Http2Options, HttpProtocol};
+    use zincio::net::TcpListener;
+    use zincio::RuntimeBuilder;
+    use zincio_http::{Http2, Http2Options, HttpProtocol};
 
     // h2spec conformance server. Listen on 127.0.0.1:8080 and answer every
     // request with a 200 response carrying a small non-empty body. Run via
     // `scripts/h2spec.sh`, which starts this binary, waits for readiness, runs
     // h2spec with `--strict`, and propagates its exit code.
     pub fn main() -> std::io::Result<()> {
-        // In production, multiple vibeio threads would be used...
+        // In production, multiple zincio threads would be used...
         let runtime = RuntimeBuilder::new().enable_timer(true).build()?;
         runtime.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:8080")?;
@@ -20,7 +20,7 @@ mod server {
                 let (stream, _) = listener.accept().await?;
                 stream.set_nodelay(true)?;
                 let conn = Http2::new(stream.into_poll()?, Http2Options::default());
-                vibeio::spawn(async move {
+                zincio::spawn(async move {
                     let _ = conn
                         .handle(|_request| async move {
                             let response = Response::builder()

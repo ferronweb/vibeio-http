@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use http_body_util::{BodyExt, Empty, Full};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use vibeio_http::{prepare_upgrade, send_early_hints, Http1, Http1Options, HttpProtocol};
+use zincio_http::{prepare_upgrade, send_early_hints, Http1, Http1Options, HttpProtocol};
 
 #[tokio::test]
 async fn test_get_request() {
@@ -66,7 +66,7 @@ async fn test_post_request() {
 
             client_writer
         .write_all(
-            b"POST / HTTP/1.0\r\nHost: localhost\r\nContent-Length: 14\r\n\r\nHello, vibeio!",
+            b"POST / HTTP/1.0\r\nHost: localhost\r\nContent-Length: 14\r\n\r\nHello, zincio!",
         )
         .await
         .unwrap();
@@ -77,7 +77,7 @@ async fn test_post_request() {
 
             // Assert the response
             assert!(response_buf.starts_with(b"HTTP/1.0 200 OK\r\n"));
-            assert!(response_buf.ends_with(b"\r\n\r\nHello, vibeio!"));
+            assert!(response_buf.ends_with(b"\r\n\r\nHello, zincio!"));
 
             server_task.await.unwrap().unwrap();
         })
@@ -756,9 +756,9 @@ async fn test_chunked_encoding_very_large() {
 
 #[test]
 fn test_slowloris() {
-    // A "vibeio" runtime has to be built, since this test depends on the timer,
+    // A "zincio" runtime has to be built, since this test depends on the timer,
     // which can't be used with Tokio
-    vibeio::RuntimeBuilder::new()
+    zincio::RuntimeBuilder::new()
         .enable_timer(true)
         .build()
         .unwrap()
@@ -769,7 +769,7 @@ fn test_slowloris() {
                 server_io,
                 Http1Options::new().header_read_timeout(Some(Duration::from_millis(250))),
             );
-            let server_task = vibeio::spawn(server.handle(|req| async {
+            let server_task = zincio::spawn(server.handle(|req| async {
                 let _ = req.into_body().collect().await;
                 Ok::<_, http::Error>(
                     http::Response::builder()
@@ -781,11 +781,11 @@ fn test_slowloris() {
 
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
-            let client_task = vibeio::spawn(async move {
+            let client_task = zincio::spawn(async move {
                 // Simulate a slowloris attack by slowly writing the request
                 let data = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
                 for chunk in data.chunks(4) {
-                    vibeio::time::sleep(Duration::from_millis(50)).await;
+                    zincio::time::sleep(Duration::from_millis(50)).await;
                     if client_writer.write_all(chunk).await.is_err() {
                         break;
                     }

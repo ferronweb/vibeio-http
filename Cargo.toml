@@ -1,15 +1,15 @@
 [package]
-name = "vibeio-http"
+name = "zincio-http"
 version = "0.4.1"
 edition = "2021"
 authors = ["Dorian Niemiec <dorian@ferron.sh>"]
-description = "High-performance HTTP server primitives for the `vibeio` runtime"
+description = "High-performance HTTP server primitives for the `zincio` runtime"
 license = "MIT"
 readme = "README.md"
 keywords = ["async", "http", "server", "quic"]
 categories = ["network-programming", "web-programming"]
-documentation = "https://docs.rs/vibeio-http"
-repository = "https://github.com/ferronweb/vibeio-http"
+documentation = "https://docs.rs/zincio-http"
+repository = "https://github.com/ferronweb/zincio-http"
 
 [dependencies]
 bytes = "1.11.1"
@@ -23,7 +23,7 @@ pin-project-lite = { version = "0.2.16", optional = true }
 send_wrapper = "0.6.0"
 parking_lot = "0.12.5"
 tokio = { version = "1.50.0", features = ["sync", "parking_lot"] }
-vibeio = { version = "0.2.19", default-features = false, features = ["time"] }
+zincio = { version = "0.2.22", default-features = false, features = ["time"] }
 
 # HTTP/1.x
 httparse = { version = "1.10.1", optional = true }
@@ -74,7 +74,7 @@ harness = false
 [features]
 default = ["h1", "h1-zerocopy", "h2", "h3", "h3-quinn"]
 h1 = ["httparse", "httpdate", "memchr", "tokio-util"]
-h1-zerocopy = ["h1", "vibeio/splice"]
+h1-zerocopy = ["h1", "zincio/splice"]
 h2 = ["httpdate", "tokio-util", "pin-project-lite"]
 h3 = ["httpdate", "tokio-util"]
 h3-quinn = ["h3", "dep:quinn"]

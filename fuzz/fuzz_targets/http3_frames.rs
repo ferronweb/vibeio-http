@@ -8,7 +8,7 @@
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
-use vibeio_http::FrameDecoder;
+use zincio_http::FrameDecoder;
 
 fuzz_target!(|data: &[u8]| {
     let mut decoder = FrameDecoder::new();

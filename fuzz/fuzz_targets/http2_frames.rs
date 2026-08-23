@@ -10,7 +10,7 @@
 //! field block to nothing while END_HEADERS was clear).
 
 use libfuzzer_sys::fuzz_target;
-use vibeio_http::codec::{
+use zincio_http::codec::{
     Frame, FrameDecoder, FrameWriter, DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE_LIMIT,
 };
 

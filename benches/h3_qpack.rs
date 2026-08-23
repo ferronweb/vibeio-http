@@ -13,7 +13,7 @@
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
-use vibeio_http::qpack::{Decoder, Encoder};
+use zincio_http::qpack::{Decoder, Encoder};
 
 fn request_headers() -> Vec<(Bytes, Bytes)> {
     vec![
@@ -29,7 +29,7 @@ fn request_headers() -> Vec<(Bytes, Bytes)> {
         ),
         (
             Bytes::from_static(b"user-agent"),
-            Bytes::from_static(b"vibeio-http/0.3"),
+            Bytes::from_static(b"zincio-http/0.3"),
         ),
         (
             Bytes::from_static(b"accept"),
@@ -51,7 +51,7 @@ fn response_headers() -> Vec<(Bytes, Bytes)> {
         ),
         (
             Bytes::from_static(b"server"),
-            Bytes::from_static(b"vibeio-http"),
+            Bytes::from_static(b"zincio-http"),
         ),
         (
             Bytes::from_static(b"cache-control"),

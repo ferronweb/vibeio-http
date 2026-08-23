@@ -6,8 +6,8 @@ mod server {
     use quinn::{Endpoint, ServerConfig};
     use std::convert::Infallible;
     use std::sync::Arc;
-    use vibeio::RuntimeBuilder;
-    use vibeio_http::{Http3, Http3Options, HttpProtocol};
+    use zincio::RuntimeBuilder;
+    use zincio_http::{Http3, Http3Options, HttpProtocol};
 
     // h3spec conformance server. Listen on 0.0.0.0:4433 with ALPN `h3` and answer
     // every request with a 200 response carrying a small non-empty body. Run via
@@ -17,8 +17,8 @@ mod server {
     //
     // quinn's `Endpoint` (and each accepted connection) spawns tokio tasks, so the
     // accept loop runs on a tokio runtime. The native `Http3` driver is an async
-    // future that must be polled by a vibeio runtime; each connection is handed to
-    // its own vibeio runtime (driven by `block_on` on a dedicated thread), which is
+    // future that must be polled by a zincio runtime; each connection is handed to
+    // its own zincio runtime (driven by `block_on` on a dedicated thread), which is
     // what actually executes the HTTP/3 protocol logic.
     #[tokio::main]
     pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,21 +58,21 @@ mod server {
                     continue;
                 }
             };
-            // Each connection gets its own vibeio runtime, driven on a dedicated
+            // Each connection gets its own zincio runtime, driven on a dedicated
             // thread. The h3 future is built here (after moving the connection in)
             // so it never has to cross a thread boundary as a value.
             //
-            // In production, vibeio runtime would be reused...
+            // In production, zincio runtime would be reused...
             std::thread::spawn(move || {
                 let runtime = match RuntimeBuilder::new().enable_timer(true).build() {
                     Ok(runtime) => runtime,
                     Err(err) => {
-                        eprintln!("vibeio runtime build failed: {err}");
+                        eprintln!("zincio runtime build failed: {err}");
                         return;
                     }
                 };
                 let h3 = Http3::new(
-                    vibeio_http::quinn::Connection::new(connection),
+                    zincio_http::quinn::Connection::new(connection),
                     Http3Options::default(),
                 );
                 let _ = runtime.block_on(h3.handle(|_request| async move {

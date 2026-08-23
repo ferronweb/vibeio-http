@@ -1680,58 +1680,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "vibeio"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1cc1d5fba9915771b32f61cb9c408904b565d4f05ec0a22a42228d4ff0dcdf7"
-dependencies = [
- "crossbeam-queue",
- "futures-util",
- "io-uring 0.6.4",
- "io-uring 0.7.14",
- "libc",
- "mio",
- "oneshot",
- "slab",
- "smallvec",
- "tokio",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vibeio-http"
-version = "0.4.1"
-dependencies = [
- "bytes",
- "criterion",
- "futures-executor",
- "futures-util",
- "h2",
- "h3",
- "h3-quinn",
- "http",
- "http-body",
- "http-body-util",
- "httparse",
- "httpdate",
- "kanal",
- "memchr",
- "oneshot",
- "parking_lot",
- "phf",
- "pin-project-lite",
- "quinn",
- "rcgen",
- "rustc-hash",
- "send_wrapper",
- "serde_json",
- "smallvec",
- "tokio",
- "tokio-util",
- "vibeio",
-]
-
-[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1993,6 +1941,58 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+
+[[package]]
+name = "zincio"
+version = "0.2.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "184161806158fc84341702ea7e39574ec307da619c63d328ee994a8b40664518"
+dependencies = [
+ "crossbeam-queue",
+ "futures-util",
+ "io-uring 0.6.4",
+ "io-uring 0.7.14",
+ "libc",
+ "mio",
+ "oneshot",
+ "slab",
+ "smallvec",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "zincio-http"
+version = "0.4.1"
+dependencies = [
+ "bytes",
+ "criterion",
+ "futures-executor",
+ "futures-util",
+ "h2",
+ "h3",
+ "h3-quinn",
+ "http",
+ "http-body",
+ "http-body-util",
+ "httparse",
+ "httpdate",
+ "kanal",
+ "memchr",
+ "oneshot",
+ "parking_lot",
+ "phf",
+ "pin-project-lite",
+ "quinn",
+ "rcgen",
+ "rustc-hash",
+ "send_wrapper",
+ "serde_json",
+ "smallvec",
+ "tokio",
+ "tokio-util",
+ "zincio",
+]
 
 [[package]]
 name = "zmij"

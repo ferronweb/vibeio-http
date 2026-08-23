@@ -24,10 +24,10 @@ use http_body_util::Full;
 use libfuzzer_sys::fuzz_target;
 use std::convert::Infallible;
 
-use vibeio_http::transport::{
+use zincio_http::transport::{
     Accept, BidiStream, Connection, OpenStreams, RecvStream, SendStream, UniStream,
 };
-use vibeio_http::{Http3, Http3Options, HttpProtocol, Incoming, TransportError};
+use zincio_http::{Http3, Http3Options, HttpProtocol, Incoming, TransportError};
 
 /// A mock unidirectional stream carrying a single inbound buffer followed by
 /// a FIN. Outbound sends are accepted and discarded.

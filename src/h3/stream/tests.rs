@@ -512,7 +512,7 @@ fn send_response_encodes_headers_and_queue_encoder_stream() {
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-    headers.insert("x-server", HeaderValue::from_static("vibeio"));
+    headers.insert("x-server", HeaderValue::from_static("zincio"));
     let mut cx = cx();
     assert!(matches!(
         request.poll_send_response(&mut cx, StatusCode::OK, &headers),

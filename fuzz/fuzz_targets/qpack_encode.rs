@@ -11,7 +11,7 @@
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
-use vibeio_http::qpack::{Decoder, Encoder};
+use zincio_http::qpack::{Decoder, Encoder};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 3 {

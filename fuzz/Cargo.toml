@@ -1,5 +1,5 @@
 [package]
-name = "vibeio-http-fuzz"
+name = "zincio-http-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -13,8 +13,8 @@ http = "1.4.0"
 http-body-util = "0.1.3"
 libfuzzer-sys = "0.4"
 tokio = "1.52.3"
-vibeio = "0.2.10"
-vibeio-http = { path = "..", features = ["h1","h2","h3"] }
+zincio = "0.2.10"
+zincio-http = { path = "..", features = ["h1","h2","h3"] }
 
 [[bin]]
 name = "http1"

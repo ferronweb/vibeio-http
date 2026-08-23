@@ -293,7 +293,7 @@ where
             Ok::<Response<ConnBody>, std::io::Error>(response.map(ConnBody::new))
         });
 
-        vibeio::spawn(StreamDriver::new(
+        zincio::spawn(StreamDriver::new(
             response_fut,
             reset_rx,
             msg_tx,

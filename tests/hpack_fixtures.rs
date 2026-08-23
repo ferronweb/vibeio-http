@@ -270,5 +270,5 @@ fn corpus_encode_round_trips() {
 }
 
 mod hpack {
-    pub(crate) use vibeio_http::hpack::{Decoder, Encoder, Header};
+    pub(crate) use zincio_http::hpack::{Decoder, Encoder, Header};
 }

@@ -2,8 +2,8 @@
 //! client against the **native** HTTP/3 server over a real QUIC loopback
 //! connection.
 //!
-//! The server runs on the `vibeio` runtime in its own thread (the native
-//! driver spawns per-request tasks via `vibeio::spawn`); both quinn
+//! The server runs on the `zincio` runtime in its own thread (the native
+//! driver spawns per-request tasks via `zincio::spawn`); both quinn
 //! endpoints live on the `tokio` runtime of the test thread, which pumps
 //! the loopback. The `h3`-crate scenarios exercise request/response
 //! streaming, trailers, concurrency, cancellation and graceful shutdown
@@ -27,8 +27,8 @@ use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use quinn::Endpoint;
 use tokio_util::sync::CancellationToken;
-use vibeio::RuntimeBuilder;
-use vibeio_http::{
+use zincio::RuntimeBuilder;
+use zincio_http::{
     qpack::{Decoder, Encoder, UnblockedSection},
     Frame, FrameDecoder, Http3, Http3Options, HttpProtocol, Incoming, Settings,
 };
@@ -77,7 +77,7 @@ async fn loopback_pair() -> (Endpoint, Endpoint, quinn::Connection, quinn::Conne
     (server_endpoint, client_endpoint, client_conn, server_conn)
 }
 
-/// Runs the native server on a `vibeio` runtime in a dedicated thread.
+/// Runs the native server on a `zincio` runtime in a dedicated thread.
 ///
 /// The server is shut down by cancelling `cancel`; the thread then exits
 /// once the connection drains, and `handle`'s result is sent on the
@@ -103,9 +103,9 @@ where
         let rt = RuntimeBuilder::new()
             .enable_timer(true)
             .build()
-            .expect("vibeio runtime");
+            .expect("zincio runtime");
         let result = rt.block_on(async move {
-            Http3::new(vibeio_http::quinn::Connection::new(server_conn), options)
+            Http3::new(zincio_http::quinn::Connection::new(server_conn), options)
                 .graceful_shutdown_token(cancel)
                 .handle(handler)
                 .await
@@ -1059,7 +1059,7 @@ async fn fixture_client_early_hints() {
                     http::header::LINK,
                     HeaderValue::from_static("</style.css>; rel=preload; as=style"),
                 );
-                vibeio_http::send_early_hints(&mut request, link)
+                zincio_http::send_early_hints(&mut request, link)
                     .await
                     .expect("early hints");
                 Ok::<_, std::convert::Infallible>(

@@ -1,6 +1,6 @@
 //! Interop test: drive a real `h2` client and server over in-memory
 //! duplex streams, tap the wire bytes in both directions, and verify
-//! that the native frame codec (`vibeio_http::h2::codec`) decodes the
+//! that the native frame codec (`zincio_http::h2::codec`) decodes the
 //! complete session, including the connection preface, settings
 //! exchange, HEADERS (with huffman-coded field blocks), DATA, and
 //! GOAWAY frames.
@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use vibeio_http::codec::{Frame, FrameDecoder, CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE};
+use zincio_http::codec::{Frame, FrameDecoder, CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE};
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);

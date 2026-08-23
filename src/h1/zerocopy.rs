@@ -74,7 +74,7 @@ impl<Io> HttpProtocol for Http1Zerocopy<Io>
 where
     for<'a> Io: tokio::io::AsyncRead
         + tokio::io::AsyncWrite
-        + vibeio::io::AsInnerRawHandle<'a>
+        + zincio::io::AsInnerRawHandle<'a>
         + Unpin
         + 'static,
 {
@@ -102,7 +102,7 @@ where
                 use std::os::fd::BorrowedFd;
 
                 let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-                let _ = vibeio::io::sendfile_exact(&fd, io, len).await?;
+                let _ = zincio::io::sendfile_exact(&fd, io, len).await?;
                 Ok(())
             }),
         )

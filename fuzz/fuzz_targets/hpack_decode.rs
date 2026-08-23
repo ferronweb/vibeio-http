@@ -9,7 +9,7 @@
 //! asserts the decoder returns a `Result` instead of unwinding.
 
 use libfuzzer_sys::fuzz_target;
-use vibeio_http::hpack::Decoder;
+use zincio_http::hpack::Decoder;
 
 fuzz_target!(|data: &[u8]| {
     let mut decoder = Decoder::new(4096);

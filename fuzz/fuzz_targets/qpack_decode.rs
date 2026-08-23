@@ -13,7 +13,7 @@
 //! exercised too.
 
 use libfuzzer_sys::fuzz_target;
-use vibeio_http::qpack::Decoder;
+use zincio_http::qpack::Decoder;
 
 fuzz_target!(|data: &[u8]| {
     let mut decoder = Decoder::new(16384, 100);

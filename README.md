@@ -1,8 +1,8 @@
-# vibeio-http
+# zincio-http
 
-High-performance HTTP server primitives for the `vibeio` runtime.
+High-performance HTTP server primitives for the `zincio` runtime.
 
-`vibeio-http` provides HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 connection
+`zincio-http` provides HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 connection
 handlers behind a shared `HttpProtocol` trait. Each handler receives an
 `http::Request<Incoming>` and returns an `http::Response<B>`, where
 `B: http_body::Body<Data = bytes::Bytes>`.
@@ -22,7 +22,7 @@ handlers behind a shared `HttpProtocol` trait. Each handler receives an
 
 ```toml
 [dependencies]
-vibeio-http = "0.4"
+zincio-http = "0.4"
 ```
 
 By default, this crate enables: `h1`, `h1-zerocopy`, and `h2`.
@@ -35,13 +35,13 @@ By default, this crate enables: `h1`, `h1-zerocopy`, and `h2`.
 | `h1-zerocopy` | Linux / FreeBSD zero-copy HTTP/1.x response sending (`splice`-based)     |
 | `h2`          | HTTP/2 connection handler (in-house)                                     |
 | `h3`          | HTTP/3 connection handler (native RFC 9114 implementation)               |
-| `h3-quinn`    | QUIC transport adapter for `h3` (`vibeio_http::quinn`, built on `quinn`) |
+| `h3-quinn`    | QUIC transport adapter for `h3` (`zincio_http::quinn`, built on `quinn`) |
 
 For a smaller build, disable default features and opt in explicitly:
 
 ```toml
 [dependencies]
-vibeio-http = { version = "0.4", default-features = false, features = ["h1"] }
+zincio-http = { version = "0.4", default-features = false, features = ["h1"] }
 ```
 
 ## Quickstart (HTTP/1.1)
@@ -50,9 +50,9 @@ vibeio-http = { version = "0.4", default-features = false, features = ["h1"] }
 use bytes::Bytes;
 use http::Response;
 use http_body_util::Full;
-use vibeio::net::TcpListener;
-use vibeio::RuntimeBuilder;
-use vibeio_http::{Http1, Http1Options, HttpProtocol};
+use zincio::net::TcpListener;
+use zincio::RuntimeBuilder;
+use zincio_http::{Http1, Http1Options, HttpProtocol};
 
 fn main() -> std::io::Result<()> {
     let runtime = RuntimeBuilder::new().enable_timer(true).build()?;
@@ -64,7 +64,7 @@ fn main() -> std::io::Result<()> {
             stream.set_nodelay(true)?;
             let stream = stream.into_poll()?;
 
-            vibeio::spawn(async move {
+            zincio::spawn(async move {
                 if let Err(e) = Http1::new(stream, Http1Options::default())
                     .handle(|_request| async move {
                         Ok::<_, std::convert::Infallible>(Response::new(Full::new(
@@ -93,7 +93,7 @@ Notes:
 ```rust
 use http::{header, HeaderMap, Response};
 use http_body_util::Empty;
-use vibeio_http::send_early_hints;
+use zincio_http::send_early_hints;
 
 let handler = |mut req| async move {
     let mut hints = HeaderMap::new();
@@ -164,7 +164,7 @@ cargo bench --features h3-quinn --bench h3_server
 - `Http1` / `Http1Options`
 - `Http2` / `Http2Options`
 - `Http3` / `Http3Options`
-- `vibeio_http::quinn::Connection`: QUIC transport adapter (with `h3-quinn`)
+- `zincio_http::quinn::Connection`: QUIC transport adapter (with `h3-quinn`)
 - `prepare_upgrade`, `OnUpgrade`, `Upgraded` (HTTP/1 upgrade flow)
 
 ## License

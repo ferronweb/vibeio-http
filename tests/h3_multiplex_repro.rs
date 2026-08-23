@@ -1,7 +1,7 @@
 //! Reproduction for: a large response (e.g. a `.mp4`) streamed on one stream
 //! starves other concurrent requests on the same HTTP/3 connection.
 //!
-//! We stand up the real `Http3` server (vibeio runtime) with a handler that,
+//! We stand up the real `Http3` server (zincio runtime) with a handler that,
 //! for `/large`, streams a multi-megabyte body in small delayed chunks (so the
 //! response stays in flight for several seconds, like a big download), and for
 //! `/small` returns a tiny body immediately. A single H3 client connection then
@@ -24,8 +24,8 @@ use http_body_util::{BodyExt, Full, StreamBody};
 use quinn::Endpoint;
 use std::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use vibeio::RuntimeBuilder;
-use vibeio_http::{
+use zincio::RuntimeBuilder;
+use zincio_http::{
     quinn::Connection as QuinnConnection, Http3, Http3Options, HttpProtocol, Incoming,
 };
 
@@ -93,7 +93,7 @@ where
         let rt = RuntimeBuilder::new()
             .enable_timer(true)
             .build()
-            .expect("vibeio runtime");
+            .expect("zincio runtime");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             rt.block_on(async move {
                 Http3::new(QuinnConnection::new(server_conn), options)

@@ -375,7 +375,7 @@ where
             let timeout = self.opts.idle_timeout;
             let idle_unfuse = std::pin::pin!(async move {
                 if let Some(d) = timeout {
-                    vibeio::time::sleep(d).await;
+                    zincio::time::sleep(d).await;
                 } else {
                     futures_util::future::pending::<()>().await;
                 }
@@ -446,7 +446,7 @@ where
         let mut magic = [0u8; CLIENT_PREFACE.len()];
         match self.preface_timeout {
             Some(timeout) => {
-                match vibeio::time::timeout(
+                match zincio::time::timeout(
                     timeout,
                     tokio::io::AsyncReadExt::read_exact(&mut self.io, &mut magic),
                 )
@@ -602,7 +602,7 @@ impl Body for ConnBody {
 /// Converts any displayable error into an [`io::Error`] without requiring
 /// `Send + Sync` (the native connection layer only needs the message, not the
 /// source; this keeps the public trait free of `Send`/`Sync` so it works on
-/// runtimes such as `vibeio` that do not demand them).
+/// runtimes such as `zincio` that do not demand them).
 #[inline]
 fn e2io<E: std::fmt::Display>(e: E) -> std::io::Error {
     #[derive(Debug)]

@@ -8,7 +8,7 @@
 //!
 //! Consumers: `h2::hpack` (HPACK) and `h3::qpack` (QPACK).
 //!
-//! This module is also the public `vibeio_http::hpack` path: the HPACK
+//! This module is also the public `zincio_http::hpack` path: the HPACK
 //! codec surface (`Decoder`, `Encoder`, `Header`) is re-exported from
 //! `h2::hpack`.
 

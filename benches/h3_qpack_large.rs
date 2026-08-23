@@ -8,7 +8,7 @@
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use vibeio_http::qpack::Encoder;
+use zincio_http::qpack::Encoder;
 
 fn populated_encoder(n: usize) -> (Encoder, Vec<(Bytes, Bytes)>) {
     let mut encoder = Encoder::new(1 << 24, false);

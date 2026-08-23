@@ -1,6 +1,6 @@
 //! Interop test: drive a real `h2` client against the **native** HTTP/2 server
-//! over a real TCP socket. The server runs on the `vibeio` runtime (the native
-//! connection spawns per-stream tasks via `vibeio::spawn`); the `h2` client
+//! over a real TCP socket. The server runs on the `zincio` runtime (the native
+//! connection spawns per-stream tasks via `zincio::spawn`); the `h2` client
 //! runs on its own `tokio` runtime in a separate thread. This exercises the
 //! native frame codec, preface/settings exchange, HEADERS + DATA, and flow
 //! control end to end against a reference implementation, on the same transport
@@ -15,9 +15,9 @@ use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body::Body;
 use http_body_util::Full;
-use vibeio::net::TcpListener;
-use vibeio::RuntimeBuilder;
-use vibeio_http::{Http2, Http2Options, HttpProtocol, Incoming};
+use zincio::net::TcpListener;
+use zincio::RuntimeBuilder;
+use zincio_http::{Http2, Http2Options, HttpProtocol, Incoming};
 
 #[test]
 fn h2_client_talks_to_native_server() {
@@ -27,7 +27,7 @@ fn h2_client_talks_to_native_server() {
         let rt = RuntimeBuilder::new()
             .enable_timer(true)
             .build()
-            .expect("vibeio runtime");
+            .expect("zincio runtime");
         rt.block_on(async move {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let addr = listener.local_addr().expect("local addr");

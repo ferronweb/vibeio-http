@@ -80,7 +80,7 @@ impl<Io> Http1<Io>
 where
     for<'a> Io: tokio::io::AsyncRead
         + tokio::io::AsyncWrite
-        + vibeio::io::AsInnerRawHandle<'a>
+        + zincio::io::AsInnerRawHandle<'a>
         + Unpin
         + 'static,
 {
@@ -93,7 +93,7 @@ where
     /// Responses without that extension are sent normally.
     ///
     /// Only available on Linux and FreeBSD, and only when `Io`
-    /// implements [`vibeio::io::AsInnerRawHandle`].
+    /// implements [`zincio::io::AsInnerRawHandle`].
     #[inline]
     pub fn zerocopy(self) -> Http1Zerocopy<Io> {
         Http1Zerocopy { inner: self }
@@ -319,7 +319,7 @@ where
             let (mut request, body_tx, send_continue_body) = match if let Some(timeout) =
                 self.options.header_read_timeout
             {
-                vibeio::time::timeout(timeout, async {
+                zincio::time::timeout(timeout, async {
                     if let Some(token) = self.cancel_token.clone() {
                         token.run_until_cancelled(self.read_request()).await
                     } else {

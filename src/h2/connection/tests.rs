@@ -7,9 +7,9 @@ use crate::h2::stream::{BodyMsg, StreamMsg};
 /// Runs a connection against a scripted peer over an in-memory
 /// duplex stream and collects the server's reply bytes.
 ///
-/// The preface timeout needs the vibeio timer, which does not run
+/// The preface timeout needs the zincio timer, which does not run
 /// under a plain tokio test runtime (same pattern as the h1
-/// slowloris test), so a vibeio runtime is built per call.
+/// slowloris test), so a zincio runtime is built per call.
 #[inline]
 fn run_connection(
     preface: &[u8],
@@ -37,7 +37,7 @@ fn run_connection_with(
     opts: ConnectionOptions,
 ) -> Vec<u8> {
     let script: Vec<u8> = [preface, frames].concat();
-    vibeio::RuntimeBuilder::new()
+    zincio::RuntimeBuilder::new()
         .enable_timer(true)
         .build()
         .unwrap()
@@ -45,7 +45,7 @@ fn run_connection_with(
             let (client_end, server_end) = tokio::io::duplex(1 << 16);
             let script = script;
 
-            let server = vibeio::spawn(async move {
+            let server = zincio::spawn(async move {
                 let conn = Connection::new(server_end, preface_timeout);
                 let _ = conn
                     .handle(
@@ -61,7 +61,7 @@ fn run_connection_with(
             tokio::io::AsyncWriteExt::write_all(&mut client, &script)
                 .await
                 .expect("write script");
-            vibeio::time::sleep(Duration::from_millis(50)).await;
+            zincio::time::sleep(Duration::from_millis(50)).await;
 
             let mut reply = Vec::new();
             let mut buf = [0u8; 4096];
@@ -69,7 +69,7 @@ fn run_connection_with(
                 // The server answers in one burst and then waits for
                 // our EOF; give up after a short idle gap instead of
                 // blocking on the half-open duplex.
-                let read = vibeio::time::timeout(
+                let read = zincio::time::timeout(
                     Duration::from_millis(100),
                     tokio::io::AsyncReadExt::read(&mut client, &mut buf),
                 )
@@ -81,7 +81,7 @@ fn run_connection_with(
             }
             // Close our half so the server sees EOF and exits.
             drop(client);
-            vibeio::time::timeout(Duration::from_secs(2), server)
+            zincio::time::timeout(Duration::from_secs(2), server)
                 .await
                 .expect("server did not finish");
             reply
@@ -291,7 +291,7 @@ fn stream_window_update_overflow_is_stream_error() {
 fn graceful_shutdown_queues_goaway() {
     // Cancelling the shutdown token sends GOAWAY (NO_ERROR) and the
     // connection drains in-flight streams before the final GOAWAY.
-    vibeio::RuntimeBuilder::new()
+    zincio::RuntimeBuilder::new()
         .enable_timer(true)
         .build()
         .unwrap()

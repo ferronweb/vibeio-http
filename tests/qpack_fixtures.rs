@@ -16,7 +16,7 @@ use std::{
 
 use bytes::Bytes;
 use serde_json::Value;
-use vibeio_http::qpack::{Decoder, Encoder};
+use zincio_http::qpack::{Decoder, Encoder};
 
 const STORIES_DIR: &str = "tests/fixtures/qpack/stories";
 

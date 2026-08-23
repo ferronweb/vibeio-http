@@ -9,7 +9,7 @@
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
-use vibeio_http::hpack::{Decoder, Encoder, Header};
+use zincio_http::hpack::{Decoder, Encoder, Header};
 
 fn sample_headers() -> Vec<Header> {
     vec![

@@ -1,6 +1,6 @@
 //! Transport-adapter correctness over a real `quinn` loopback connection.
 //!
-//! Drives the `h3-quinn` adapter (`vibeio_http::quinn::Connection`) end to
+//! Drives the `h3-quinn` adapter (`zincio_http::quinn::Connection`) end to
 //! end: open/accept unidirectional and bidirectional streams, bidirectional
 //! data flow, FIN, stream-id parity, `reset`/`stop_sending` propagation,
 //! handshake completion, and graceful shutdown (`CONNECTION_CLOSE` with an
@@ -21,12 +21,12 @@ use std::{
 };
 
 use quinn::{Endpoint, TransportConfig, VarInt};
-use vibeio_http::quinn::Connection as QuinnConnection;
-use vibeio_http::transport::{
+use zincio_http::quinn::Connection as QuinnConnection;
+use zincio_http::transport::{
     Accept, BidiStream, Connection as TransportConnection, OpenStreams, RecvStream, SendStream,
     UniStream,
 };
-use vibeio_http::TransportError;
+use zincio_http::TransportError;
 
 const H3_NO_ERROR: u64 = 0x0100;
 const H3_REQUEST_CANCELLED: u64 = 0x010c;

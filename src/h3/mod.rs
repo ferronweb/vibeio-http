@@ -704,9 +704,9 @@ where
             // it, bounded by the handshake timeout. Server-side QUIC
             // connections are already complete when handed over.
             if let Some(timeout) = options.handshake_timeout {
-                vibeio::time::timeout(timeout, async {
+                zincio::time::timeout(timeout, async {
                     while !conn.is_handshake_complete() {
-                        vibeio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        zincio::time::sleep(std::time::Duration::from_millis(1)).await;
                     }
                 })
                 .await
@@ -715,7 +715,7 @@ where
                 })?;
             } else {
                 while !conn.is_handshake_complete() {
-                    vibeio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    zincio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
             }
 
@@ -741,8 +741,8 @@ where
             if let Some(token) = cancel_token.as_ref() {
                 cancel_fut = Some(Box::pin(token.cancelled()));
             }
-            let mut accept_sleep: Option<vibeio::time::Sleep> = None;
-            let mut shutdown_sleep: Option<vibeio::time::Sleep> = None;
+            let mut accept_sleep: Option<zincio::time::Sleep> = None;
+            let mut shutdown_sleep: Option<zincio::time::Sleep> = None;
             // Once graceful shutdown has drained every in-flight request we
             // must not issue `CONNECTION_CLOSE` immediately: quinn's
             // `close()` sends exactly one frame and then stops transmitting,
@@ -750,7 +750,7 @@ where
             // scheduler. A short grace window lets the background transmit
             // flush those bytes so the peer observes the response, not the
             // close.
-            let mut drain_grace: Option<vibeio::time::Sleep> = None;
+            let mut drain_grace: Option<zincio::time::Sleep> = None;
             let mut shutdown = false;
             let mut control_dead = false;
             // When set, the connection is being torn down by a protocol error
@@ -791,7 +791,7 @@ where
                         timeout_fired = true;
                     }
                 } else if let Some(accept_timeout) = options.accept_timeout {
-                    accept_sleep = Some(vibeio::time::sleep(accept_timeout));
+                    accept_sleep = Some(zincio::time::sleep(accept_timeout));
                     continue;
                 }
 
@@ -908,11 +908,11 @@ where
                             }
                         } else {
                             drain_grace =
-                                Some(vibeio::time::sleep(std::time::Duration::from_millis(50)));
+                                Some(zincio::time::sleep(std::time::Duration::from_millis(50)));
                         }
                     } else if shutdown_sleep.is_none() {
                         shutdown_sleep =
-                            Some(vibeio::time::sleep(std::time::Duration::from_millis(10)));
+                            Some(zincio::time::sleep(std::time::Duration::from_millis(10)));
                     }
                 }
 
@@ -949,7 +949,7 @@ where
                                 let date_cache = date_cache.clone();
                                 let shared = shared.clone();
                                 let conn_state_for_task = conn_state.clone();
-                                vibeio::spawn(async move {
+                                zincio::spawn(async move {
                                     let _end = end_tx;
                                     handle_request(
                                         request_stream,

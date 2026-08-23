@@ -1,6 +1,6 @@
-# `vibeio-http` change log
+# `zincio-http` change log
 
-## `vibeio-http` UNRELEASED
+## `zincio-http` UNRELEASED
 
 **Not yet released**
 
@@ -11,6 +11,7 @@
 - Per-stream client's `WINDOW_UPDATE` frame now drains pending data for one stream instead of all streams.
 - Performed several HTTP/3 server logic performance optimizations
 - Reduced memory allocations across HTTP/2 and HTTP/3.
+- Renamed the project from `vibeio-http` to `zincio-http`.
 - Improved HTTP/2 flow-control fairness: added deficit round-robin (DRR) for connection-level `WINDOW_UPDATE` to prevent a single large response from hogging the connection window; changed `complete_blocks` from a simple `Vec` to `VecDeque` for FIFO processing of pipelined `HEADERS` frames.
 
 ## `vibeio-http` 0.4.1
