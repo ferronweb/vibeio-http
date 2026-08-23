@@ -1,8 +1,8 @@
 # `zincio-http` change log
 
-## `zincio-http` UNRELEASED
+## `zincio-http` 0.4.2
 
-**Not yet released**
+**Released in August 23, 2026**
 
 - Fixed custom server max frame size setting incorrectly applied into peer defaults (causing frame size mismatch errors for HTTP/2 clients using libnghttp2).
 - Fixed `curl: (18) HTTP/3 stream 0 reset by server (error 0x0 unknown)` on `curl` for HTTP/3. ([GitHub issue](https://github.com/ferronweb/ferron/issues/887))
