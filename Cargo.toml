@@ -1,6 +1,6 @@
 [package]
 name = "zincio-http"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 authors = ["Dorian Niemiec <dorian@ferron.sh>"]
 description = "High-performance HTTP server primitives for the `zincio` runtime"
@@ -50,6 +50,7 @@ h3-quinn = "0.0.10"
 serde_json = "1"
 criterion = "0.8"
 rcgen = "0.14"
+quinn = "0.11"
 
 [[bench]]
 name = "h2_hpack"
