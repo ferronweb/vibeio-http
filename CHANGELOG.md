@@ -1,5 +1,11 @@
 # `zincio-http` change log
 
+## `zincio-http` UNRELEASED
+
+**Not yet released**
+
+- Disabled default `quinn` Cargo features when using HTTP/3.
+
 ## `zincio-http` 0.4.2
 
 **Released in August 23, 2026**
