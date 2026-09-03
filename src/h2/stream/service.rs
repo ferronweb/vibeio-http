@@ -45,16 +45,20 @@ pin_project! {
             #[pin]
             early_hints_rx: EarlyHintsReceiver,
             response_done: bool,
+            headers: Option<http::response::Parts>,
             body: Option<ResB>,
             send_continue: bool,
             send_continue_body: Option<Arc<AtomicBool>>,
             continue_sent: bool,
             early_hints_open: bool,
+            extended_connect: bool,
         },
         Body {
+            headers: Option<http::response::Parts>,
             #[pin]
             body: ResB,
             body_end: bool,
+            first_frame: Option<http_body::Frame<Bytes>>,
         },
     }
 }
@@ -70,6 +74,7 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
         early_hints_rx: EarlyHintsReceiver,
         send_continue: bool,
         send_continue_body: Option<Arc<AtomicBool>>,
+        extended_connect: bool,
     ) -> Self {
         Self {
             msg_tx,
@@ -82,11 +87,13 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
                 response_fut,
                 early_hints_rx,
                 response_done: false,
+                headers: None,
                 body: None,
                 send_continue,
                 send_continue_body,
                 continue_sent: false,
                 early_hints_open: true,
+                extended_connect,
             },
         }
     }
@@ -147,11 +154,13 @@ where
                     response_fut,
                     early_hints_rx,
                     response_done,
+                    headers,
                     body,
                     send_continue,
                     send_continue_body,
                     continue_sent,
                     early_hints_open,
+                    extended_connect,
                 } => {
                     match Self::poll_service(
                         this.msg_tx,
@@ -161,29 +170,41 @@ where
                         response_fut,
                         early_hints_rx,
                         response_done,
+                        headers,
                         body,
                         send_continue,
                         send_continue_body,
                         continue_sent,
                         early_hints_open,
+                        *extended_connect,
                         cx,
                     ) {
                         ServicePoll::Done => {}
                         ServicePoll::Pending => return Poll::Pending,
                         ServicePoll::Body(body) => {
+                            let headers = headers.take();
                             this.state.set(StreamDriverState::Body {
+                                headers,
                                 body,
                                 body_end: false,
+                                first_frame: None,
                             });
                             continue;
                         }
                     }
                 }
-                StreamDriverProj::Body { body, body_end } => {
+                StreamDriverProj::Body {
+                    headers,
+                    body,
+                    body_end,
+                    first_frame,
+                } => {
                     match Self::poll_body(
                         this.msg_tx,
                         this.msg_tx_fut.as_mut(),
                         this.reset_rx,
+                        headers,
+                        first_frame,
                         body,
                         body_end,
                         cx,
@@ -222,11 +243,13 @@ where
         mut response_fut: Pin<&mut Fut>,
         mut early_hints_rx: Pin<&mut EarlyHintsReceiver>,
         response_done: &mut bool,
+        headers: &mut Option<http::response::Parts>,
         body: &mut Option<ResB>,
         send_continue: &bool,
         send_continue_body: &Option<Arc<AtomicBool>>,
         continue_sent: &mut bool,
         early_hints_open: &mut bool,
+        extended_connect: bool,
         cx: &mut Context<'_>,
     ) -> ServicePoll<ResB> {
         loop {
@@ -265,18 +288,22 @@ where
                 let response_is_end_stream = response.body().is_end_stream();
                 let (parts, response_body) = response.into_parts();
 
-                match Self::send(
-                    msg_tx,
-                    msg_tx_fut.as_mut(),
-                    wake_tx,
-                    StreamMsg::Headers {
-                        parts,
-                        end_stream: response_is_end_stream,
-                    },
-                    cx,
-                ) {
-                    Poll::Ready(()) => {}
-                    Poll::Pending => return ServicePoll::Pending,
+                if response_is_end_stream || extended_connect {
+                    match Self::send(
+                        msg_tx,
+                        msg_tx_fut.as_mut(),
+                        wake_tx,
+                        StreamMsg::Headers {
+                            parts,
+                            end_stream: response_is_end_stream,
+                        },
+                        cx,
+                    ) {
+                        Poll::Ready(()) => {}
+                        Poll::Pending => return ServicePoll::Pending,
+                    }
+                } else {
+                    *headers = Some(parts);
                 }
                 *body = Some(response_body);
                 *response_done = true;
@@ -411,6 +438,8 @@ where
         msg_tx: &mut kanal::AsyncSender<StreamMsg>,
         mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
         reset_rx: &mut kanal::AsyncReceiver<u32>,
+        headers: &mut Option<http::response::Parts>,
+        first_frame: &mut Option<http_body::Frame<Bytes>>,
         mut body: Pin<&mut ResB>,
         end: &mut bool,
         cx: &mut Context<'_>,
@@ -441,17 +470,19 @@ where
                 Poll::Ready(_) => return Poll::Ready(()),
                 Poll::Pending => {}
             }
-            match body.as_mut().poll_frame(cx) {
-                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
-                    Ok(data) => {
-                        let end_stream = body.is_end_stream();
-
-                        if data.is_empty() && !end_stream {
-                            // Reduce unnecessary data transfers
-                            continue;
-                        }
-
-                        let msg = StreamMsg::Data { data, end_stream };
+            let poll_frame = if let Some(frame) = first_frame.take() {
+                Poll::Ready(Some(Ok(frame)))
+            } else {
+                body.as_mut().poll_frame(cx)
+            };
+            match poll_frame {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Some(headers) = headers.take() {
+                        *first_frame = Some(frame);
+                        let msg = StreamMsg::Headers {
+                            parts: headers,
+                            end_stream: false,
+                        };
 
                         let msg_tx_fut2 = msg_tx.send(msg);
                         // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
@@ -464,10 +495,22 @@ where
                         // SAFETY: Pin is re-borrowed here
                         let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
                         *uckm = Some(msg_tx_fut2);
+
+                        continue;
                     }
-                    Err(frame) => match frame.into_trailers() {
-                        Ok(trailers) => {
-                            let msg_tx_fut2 = msg_tx.send(StreamMsg::Trailers { trailers });
+
+                    match frame.into_data() {
+                        Ok(data) => {
+                            let end_stream = body.is_end_stream();
+
+                            if data.is_empty() && !end_stream {
+                                // Reduce unnecessary data transfers
+                                continue;
+                            }
+
+                            let msg = StreamMsg::Data { data, end_stream };
+
+                            let msg_tx_fut2 = msg_tx.send(msg);
                             // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
                             let msg_tx_fut2 = unsafe {
                                 std::mem::transmute::<
@@ -478,11 +521,26 @@ where
                             // SAFETY: Pin is re-borrowed here
                             let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
                             *uckm = Some(msg_tx_fut2);
-                            *end = true;
                         }
-                        Err(_) => return Poll::Ready(()),
-                    },
-                },
+                        Err(frame) => match frame.into_trailers() {
+                            Ok(trailers) => {
+                                let msg_tx_fut2 = msg_tx.send(StreamMsg::Trailers { trailers });
+                                // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+                                let msg_tx_fut2 = unsafe {
+                                    std::mem::transmute::<
+                                        kanal::SendFuture<'_, StreamMsg>,
+                                        kanal::SendFuture<'static, StreamMsg>,
+                                    >(msg_tx_fut2)
+                                };
+                                // SAFETY: Pin is re-borrowed here
+                                let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                                *uckm = Some(msg_tx_fut2);
+                                *end = true;
+                            }
+                            Err(_) => return Poll::Ready(()),
+                        },
+                    }
+                }
                 Poll::Ready(Some(Err(_))) => {
                     let msg = StreamMsg::Reset {
                         error_code: crate::h2::error::Reason::InternalError.code(),
@@ -525,5 +583,3 @@ where
         }
     }
 }
-
-// Debug-friendly message types for tests that decode wire replies.
