@@ -434,6 +434,7 @@ where
     /// Pipes the response body to the connection: DATA frames, then an
     /// END_STREAM (empty DATA when the body yields nothing more, or a
     /// HEADERS block carrying trailers).
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     fn poll_body(
         msg_tx: &mut kanal::AsyncSender<StreamMsg>,
