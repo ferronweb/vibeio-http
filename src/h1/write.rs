@@ -1,5 +1,6 @@
 use std::io::IoSlice;
 
+use futures_util::FutureExt;
 use http::{header, HeaderMap, HeaderValue, Response, Version};
 use http_body::Body;
 use http_body_util::BodyExt;
@@ -136,11 +137,11 @@ where
 
         let mut trailers_written = false;
         let mut first_chunk = true;
-        while let Some(chunk) = tokio::select! {
-            biased; // Biased, to not flush the buffer before attempting to read the next chunk
+        while let Some(chunk) = futures_util::select_biased! {
+            // Biased, to not flush the buffer before attempting to read the next chunk
 
-            chunk = body.frame() => chunk,
-            _ = async {
+            chunk = body.frame().fuse() => chunk,
+            _ = (async {
                 if !first_chunk {
                     let _ = unsafe {
                         self.write_buf
@@ -149,8 +150,8 @@ where
                     };
                     let _ = self.io.flush().await;
                 }
-                std::future::pending().await
-            } => unreachable!()
+                std::future::pending::<()>().await
+            }).fuse() => unreachable!()
         } {
             first_chunk = false;
             let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
