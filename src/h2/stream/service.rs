@@ -203,6 +203,7 @@ where
                         this.msg_tx,
                         this.msg_tx_fut.as_mut(),
                         this.reset_rx,
+                        this.wake_tx,
                         headers,
                         first_frame,
                         body,
@@ -438,12 +439,14 @@ where
         msg_tx: &mut kanal::AsyncSender<StreamMsg>,
         mut msg_tx_fut: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
         reset_rx: &mut kanal::AsyncReceiver<u32>,
+        wake_tx: &kanal::AsyncSender<()>,
         headers: &mut Option<http::response::Parts>,
         first_frame: &mut Option<http_body::Frame<Bytes>>,
         mut body: Pin<&mut ResB>,
         end: &mut bool,
         cx: &mut Context<'_>,
     ) -> Poll<()> {
+        let mut flush = false;
         loop {
             if let Some(msg_tx_fut2) = msg_tx_fut.as_mut().as_pin_mut() {
                 match msg_tx_fut2.poll(cx) {
@@ -451,6 +454,9 @@ where
                         // SAFETY: Pin is re-borrowed here
                         let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
                         uckm.take();
+                        if !*end {
+                            flush = true;
+                        }
                     }
                     Poll::Ready(Err(_)) => {
                         // SAFETY: Pin is re-borrowed here
@@ -458,7 +464,12 @@ where
                         uckm.take();
                         return Poll::Ready(());
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        if flush {
+                            let _ = wake_tx.try_send(());
+                        }
+                        return Poll::Pending;
+                    }
                 }
             }
 
@@ -578,7 +589,12 @@ where
                     *uckm = Some(msg_tx_fut2);
                     *end = true;
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if flush {
+                        let _ = wake_tx.try_send(());
+                    }
+                    return Poll::Pending;
+                }
             }
         }
     }
