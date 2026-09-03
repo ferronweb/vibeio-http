@@ -1,5 +1,11 @@
 # `zincio-http` change log
 
+## `zincio-http` UNRELEASED
+
+**Not yet released**
+
+- Fixed HTTP/1.1 buffering instead of streaming response bodies ([GitHub issue](https://github.com/ferronweb/ferron/issues/899))
+
 ## `zincio-http` 0.4.3
 
 **Released in August 26, 2026**

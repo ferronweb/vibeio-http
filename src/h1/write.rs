@@ -135,7 +135,24 @@ where
         }
 
         let mut trailers_written = false;
-        while let Some(chunk) = body.frame().await {
+        let mut first_chunk = true;
+        while let Some(chunk) = tokio::select! {
+            biased; // Biased, to not flush the buffer before attempting to read the next chunk
+
+            chunk = body.frame() => chunk,
+            _ = async {
+                if !first_chunk {
+                    let _ = unsafe {
+                        self.write_buf
+                            .flush(&mut self.io, self.options.enable_vectored_write)
+                            .await
+                    };
+                    let _ = self.io.flush().await;
+                }
+                std::future::pending().await
+            } => unreachable!()
+        } {
+            first_chunk = false;
             let chunk = chunk.map_err(|e| std::io::Error::other(e.to_string()))?;
             match chunk.into_data() {
                 Ok(data) => {
