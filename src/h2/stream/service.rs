@@ -571,6 +571,28 @@ where
                     *end = true;
                 }
                 Poll::Ready(None) => {
+                    if let Some(headers) = headers.take() {
+                        let msg = StreamMsg::Headers {
+                            parts: headers,
+                            end_stream: true,
+                        };
+
+                        let msg_tx_fut2 = msg_tx.send(msg);
+                        // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
+                        let msg_tx_fut2 = unsafe {
+                            std::mem::transmute::<
+                                kanal::SendFuture<'_, StreamMsg>,
+                                kanal::SendFuture<'static, StreamMsg>,
+                            >(msg_tx_fut2)
+                        };
+                        // SAFETY: Pin is re-borrowed here
+                        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
+                        *uckm = Some(msg_tx_fut2);
+                        *end = true;
+
+                        continue;
+                    }
+
                     // The body has no more frames: close with an empty
                     // END_STREAM DATA frame.
                     let msg = StreamMsg::Data {

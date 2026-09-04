@@ -1,5 +1,11 @@
 # `zincio-http` change log
 
+## `zincio-http` 0.4.5
+
+**Released in September 4, 2026**
+
+- Fixed HTTP/2 errors while responses with empty body are sent.
+
 ## `zincio-http` 0.4.4
 
 **Released in September 3, 2026**
